@@ -204,7 +204,7 @@ function pathMatcher(spec) {
 
 const BOOL_FLAGS = new Set(['include-tests', 'force', 'no-plan', 'replan', 'now', 'all',
   'latest', 'stale', 'no-stale', 'reported', 'unreported', 'primary-only', 'new',
-  'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline']);
+  'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules']);
 const MULTI_FLAGS = new Set(['include', 'exclude', 'only', 'force-path', 'path', 'severity',
   'category', 'triage', 'sort', 'label']);
 
@@ -306,6 +306,9 @@ function db() {
   if (!scanCols.includes('kind')) DB.exec("ALTER TABLE scans ADD COLUMN kind TEXT NOT NULL DEFAULT 'scan'");
   if (!scanCols.includes('cal_id')) DB.exec('ALTER TABLE scans ADD COLUMN cal_id INTEGER');
   if (!DB.prepare('PRAGMA table_info(cal_findings)').all().some((c) => c.name === 'end_line')) DB.exec('ALTER TABLE cal_findings ADD COLUMN end_line INTEGER');
+  const calCols = DB.prepare('PRAGMA table_info(calibrations)').all().map((c) => c.name);
+  if (!calCols.includes('init_id')) DB.exec('ALTER TABLE calibrations ADD COLUMN init_id INTEGER');
+  if (!calCols.includes('single')) DB.exec('ALTER TABLE calibrations ADD COLUMN single INTEGER NOT NULL DEFAULT 0');
   if (!DB.prepare('PRAGMA table_info(findings)').all().some((c) => c.name === 'gone_scan')) {
     DB.exec('ALTER TABLE findings ADD COLUMN gone_scan INTEGER');
   }
@@ -605,9 +608,20 @@ function cliPrefix() {
   return `${h}node ${CLI} -C ${repoRoot()}`;
 }
 
+/** Workflow agent() model alias for a model id (claude-sonnet-5-5 → sonnet); null = inherit. */
+function modelAlias(id) {
+  if (!id) return null;
+  const hit = Object.entries(MODEL_IDS).find(([, v]) => v === id);
+  // a current model maps to its alias; any other id is passed through unchanged so the agent runs
+  // exactly the model that was calibrated and priced (never a different version of the family)
+  return hit ? hit[0] : String(id);
+}
+
 function nextLine(scan, plan) {
   const workers = Math.min(pendingChunks(scan.id), MAX_WORKERS_PER_RUN);
   const o = { cli: CLI, root: repoRoot(), scanId: scan.id, plan: !!plan, workers };
+  const alias = modelAlias(JSON.parse(getScan(scan.id).options_json).model);
+  if (alias) o.model = alias;
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
   return 'NEXT ' + JSON.stringify(o);
 }
@@ -622,7 +636,8 @@ function buildOpts(f, base = {}) {
   if (f.only) o.only = f.only;
   applyLimitFlags(o, f);
   if (f['chunk-kb']) { o.chunkKb = Number(f['chunk-kb']); o.chunkSource = 'flag'; }
-  if (f.model) o.model = f.model;
+  if (f.model) o.model = modelId(f.model);
+  else if (!o.model && cfgGet('default_model')) o.model = cfgGet('default_model');
   if (!f['chunk-kb'] && (o.chunkSource !== 'flag' || f.model)) {
     const cal = o.model ? cfgGet(`chunk_kb:${o.model}`) : null;
     o.chunkKb = cal ? Number(cal) : DEFAULT_CHUNK_KB;
@@ -678,7 +693,9 @@ function createScan(f, base, profile) {
   out(`to review: ${pk.files} files, ${kb(pk.bytes)} in ${pk.chunks} chunks${pre}; unchanged (skipped): ${st.unchanged}`);
   out(`excluded: ${excl || 'none'}`);
   out(`chunk size: ${opts.chunkKb}KB (${opts.chunkSource || 'default'})`);
-  if (opts.model && !cfgGet(`chunk_kb:${opts.model}`) && opts.chunkSource !== 'flag') {
+  if (!opts.model && opts.chunkSource !== 'flag') {
+    out('INIT this repo has no reviewer model chosen — run `init start` to compare models and pick one (reviewers inherit the session model meanwhile)');
+  } else if (opts.model && !cfgGet(`chunk_kb:${opts.model}`) && opts.chunkSource !== 'flag') {
     out(`CALIBRATE model ${opts.model} has no chunk-size calibration for this repo — run \`calibrate start --model ${opts.model}\` first`);
   }
   if (unk) out(`unknown extensions (excluded; widen with --include): ${unk}`);
@@ -701,6 +718,10 @@ function cmdRestart(a) {
   if (prev && ['active', 'stopped'].includes(prev.status)) setScanStatus(prev.id, 'superseded');
   const base = prev ? JSON.parse(prev.options_json) : {};
   delete base.force; delete base.forcePath;
+  if (!a.f.model && cfgGet('default_model') && base.model !== cfgGet('default_model')) {
+    base.model = cfgGet('default_model'); // picked at init after the previous scan ran
+    if (base.chunkSource !== 'flag') delete base.chunkKb;
+  }
   // a new scope replaces the old one as a whole; --reset-scope clears it
   if (a.f.only || a.f.include || a.f.exclude || a.f['reset-scope']) { delete base.only; delete base.include; delete base.exclude; }
   const profile = (a.f.profile || a.f['prompt-file']) ? profileFromFlags(a.f)
@@ -909,6 +930,11 @@ function cmdClaim(a) {
   out('== REVIEW PROFILE ==');
   out(prof ? prof.text.trim() : '(default)');
   if (unit && unit.hint) { out('== SUBSYSTEM FOCUS =='); out(unit.hint); }
+  if (a.f.rules) {
+    // the default agent (fallback when the plugin agent type is not loaded) has no reviewer instructions
+    const def = path.join(PLUGIN_ROOT, 'agents', 'reviewer.md');
+    if (fs.existsSync(def)) { out('== REVIEWER INSTRUCTIONS =='); out(fs.readFileSync(def, 'utf8').replace(/^---[\s\S]*?---\n/, '').trim()); }
+  }
   if (a.f.inline) {
     const submitHelp = () => {
       out('== SUBMIT (once, after reviewing everything) ==');
@@ -1148,7 +1174,8 @@ function cmdSubmit(a) {
 // last size before the drop.
 
 function calSample(commit, opts, sampleKb) {
-  const tree = lsTree(commit);
+  const only = pathMatcher(opts.only);
+  const tree = lsTree(commit).filter((t) => !only || only(t.path));
   const code = tree.filter((t) => classifyPath(t.path, t.mode, t.size, opts).code && t.size <= sampleKb * 1024 / 2);
   const ling = linguistFlags(commit, code.map((t) => t.path));
   const files = code.filter((t) => !ling.has(t.path));
@@ -1254,26 +1281,184 @@ function calDecide(score, medium, maxKb) {
 
 function calNext(cal) {
   const { score } = calScores(cal);
+  // a sample under two medium chunks cannot tell sizes apart: one round, at the medium size
+  if (cal.single) return score.has(cal.medium_kb) ? { done: cal.medium_kb, why: 'sample too small to compare sizes; one round at the default' } : { next: cal.medium_kb };
   return calDecide(score, cal.medium_kb, Math.floor(cal.sample_bytes / 1024));
 }
 
 function calLine(cal, round) {
   const o = { cli: CLI, root: repoRoot(), calId: cal.id, scanId: round.scanId, workers: Math.min(round.workers, MAX_WORKERS_PER_RUN) };
+  if (modelAlias(cal.model)) o.model = modelAlias(cal.model);
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
   return 'NEXT ' + JSON.stringify(o);
+}
+
+// ---------------------------------------------------------------- repo init
+//
+// Initialization picks the reviewer model for a repo: every candidate model is calibrated on the same
+// sample, then compared on quality (share of all distinct issues found by any model, severity
+// weighted) and price (dollars per 100KB reviewed at its own best chunk size). The user picks a
+// model; scans then use it with that model's chunk size.
+
+const MODEL_IDS = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5', fable: 'claude-fable-5-2' };
+const INIT_DEFAULT_MODELS = 'opus,sonnet,haiku,fable';
+function modelId(x) { return MODEL_IDS[x] || x; }
+
+const sampleLinesCache = new Map();
+function sampleLines(cal) {
+  if (!sampleLinesCache.has(cal.id)) {
+    let n = 0;
+    for (const t of JSON.parse(cal.sample_json)) n += (catBlob(t.sha).match(/\n/g) || []).length;
+    sampleLinesCache.set(cal.id, n);
+  }
+  return sampleLinesCache.get(cal.id);
+}
+
+function initCals(initId) {
+  return db().prepare('SELECT * FROM calibrations WHERE init_id=? ORDER BY id').all(initId);
+}
+
+/** Cross-model comparison for one init: rows sorted by quality, plus a recommendation. */
+function initCompare(initId, truth) {
+  const d = db();
+  const cals = initCals(initId);
+  const rounds = [];
+  for (const c of cals) {
+    for (const r of d.prepare("SELECT id, options_json, status FROM scans WHERE kind='cal' AND cal_id=? AND status='done' ORDER BY id").all(c.id)) {
+      rounds.push({ cal: c, scanId: r.id, size: JSON.parse(r.options_json).chunkKb });
+    }
+  }
+  const all = [];
+  for (const r of rounds) for (const f of d.prepare('SELECT * FROM cal_findings WHERE scan_id=?').all(r.scanId)) all.push({ ...f, round: r });
+  // distinct issues across every model and size
+  const parent = all.map((_, i) => i);
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+    if (sameBug(all[i], all[j]) || (all[i].snippet && all[i].snippet === all[j].snippet && all[i].path === all[j].path && all[i].category === all[j].category)) parent[find(j)] = find(i);
+  }
+  const weight = new Map();
+  all.forEach((f, i) => { const c = find(i); weight.set(c, Math.max(weight.get(c) || 0, SEV_RANK[f.severity] || 1)); });
+  const totalW = [...weight.values()].reduce((x, y) => x + y, 0) || 1;
+  const rows = cals.map((c) => {
+    const mine = rounds.filter((r) => r.cal.id === c.id);
+    // a calibration that did not finish is still scored at its best completed round
+    let size = c.result_kb || null;
+    if (!size && mine.length) {
+      const sc = calScores(c).score;
+      size = [...sc.entries()].sort((x, y) => y[1] - x[1])[0][0];
+    }
+    const at = mine.filter((r) => r.size === size);
+    const atIds = new Set(at.map((r) => r.scanId));
+    const clusters = new Set(all.map((f, i) => (atIds.has(f.round.scanId) ? find(i) : null)).filter((x) => x !== null));
+    const quality = [...clusters].reduce((x, cl) => x + weight.get(cl), 0) / totalW;
+    const usdAt = at.reduce((x, r) => x + scanSpendUsd(getScan(r.scanId)), 0) / Math.max(1, at.length);
+    const usdAll = d.prepare("SELECT id FROM scans WHERE kind='cal' AND cal_id=?").all(c.id)
+      .reduce((x, r) => x + scanSpendUsd(getScan(r.id)), 0); // every round, failed ones included
+    // all-in: every token of every reviewer agent of the round (preamble, claims, re-reads, empty lanes)
+    const per100 = c.sample_bytes ? usdAt / (c.sample_bytes / 1024) * 100 : 0;
+    const lines = sampleLines(c);
+    const perKloc = lines ? usdAt / lines * 1000 : 0;
+    const row = { model: c.model, status: c.status, chunkKb: size, quality, usdPer100Kb: per100, usdPerKloc: perKloc, calibrationUsd: usdAll,
+      findings: all.filter((f) => atIds.has(f.round.scanId)).length };
+    if (truth) {
+      const ids = [...new Set(truth.map((t) => t.id))];
+      const fs_ = all.filter((f) => atIds.has(f.round.scanId));
+      row.recall = ids.filter((id) => fs_.some((f) => truth.some((t) => t.id === id && f.path === t.path && linesNear(f, { line: t.start, end_line: t.end }, 2)))).length / ids.length;
+    }
+    return row;
+  });
+  rows.sort((x, y) => y.quality - x.quality);
+  const done = rows.filter((r) => r.chunkKb);
+  const best = done.length ? done[0].quality : 0;
+  // cheapest model within 10% of the best quality
+  const rec = done.filter((r) => r.quality >= best * 0.9).sort((x, y) => x.usdPer100Kb - y.usdPer100Kb)[0] || null;
+  return { rows, rec, issues: weight.size };
+}
+
+function cmdInit(a) {
+  const sub = a.pos[0] || 'status';
+  const d = db();
+  if (sub === 'start') {
+    const models = listFlag(a.f.models || INIT_DEFAULT_MODELS).map(modelId);
+    const prof = profileFromFlags(a.f);
+    const commit = git(['rev-parse', 'HEAD']).trim();
+    const sampleKb = Number(a.f['sample-kb'] || CAL_SAMPLE_KB);
+    const medium = Number(a.f.medium || DEFAULT_CHUNK_KB);
+    const { pick, total } = calSample(commit, { includeTests: false, only: a.f.only }, sampleKb);
+    const single = total < 2 * medium * 1024 ? 1 : 0;
+    const initId = (d.prepare('SELECT MAX(init_id) m FROM calibrations').get().m || 0) + 1;
+    const sample = JSON.stringify(pick.map((t) => ({ path: t.path, sha: t.sha, mode: t.mode, size: t.size })));
+    const runs = [];
+    for (const model of models) {
+      d.prepare("UPDATE calibrations SET status='abandoned' WHERE model=? AND status='running'").run(model);
+      const r = d.prepare(`INSERT INTO calibrations(model,profile_name,commit_sha,sample_json,sample_bytes,medium_kb,status,init_id,single,created,updated)
+        VALUES(?,?,?,?,?,?,'running',?,?,?,?)`).run(model, prof.name, commit, sample, total, medium, initId, single, now(), now());
+      const cal = d.prepare('SELECT * FROM calibrations WHERE id=?').get(r.lastInsertRowid);
+      const round = calRound(cal, medium);
+      runs.push({ calId: cal.id, model: modelAlias(model), label: model, scanId: round.scanId, workers: round.workers });
+    }
+    const dirs = [...new Set(pick.map((t) => t.path.split('/').slice(0, -1).join('/') || '.'))];
+    out(`init ${initId}: ${models.length} model(s) [${models.join(', ')}] on one sample of ${pick.length} files, ${kb(total)} from ${dirs.slice(0, 4).join(', ')}${dirs.length > 4 ? ' …' : ''}`);
+    out(single ? `sample is under two ${medium}KB chunks: one round per model at ${medium}KB (no size search)` : `each model: ${medium}KB first, then smaller, then larger until quality drops`);
+    const o = { cli: CLI, root: repoRoot(), initId, runs };
+    if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
+    out('NEXT ' + JSON.stringify(o));
+    return;
+  }
+  const initId = Number(a.pos[1]) || d.prepare('SELECT MAX(init_id) m FROM calibrations').get().m;
+  if (sub === 'report') {
+    if (!initId) die('no init yet — run `init start`');
+    if (!initCals(initId).length) die(`no init ${initId}`);
+    const truth = a.f.truth ? JSON.parse(fs.readFileSync(a.f.truth, 'utf8')) : null;
+    const { rows, rec, issues } = initCompare(initId, truth);
+    const cal0 = initCals(initId)[0];
+    out(`init ${initId}: ${kb(cal0.sample_bytes)} / ${sampleLines(cal0)} lines sample, ${issues} distinct issues found across all models and sizes`);
+    out(['model', 'chunk', 'quality', '$/100KB', '$/1kLOC', 'findings', ...(truth ? ['recall'] : []), 'calibration $', 'status'].join('\t'));
+    for (const r of rows) {
+      out([r.model, r.chunkKb ? `${r.chunkKb}KB` : '-', r.quality.toFixed(2), r.usdPer100Kb.toFixed(2), r.usdPerKloc.toFixed(3), r.findings,
+        ...(truth ? [r.recall.toFixed(2)] : []), r.calibrationUsd.toFixed(2), r.status].join('\t'));
+    }
+    if (rec) out(`recommended: ${rec.model} (cheapest within 10% of the best quality) — \`init pick ${rec.model}\``);
+    out('quality = severity-weighted share of all distinct issues found by any model. Price = all tokens of every reviewer agent (preamble, coordination turns, re-reads, idle lanes) at the model\'s own chunk size, list price; a scan adds one planner agent and the session running it.');
+    return;
+  }
+  if (sub === 'pick') {
+    const model = modelId(a.pos[1] || '');
+    if (!a.pos[1]) die('usage: init pick <model>');
+    const cal = d.prepare("SELECT * FROM calibrations WHERE model=? AND status='done' ORDER BY id DESC LIMIT 1").get(model);
+    let size = cal ? cal.result_kb : null;
+    if (!size) {
+      // calibration did not finish: use the size the latest init scored it at (what the report showed)
+      const lastInit = d.prepare('SELECT MAX(init_id) m FROM calibrations WHERE model=?').get(model).m;
+      const row = lastInit ? initCompare(lastInit).rows.find((r) => r.model === model) : null;
+      size = row && row.chunkKb;
+    }
+    if (!size && !a.f.force) die(`${model} has no calibration in this repo — run \`init start --models ${modelAlias(model)}\` (or --force to use the default chunk size)`);
+    cfgSet('default_model', model);
+    cfgSet(`chunk_kb:${model}`, size || DEFAULT_CHUNK_KB);
+    out(`default reviewer model: ${model}, chunk size ${size || DEFAULT_CHUNK_KB}KB`);
+    return;
+  }
+  if (sub === 'status') {
+    const m = cfgGet('default_model');
+    out(m ? `default reviewer model: ${m}, chunk size ${cfgGet(`chunk_kb:${m}`) || DEFAULT_CHUNK_KB}KB` : 'not initialized — no default reviewer model (run `init start`)');
+    if (initId) for (const c of initCals(initId)) out(`init ${initId}: ${c.model} [${c.status}]${c.result_kb ? ` → ${c.result_kb}KB` : ''}`);
+    return;
+  }
+  die('usage: init start [--models opus,sonnet,haiku,fable] [--only g] [--sample-kb 200] | init report [id] [--truth f] | init pick <model> | init status');
 }
 
 function cmdCalibrate(a) {
   const sub = a.pos[0] || 'status';
   const d = db();
   if (sub === 'start') {
-    const model = a.f.model;
+    const model = a.f.model ? modelId(a.f.model) : null;
     if (!model) die('calibrate start needs --model <model id> (calibration is per model)');
     const prof = profileFromFlags(a.f);
     const commit = git(['rev-parse', 'HEAD']).trim();
     const sampleKb = Number(a.f['sample-kb'] || CAL_SAMPLE_KB);
     const medium = Number(a.f.medium || DEFAULT_CHUNK_KB);
-    const { pick, total } = calSample(commit, { includeTests: false }, sampleKb);
+    const { pick, total } = calSample(commit, { includeTests: false, only: a.f.only }, sampleKb);
     if (total < 2 * medium * 1024) {
       // fewer than two medium chunks of code: every size reviews it in one or two chunks, nothing to compare
       cfgSet(`chunk_kb:${model}`, medium);
@@ -1292,7 +1477,8 @@ function cmdCalibrate(a) {
     return;
   }
   if (sub === 'set') {
-    const [, model, val] = a.pos;
+    const [, rawModel, val] = a.pos;
+    const model = rawModel ? modelId(rawModel) : null;
     if (!model || !(Number(val) >= MIN_CHUNK_KB)) die(`usage: calibrate set <model> <kb>  (kb >= ${MIN_CHUNK_KB})`);
     cfgSet(`chunk_kb:${model}`, Number(val));
     out(`chunk_kb for ${model} = ${val}KB`);
@@ -1311,6 +1497,29 @@ function cmdCalibrate(a) {
     return;
   }
   if (!cal) die('no calibration — run `calibrate start --model <id>`');
+  if (sub === 'report') {
+    // per round: chunk size, work, distinct-issue score, dollars; with --truth, recall of known bugs
+    const truth = a.f.truth ? JSON.parse(fs.readFileSync(a.f.truth, 'utf8')) : null;
+    const { score, rounds } = calScores(cal);
+    out(`calibration #${cal.id} model=${cal.model} [${cal.status}]${cal.result_kb ? ` → ${cal.result_kb}KB` : ''}; sample ${kb(cal.sample_bytes)}`);
+    out(['size', 'chunks', 'findings', 'score', 'usd', ...(truth ? ['recall', 'extra', 'hit'] : [])].join('\t'));
+    for (const r of rounds) {
+      const sc = getScan(r.id);
+      const fs_ = d.prepare('SELECT * FROM cal_findings WHERE scan_id=?').all(r.id);
+      const chunks = d.prepare("SELECT COUNT(*) n FROM chunks WHERE scan_id=? AND state!='void'").get(r.id).n;
+      const row = [`${r.size}KB`, chunks, fs_.length, r.status === 'done' ? (score.get(r.size) ?? 0).toFixed(2) : r.status, scanSpendUsd(sc).toFixed(2)];
+      if (truth) {
+        // a known bug may span several ranges; it counts once
+        const ids = [...new Set(truth.map((t) => t.id))];
+        const hits = (f) => truth.filter((t) => f.path === t.path && linesNear(f, { line: t.start, end_line: t.end }, 2));
+        const hit = ids.filter((id) => fs_.some((f) => hits(f).some((t) => t.id === id)));
+        const extra = fs_.filter((f) => !hits(f).length).length;
+        row.push(`${hit.length}/${ids.length}`, extra, hit.join(','));
+      }
+      out(row.join('\t'));
+    }
+    return;
+  }
   if (sub === 'next') {
     if (cal.status !== 'running') { out(`DONE chunk_kb=${cal.result_kb} (${cal.status})`); return; }
     const last = d.prepare("SELECT * FROM scans WHERE kind='cal' AND cal_id=? ORDER BY id DESC LIMIT 1").get(cal.id);
@@ -1324,6 +1533,14 @@ function cmdCalibrate(a) {
       setScanStatus(last.id, 'failed');
     }
     const dec = calNext(cal);
+    // a size whose rounds keep failing (reviewers never ran) cannot be measured: give up, keep defaults
+    const failedAt = dec.next ? d.prepare("SELECT COUNT(*) n FROM scans WHERE kind='cal' AND cal_id=? AND status='failed' AND json_extract(options_json,'$.chunkKb')=?").get(cal.id, dec.next).n : 0;
+    if (failedAt >= 2) {
+      const why = `rounds at ${dec.next}KB failed ${failedAt} times — reviewers did not run`;
+      d.prepare("UPDATE calibrations SET status='failed', decision=?, updated=? WHERE id=?").run(why, now(), cal.id);
+      out(`DONE chunk_kb=${cal.medium_kb} (calibration failed: ${why}; nothing saved)`);
+      return;
+    }
     if (dec.next) {
       const sc = calScores(cal).score;
       out(`scores so far: ${[...sc.entries()].sort((x, y) => x[0] - y[0]).map(([k, v]) => `${k}KB=${v.toFixed(2)}`).join(' ')}; next ${dec.next}KB`);
@@ -1396,9 +1613,10 @@ function recentAgentTranscripts(sinceMs) {
     for (const sess of ls(path.join(root, proj.name))) {
       if (!sess.isDirectory()) continue;
       const wfRoot = path.join(root, proj.name, sess.name, 'subagents', 'workflows');
-      if (!fresh(wfRoot)) continue; // a new run adds a dir here, which bumps its mtime
       for (const wf of ls(wfRoot)) {
         const wfDir = path.join(wfRoot, wf.name);
+        // a run's dir gets a new entry for every agent it starts, so an older dir with fresh agents
+        // still has a fresh mtime (the parent's mtime does not change and must not be used to prune)
         if (!wf.isDirectory() || !fresh(wfDir)) continue;
         for (const f of ls(wfDir)) {
           if (!f.name.startsWith('agent-') || !f.name.endsWith('.jsonl')) continue;
@@ -2422,7 +2640,8 @@ dupes:     dupes [filters] [--line-window 10] [--title-sim 0.6] | dupes list | d
 trackers:  tracker-sync gh [--repo o/r] [--state all] [--search q] | tracker-import jira < issues.json
            match [filters] [--tracker t] [--include-reported] [--top 3] | match show <id> | match export [--min-score 3] [--out f]
            link <id|ids|gN> <tracker> <key> [--url u] [--kind k] | unlink <id> [tracker] [key]
-calibrate: calibrate start --model m [--sample-kb 200] [--medium 40] | calibrate next [id] | calibrate status | calibrate set <m> <kb>
+init:      init start [--models opus,sonnet,haiku,fable] [--only g] | init report [id] [--truth f] | init pick <model> | init status
+calibrate: calibrate start --model m [--only g] [--sample-kb 200] [--medium 40] | calibrate report [id] [--truth f.json] | calibrate next [id] | calibrate status | calibrate set <m> <kb>
 report:    report-config show|set <k> <v>|unset <k> | render [filters] [--target t] [--group-by g] [--max n]
            drafts | file-gh [--drafts d1,d2] [--dry-run] | record-filing <draft> <tracker> <key> [url]`;
 
@@ -2432,7 +2651,7 @@ const COMMANDS = {
   status: cmdStatus, files: cmdFiles, query: cmdQuery, show: cmdShow, sql: cmdSql, triage: cmdTriage,
   profile: cmdProfile, dupes: cmdDupes, 'tracker-sync': cmdTrackerSync, 'tracker-import': cmdTrackerImport,
   match: cmdMatch, link: cmdLink, unlink: cmdUnlink, 'report-config': cmdReportConfig, render: cmdRender,
-  drafts: cmdDrafts, calibrate: cmdCalibrate, statusline: cmdStatusline, limits: cmdLimits, 'statusline-path': () => out(rateLimitsPath()), 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,
+  drafts: cmdDrafts, calibrate: cmdCalibrate, init: cmdInit, statusline: cmdStatusline, limits: cmdLimits, 'statusline-path': () => out(rateLimitsPath()), 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,
 };
 
 function main() {

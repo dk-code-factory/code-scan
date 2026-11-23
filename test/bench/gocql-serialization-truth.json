@@ -1,0 +1,12 @@
+[
+ {"id": "1225", "path": "serialization/duration/unmarshal_str.go", "start": 3, "end": 40, "what": "decString buffer too small: index -1 panic"},
+ {"id": "1226", "path": "serialization/duration/unmarshal_str.go", "start": 112, "end": 116, "what": "sub-second part printed without 0."},
+ {"id": "1226", "path": "serialization/duration/unmarshal_str.go", "start": 133, "end": 149, "what": "printIntFrac stops before the dot"},
+ {"id": "1227", "path": "serialization/duration/marshal_str.go", "start": 103, "end": 109, "what": "integer overflow checked after multiply"},
+ {"id": "1231", "path": "serialization/duration/marshal_str.go", "start": 114, "end": 126, "what": "long fraction mis-scaled / skip state ignored"},
+ {"id": "1229", "path": "serialization/decimal/marshal_utils.go", "start": 15, "end": 21, "what": "zero inf.Dec loses scale"},
+ {"id": "1229", "path": "serialization/decimal/marshal_utils.go", "start": 98, "end": 104, "what": "zero inf.Dec loses scale (pointer path)"},
+ {"id": "1230", "path": "serialization/decimal/marshal_utils.go", "start": 114, "end": 118, "what": "empty unscaled part accepted"},
+ {"id": "1228", "path": "serialization/varint/unmarshal_utils.go", "start": 100, "end": 135, "what": "DecBigInt/DecBigIntR nil destination panic"},
+ {"id": "1228", "path": "serialization/varint/unmarshal.go", "start": 37, "end": 62, "what": "Unmarshal nil *big.Int panic"}
+]

@@ -301,4 +301,44 @@ B limits --scan "$sid2" >/dev/null   # the new scan scans the transcripts first:
 first=$(B limits --scan "$o_sid"); has "$first" 'spend: \$16.20 of' && has "$(B limits --scan "$sid2")" 'spend: \$1.00 of' && ok spend-owner-per-scan || bad "spend-owner-per-scan: $(B limits --scan "$sid2") / $(B limits --scan "$o_sid")"
 unset CLAUDE_CONFIG_DIR XDG_CACHE_HOME
 
+# --- calibration whose reviewers never run stops instead of looping
+B calibrate start --model ghost --sample-kb 40 --medium 16 >/dev/null
+r=""; for i in 1 2 3 4 5 6; do r=$(B calibrate next | tail -1); has "$r" '^DONE' && break; done
+has "$r" 'calibration failed' && has "$(B calibrate status)" 'ghost \[failed\]' && ok calibrate-gives-up || bad "calibrate-gives-up: $r"
+
+# --- init: two simulated models of different quality on one sample; user picks; scans use it
+o=$(B init start --models good-model,weak-model --sample-kb 40 --medium 16)
+has "$o" 'init 1: 2 model(s)' && ok init-start || bad "init-start: $o"
+for cal in $(B sql "select id from calibrations where init_id=1 order by id" | tail -n +2); do
+  model=$(B sql "select model from calibrations where id=$cal" | tail -1)
+  for i in 1 2 3 4 5 6 7; do
+    sid=$(B sql "select max(id) from scans where kind='cal' and cal_id=$cal and status='active'" | tail -1); [ -z "$sid" ] && break
+    while c_o=$(B claim "$sid"); [ "$c_o" != NONE ]; do c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$c_o"); n=0
+      for p in $(sed -n 's/^- \(src[^ ]*\)$/\1/p' <<<"$c_o"); do n=$((n+1))
+        cap=$([ "$model" = good-model ] && echo 100 || echo 1)
+        if [ $n -le $cap ]; then f="[{\"line\":1,\"severity\":\"high\",\"category\":\"x\",\"title\":\"bug in $p\"}]"; else f='[]'; fi
+        B submit "$sid" "$c" --file "$p" <<<"$f" >/dev/null || echo SUBMITFAIL; done; done
+    r=$(B calibrate next "$cal" | tail -1); has "$r" '^DONE' && break
+  done
+done
+r=$(B init report)
+has "$r" 'good-model' && has "$r" '\$/1kLOC' && [ "$(sed -n 3p <<<"$r" | cut -f1)" = good-model ] && ok init-report || bad "init-report: $r"
+has "$(B init pick good-model)" 'default reviewer model: good-model' && ok init-pick || bad init-pick
+o=$(B start --new --no-plan --force)
+has "$o" 'calibrated for good-model' && ! has "$o" '^INIT' && ok init-default-used || bad "init-default-used: $o"
+B sql "delete from config where key='default_model'" >/dev/null 2>&1 || node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"delete from config where key='default_model'\")"
+has "$(B start --new --no-plan --force)" '^INIT' && ok init-hint || bad init-hint
+
+# --- review fixes for init
+has "$(B init report 99 2>&1)" 'no init 99' && ok init-report-bad-id || bad init-report-bad-id
+B calibrate set sonnet 24 >/dev/null; has "$(B sql "select value from config where key='chunk_kb:claude-sonnet-5-5'")" 24 && ok calibrate-set-normalizes || bad calibrate-set-normalizes
+B init pick good-model >/dev/null; B stop >/dev/null 2>&1; B start --new --no-plan --force --model claude-sonnet-5-5 >/dev/null
+B init pick weak-model >/dev/null; B stop >/dev/null 2>&1; o=$(B restart --no-plan --force)
+has "$o" 'calibrated for weak-model' && ok restart-honours-pick || bad "restart-honours-pick: $o"
+has "$o" '"model":"weak-model"' && ok model-id-passthrough || bad "model-id-passthrough: $o"
+o=$(B start --new --no-plan --force --model sonnet); has "$o" '"model":"sonnet"' && has "$o" 'calibrated for claude-sonnet-5-5' && ok model-alias-current || bad "model-alias-current: $o"
+sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p'); o=$(B claim --inline --rules "$sid"); has "$o" '== REVIEWER INSTRUCTIONS ==' && has "$o" 'Submit once' && ok claim-rules || bad "claim-rules: $(head -c 300 <<<"$o")"
+node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"update calibrations set status='failed', result_kb=null where model='weak-model'\")"
+has "$(B init pick weak-model)" 'default reviewer model: weak-model' && ok pick-unfinished-calibration || bad pick-unfinished-calibration
+
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS

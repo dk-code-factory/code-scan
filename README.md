@@ -14,6 +14,9 @@ dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather t
 
 ## Skills
 
+- `/code-scan:init` — benchmark reviewer models on a sample of the repo (quality, all-in $/100KB and
+  $/1k lines, best chunk size per model) and pick the model scans use. Runs automatically before the
+  first scan.
 - `/code-scan:scan` — start, continue (same commit), restart (new HEAD; unchanged files skipped by
   content hash), stop. Takes a named profile or a free-text review focus, and `--only <dir>` scopes.
 - `/code-scan:status` — progress, per-file state.

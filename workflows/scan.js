@@ -33,12 +33,31 @@ const WORKER_SCHEMA = {
   required: ['chunk', 'files', 'findings'],
 }
 
+// Plugin agents load at session start: in a session older than the plugin install, its agent types
+// are missing. Fall back to the default workflow agent (bigger preamble) instead of failing.
+let pluginAgents = true
+async function run(prompt, opts) {
+  if (pluginAgents && opts.agentType) {
+    try {
+      return await agent(prompt, opts)
+    } catch (e) {
+      if (!/agent type .* not found/i.test(String(e && e.message || e))) throw e
+      if (pluginAgents) log(`${opts.agentType} is not loaded in this session (restart Claude Code to use it); using the default agent`)
+      pluginAgents = false
+    }
+  }
+  const { agentType, ...rest } = opts
+  // the default agent lacks the reviewer instructions: have claim print them
+  return agent(prompt.replace(' claim --inline ', ' claim --inline --rules '), rest)
+}
+
 let workers = args.workers || 0
 if (args.plan) {
   phase('Plan')
-  const r = await agent(PLAN_PROMPT, {
+  const r = await run(PLAN_PROMPT, {
     label: 'planner',
     agentType: args.plannerType || 'code-scan:planner',
+    ...(args.model ? { model: args.model } : {}),
     phase: 'Plan',
     schema: { type: 'object', properties: { chunks: { type: 'integer' }, notes: { type: 'string' } }, required: ['chunks'] },
   })
@@ -59,7 +78,7 @@ await parallel(Array.from({ length: LANES }, (_, lane) => async () => {
   let failures = 0
   while (started < 900) {
     const n = ++started
-    const r = await agent(WORKER_PROMPT, { label: `review ${n}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: args.agentType || 'code-scan:reviewer' })
+    const r = await run(WORKER_PROMPT, { label: `review ${n}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: args.agentType || 'code-scan:reviewer', ...(args.model ? { model: args.model } : {}) })
     results.push(r)
     if (!r) { if (++failures >= 2) break; continue }
     failures = 0
