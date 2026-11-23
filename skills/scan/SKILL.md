@@ -54,12 +54,18 @@ Other flags only when asked: `--include-tests`, `--chunk-kb N` (skips calibratio
 
 ## 2. Run the verb
 
-`$CS <verb> --model <your model id> [flags]` (run it from the repo, or add `-C <repo>` before the
-verb). `--model` is the exact id of the model you are running as (e.g. `claude-opus-5-5`); reviewers
-inherit it, and the chunk size is calibrated per model. Its last line is `NEXT {...}`. If `workers`
-is 0 and `plan` is false, report "nothing to review" and stop.
+`$CS <verb> [flags]` (run it from the repo, or add `-C <repo>` before the verb). Reviewers use the
+repo's model chosen at init (and its chunk size); pass `--model <id or opus|sonnet|haiku|fable>` only
+if the user names one. Its last line is `NEXT {...}`. If `workers` is 0 and `plan` is false, report
+"nothing to review" and stop.
 
-### 2a. Calibrate chunk size (new repo or new model)
+### 2.0 Initialize first (repo without a chosen model)
+
+If the output contains an `INIT` line and the user did not name a model or `--chunk-kb`: run the
+`/code-scan:init` flow (benchmark models, user picks one), then `$CS continue --model <picked>` —
+it re-chunks the pending scan for that model and prints a fresh `NEXT`. Use that in step 3.
+
+### 2a. Calibrate chunk size (a named model not covered by init)
 
 If the output contains a `CALIBRATE` line and the user did not pass `--chunk-kb` or say to skip
 calibration, calibrate before launching the scan. It reviews a ~200KB sample of the repo at several

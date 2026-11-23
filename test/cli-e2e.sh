@@ -306,4 +306,27 @@ B calibrate start --model ghost --sample-kb 40 --medium 16 >/dev/null
 r=""; for i in 1 2 3 4 5 6; do r=$(B calibrate next | tail -1); has "$r" '^DONE' && break; done
 has "$r" 'calibration failed' && has "$(B calibrate status)" 'ghost \[failed\]' && ok calibrate-gives-up || bad "calibrate-gives-up: $r"
 
+# --- init: two simulated models of different quality on one sample; user picks; scans use it
+o=$(B init start --models good-model,weak-model --sample-kb 40 --medium 16)
+has "$o" 'init 1: 2 model(s)' && ok init-start || bad "init-start: $o"
+for cal in $(B sql "select id from calibrations where init_id=1 order by id" | tail -n +2); do
+  model=$(B sql "select model from calibrations where id=$cal" | tail -1)
+  for i in 1 2 3 4 5 6 7; do
+    sid=$(B sql "select max(id) from scans where kind='cal' and cal_id=$cal and status='active'" | tail -1); [ -z "$sid" ] && break
+    while c_o=$(B claim "$sid"); [ "$c_o" != NONE ]; do c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$c_o"); n=0
+      for p in $(sed -n 's/^- \(src[^ ]*\)$/\1/p' <<<"$c_o"); do n=$((n+1))
+        cap=$([ "$model" = good-model ] && echo 100 || echo 1)
+        if [ $n -le $cap ]; then f="[{\"line\":1,\"severity\":\"high\",\"category\":\"x\",\"title\":\"bug in $p\"}]"; else f='[]'; fi
+        B submit "$sid" "$c" --file "$p" <<<"$f" >/dev/null || echo SUBMITFAIL; done; done
+    r=$(B calibrate next "$cal" | tail -1); has "$r" '^DONE' && break
+  done
+done
+r=$(B init report)
+has "$r" 'good-model' && has "$r" '\$/1kLOC' && [ "$(sed -n 3p <<<"$r" | cut -f1)" = good-model ] && ok init-report || bad "init-report: $r"
+has "$(B init pick good-model)" 'default reviewer model: good-model' && ok init-pick || bad init-pick
+o=$(B start --new --no-plan --force)
+has "$o" 'calibrated for good-model' && ! has "$o" '^INIT' && ok init-default-used || bad "init-default-used: $o"
+B sql "delete from config where key='default_model'" >/dev/null 2>&1 || node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"delete from config where key='default_model'\")"
+has "$(B start --new --no-plan --force)" '^INIT' && ok init-hint || bad init-hint
+
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS
