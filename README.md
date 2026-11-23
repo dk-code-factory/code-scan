@@ -1,0 +1,68 @@
+# code-scan
+
+Repository-wide bug scanning for Claude Code. MIT. Version 1.0.0.
+
+Almost all coordination is done by a deterministic CLI (`bin/code-scan.js`, Node 22.5+, no
+dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather than orchestrating it.
+
+## Install
+
+```text
+/plugin marketplace add dk-code-factory/code-scan
+/plugin install code-scan@code-scan
+```
+
+## Skills
+
+- `/code-scan:scan` — start, continue (same commit), restart (new HEAD; unchanged files skipped by
+  content hash), stop. Takes a named profile or a free-text review focus, and `--only <dir>` scopes.
+- `/code-scan:status` — progress, per-file state.
+- `/code-scan:findings` — filter/sort/export findings (severity, category, path, triage, reported, …), read-only SQL.
+- `/code-scan:triage` — confirmed / false_positive / fixed / wontfix, with notes.
+- `/code-scan:dupes` — duplicate groups and matching against existing GitHub/Jira issues.
+- `/code-scan:report` — file findings to GitHub (or Jira via the Atlassian MCP), persisting what was filed.
+- `/code-scan:profiles` — review prompts: `default` (critical bugs, vulnerabilities, memory handling,
+  leaks, panics, correctness), `security`, `memory`, `concurrency`, or your own.
+
+## How a scan runs
+
+1. **Inventory** — git-tracked files at the commit, classified as code or not by path and git
+   attributes only; tests, docs, vendored and generated code are excluded.
+2. **Plan** — one agent reads a directory digest and top-level build files (never sources) and
+   corrects the code set, groups subsystems and gives each a review focus.
+3. **Review** — the CLI packs files into chunks (same directory, same-stem files together; a file is
+   never split) and a workflow starts one `reviewer` agent per chunk. Each claims a chunk, reviews,
+   confirms candidates from the code (it never builds or runs anything) and submits.
+4. **Store** — findings, per-file progress and a blob-sha ledger live in
+   `~/.cache/code-scan/<repo>/codescan.db` (`CODESCAN_HOME` overrides).
+
+## Chunk size
+
+Review quality drops when a reviewer gets too much code at once. The chunk size is calibrated per
+repo and model (`code-scan.js calibrate`, run automatically by `/code-scan:scan` the first time a model
+scans a repo): a ~200KB sample is reviewed at the medium size, then half of it; if half is clearly
+better it keeps halving, otherwise it grows by 1.5x until recall falls more than 0.15 below the best
+seen. Recall of a round = severity-weighted share of all distinct issues found across rounds.
+
+The medium default (40KB) comes from a calibration of claude-opus-5-5 on gocql (202KB sample of
+the driver's Go code): 80KB → 0.46, 40KB → 0.71, 20KB → 0.56. Calibration cost there: 29 agents,
+~1.3M subagent tokens, ~3.5 minutes.
+
+Tests: `test/cli-e2e.sh` (no LLM; simulated reviewers, fake `gh`).
+
+## Token cost
+
+Coordination (the session running the skill, the planner, calibration decisions) is under 3% of a
+scan. The rest is reviewers, and two things dominate their non-productive spend:
+
+- **Preamble.** A default workflow agent inherits the parent session's system prompt and every tool,
+  skill and MCP listing: 15k–28k tokens before any code, re-read on every turn. Reviewers run as
+  the plugin's own `reviewer` agent (`agents/reviewer.md`: Bash + Read, short prompt): ~5k.
+- **Turns.** Each turn re-reads the whole context. `claim --inline` hands over the code directly when
+  it fits in one tool result (~24KB) and otherwise lists the files (paged at 1000 lines) for parallel
+  Read calls in a single turn; findings for the whole chunk go in one batch `submit`.
+
+Measured on the same 109–118KB of gocql (4–5 agents): 988k → 379k raw tokens, 2,958 → 2,174
+price-weighted units per KB reviewed, 6.8 → 5.0 turns per reviewer, preamble share 18–40% → 7%,
+with the same bugs found. Files are never split: a file larger than the chunk size is reviewed
+alone by one agent.

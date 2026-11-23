@@ -1,0 +1,15 @@
+{
+  "name": "code-scan",
+  "owner": {
+    "name": "dk-code-factory"
+  },
+  "description": "Repository-wide bug scanning plugin for Claude Code.",
+  "plugins": [
+    {
+      "name": "code-scan",
+      "source": "./",
+      "description": "Repository-wide bug scanning: scan, status, findings, triage, dupes, report, profiles.",
+      "version": "1.0.0"
+    }
+  ]
+}
