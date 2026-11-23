@@ -16,6 +16,7 @@ the user asks you to investigate a specific one.
 - `--severity critical,high` or `--severity high+` · `--category memory,leak` (substring)
 - `--path src/net/` (dir) · `--path 'src/**/*.cc'` (glob) · `--path src/a.cc` (file)
 - `--triage open,confirmed` (default) · `--triage all` · `--triage false_positive`
+- `--confirmation confirmed|not_confirmed|unchecked` (comma list; default: any) — table marks `C` / `NC`
 - `--reported [--tracker gh|jira:PROJ]` · `--unreported`
 - `--scan N` · `--latest` (found in latest scan) · `--stale` / `--no-stale` (file changed since)
 - `--gone` / `--include-gone`: findings not re-reported when their changed file was re-reviewed

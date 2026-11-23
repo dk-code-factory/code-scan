@@ -94,6 +94,19 @@ check "sql read-only" bash -c "! node '$HERE/bin/code-scan.js' sql 'delete from 
 has "$(B sql 'select count(*) n from findings')" 4 && ok sql || bad sql
 ids=$(B query --format json | python3 -c 'import json,sys; print(",".join(str(r["id"]) for r in json.load(sys.stdin) if r["path"]!="src/store/kv.go"))')
 has "$(B triage "$ids" --set confirmed --note checked)" confirmed && ok triage || bad triage
+# --- confirmation (independent of triage)
+[ "$(B query --confirmation unchecked | head -1)" = '4 finding(s)' ] && ok confirm-default || bad confirm-default
+has "$(B confirm 1 --set confirmed --note repro)" 'confirmation confirmed' && ok confirm || bad confirm
+B confirm 2 --set not_confirmed --note 'could not reproduce' >/dev/null
+has "$(B show 1)" 'confirmation=confirmed' && has "$(B show 2)" 'could not reproduce' && ok confirm-show || bad confirm-show
+[ "$(B query --confirmation confirmed --format json | python3 -c 'import json,sys; print([r["id"] for r in json.load(sys.stdin)])')" = '[1]' ] && ok confirm-filter || bad confirm-filter
+[ "$(B query --confirmation not_confirmed,unchecked | head -1)" = '3 finding(s)' ] && ok confirm-filter-multi || bad confirm-filter-multi
+check "confirm bad state" bash -c "! node '$HERE/bin/code-scan.js' confirm 1 --set maybe"
+sev1=$(B query --ids 1 --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["severity"])')
+has "$(B confirm 1 --set confirmed --set-severity low)" 'severity: #1' && has "$(B show 1)" '→ low' && ok confirm-severity || bad confirm-severity
+check "confirm bad severity" bash -c "! node '$HERE/bin/code-scan.js' confirm 1 --set confirmed --set-severity huge"
+B confirm 1 --set confirmed --set-severity "$sev1" >/dev/null
+B confirm 2 --set unchecked >/dev/null; [ "$(B query --confirmation unchecked | head -1)" = '3 finding(s)' ] && ok confirm-reset || bad confirm-reset
 
 # --- dupes
 has "$(B dupes)" '1 duplicate group' && ok dupes || bad "dupes: $(B dupes)"

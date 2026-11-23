@@ -22,6 +22,7 @@ dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather t
 - `/code-scan:status` — progress, per-file state.
 - `/code-scan:findings` — filter/sort/export findings (severity, category, path, triage, reported, …), read-only SQL.
 - `/code-scan:triage` — confirmed / false_positive / fixed / wontfix, with notes.
+- `/code-scan:confirm` — confirmation status (confirmed / not_confirmed / unchecked), separate from triage.
 - `/code-scan:dupes` — duplicate groups and matching against existing GitHub/Jira issues.
 - `/code-scan:verify` — double-check one finding (or each of several) in a fresh agent against the upstream
   default branch: reproduce, search for existing reports, file only if real and new, record the outcome.
