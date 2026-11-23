@@ -49,6 +49,10 @@ unknown, tell the user to set `statusLine` to
 `{"type":"command","command":"node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js statusline","refreshInterval":30}`
 (or `... statusline -- <their existing command>` to keep their own line), and do not start without it.
 
+Concurrency: "run 4 at a time" → `--concurrency 4` (1–16 reviewers at once; default 10; the harness
+caps any workflow at 16). A running workflow keeps its count: to change it, `$CS stop`, wait for the
+run to end, then `$CS continue --concurrency N` and launch the new NEXT.
+
 Other flags only when asked: `--include-tests`, `--chunk-kb N` (skips calibration), `--include <glob>`, `--exclude <glob>`,
 `--no-plan` (skip planner), `--replan` (restart only).
 

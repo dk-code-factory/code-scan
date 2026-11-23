@@ -620,8 +620,10 @@ function modelAlias(id) {
 function nextLine(scan, plan) {
   const workers = Math.min(pendingChunks(scan.id), MAX_WORKERS_PER_RUN);
   const o = { cli: CLI, root: repoRoot(), scanId: scan.id, plan: !!plan, workers };
-  const alias = modelAlias(JSON.parse(getScan(scan.id).options_json).model);
+  const so = JSON.parse(getScan(scan.id).options_json);
+  const alias = modelAlias(so.model);
   if (alias) o.model = alias;
+  if (so.lanes) o.lanes = so.lanes;
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
   return 'NEXT ' + JSON.stringify(o);
 }
@@ -635,6 +637,7 @@ function buildOpts(f, base = {}) {
   if (f.exclude) o.exclude = f.exclude;
   if (f.only) o.only = f.only;
   applyLimitFlags(o, f);
+  if (f.concurrency !== undefined) o.lanes = parseConcurrency(f.concurrency);
   if (f['chunk-kb']) { o.chunkKb = Number(f['chunk-kb']); o.chunkSource = 'flag'; }
   if (f.model) o.model = modelId(f.model);
   else if (!o.model && cfgGet('default_model')) o.model = cfgGet('default_model');
@@ -736,8 +739,9 @@ function cmdContinue(a) {
   const head = git(['rev-parse', 'HEAD']).trim();
   setScanStatus(scan.id, 'active');
   db().prepare('DELETE FROM config WHERE key=?').run(`stop_reason:${scan.id}`);
-  if (a.f['max-usd'] !== undefined || a.f['max-5h-pct'] !== undefined) {
+  if (a.f['max-usd'] !== undefined || a.f['max-5h-pct'] !== undefined || a.f.concurrency !== undefined) {
     const o = applyLimitFlags(JSON.parse(scan.options_json), a.f);
+    if (a.f.concurrency !== undefined) o.lanes = parseConcurrency(a.f.concurrency);
     db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(o), scan.id);
     scan.options_json = JSON.stringify(o);
   }
@@ -1703,6 +1707,13 @@ function readRateLimits() {
   try { return JSON.parse(fs.readFileSync(rateLimitsPath(), 'utf8')); } catch (e) { return null; }
 }
 
+/** Reviewer agents running at once (workflow lanes); the harness itself caps a workflow at 16. */
+function parseConcurrency(v) {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 16) die(`--concurrency needs a whole number 1-16, got '${v}'`);
+  return n;
+}
+
 /** Limit value from a flag: a number > 0, or 0 / "off" to clear; anything else is an error. */
 function parseLimit(v, flag) {
   if (v === undefined) return undefined;
@@ -2628,7 +2639,7 @@ scan:      start [--model m] [--profile p|--prompt-file f] [--only g] [--include
            continue [--scan id] [--model m] | restart [--replan] [--reset-scope] [...start flags] | stop [--now] | set-run <scan> <task>
 planner:   plan-context <scan> | apply-plan <scan> --file plan.json
 workers:   claim <scan> | submit <scan> <chunk> --file <path> [--slice k] < findings.json
-limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P]  | statusline [-- <wrapped status line cmd>]
+limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P] [--concurrency 1-16 (default 10)]  | statusline [-- <wrapped status line cmd>]
 progress:  status [--scan id|--all] | files [--state s] [--path p] [--out f]
 findings:  query [--severity critical,high|high+] [--category c] [--path p] [--triage t|all] [--reported|--unreported]
                  [--tracker t] [--scan id|--latest] [--stale|--no-stale] [--gone|--include-gone] [--min-confidence x] [--text s] [--unit u]
