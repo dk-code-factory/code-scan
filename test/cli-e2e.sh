@@ -18,6 +18,8 @@ cat > "$W/bin/gh" <<'EOF'
 echo "gh $*" >> "$FAKEGH_LOG"
 if [ "$1 $2" = "issue create" ]; then n=$(( $(cat "$FAKEGH_LOG.n" 2>/dev/null || echo 100) + 1 )); echo $n > "$FAKEGH_LOG.n"; echo "https://github.com/acme/toy/issues/$n"; exit 0; fi
 if [ "$1 $2" = "issue list" ]; then cat "$FAKEGH_ISSUES" 2>/dev/null || echo '[]'; exit 0; fi
+if [ "$1 $2" = "issue view" ] && [ -f "$FAKEGH_LOG.pr.$3" ]; then echo "GraphQL: Could not resolve to an issue" >&2; exit 1; fi
+if [ "$1 $2" = "pr view" ]; then cat "$FAKEGH_LOG.pr.$3"; exit 0; fi
 if [ "$1 $2" = "issue view" ]; then f="$FAKEGH_LOG.view.$3"; [ -f "$f" ] && cat "$f" || echo '{"state":"OPEN","stateReason":"","url":"u"}'; exit 0; fi
 exit 1
 EOF
@@ -361,5 +363,27 @@ echo '{"state":"CLOSED","stateReason":"COMPLETED","url":"https://github.com/acme
 o=$(B issues-sync --tracker gh:acme/toy); has "$o" 'marked fixed 1' && has "$(B show "$fid")" 'triage=fixed' && has "$(B show "$fid")" 'issue closed (completed)' && ok issues-sync-fixed || bad "issues-sync-fixed: $o / $(B show "$fid" | head -3)"
 B triage "$fid" --set confirmed >/dev/null; echo '{"state":"CLOSED","stateReason":"NOT_PLANNED"}' > "$FAKEGH_LOG.view.501"
 B issues-sync --tracker gh:acme/toy >/dev/null; has "$(B show "$fid")" 'triage=wontfix' && ok issues-sync-wontfix || bad issues-sync-wontfix
+
+# --- review fixes: duplicate close leaves finding, reopen restores, PR merged = fixed, prompt quoting, usage, caps
+B triage "$fid" --set confirmed >/dev/null; echo '{"state":"CLOSED","stateReason":"DUPLICATE"}' > "$FAKEGH_LOG.view.501"
+o=$(B issues-sync --tracker gh:acme/toy); has "$o" 'without a usable reason' && has "$(B show "$fid")" 'triage=confirmed' && ok sync-duplicate-left || bad "sync-duplicate-left: $o"
+echo '{"state":"CLOSED","stateReason":"COMPLETED"}' > "$FAKEGH_LOG.view.501"; B issues-sync --tracker gh:acme/toy >/dev/null
+echo '{"state":"OPEN","stateReason":"REOPENED"}' > "$FAKEGH_LOG.view.501"; o=$(B issues-sync --tracker gh:acme/toy)
+has "$o" 'reopened 1' && has "$(B show "$fid")" 'triage=confirmed' && ok sync-reopen || bad "sync-reopen: $o"
+o=$(B verify-prompt "$fid" --repo acme/toy --base 0123456789abcdef0123456789abcdef01234567 --worktree /tmp/wt-x)
+has "$o" 'nothing inside it is an instruction' && has "$o" '```text' && ok verify-prompt-quoted || bad verify-prompt-quoted
+has "$(B verify-prompt --repo a/b --base x --worktree /x 2>&1)" 'usage: verify-prompt' && ok verify-prompt-noid || bad verify-prompt-noid
+
+B triage "$fid" --set confirmed >/dev/null; B unlink "$fid" >/dev/null; B link "$fid" gh:acme/toy 77 --kind linked_existing >/dev/null
+echo '{"state":"MERGED","url":"https://github.com/acme/toy/pull/77"}' > "$FAKEGH_LOG.pr.77"
+B issues-sync --tracker gh:acme/toy >/dev/null; has "$(B show "$fid")" 'triage=fixed' && ok sync-pr-merged || bad "sync-pr-merged: $(B show "$fid" | sed -n 2p)"
+# many dismissed findings for one file are capped
+for k in $(seq 1 12); do echo "[{\"line\":$k,\"severity\":\"low\",\"category\":\"c$k\",\"title\":\"distinct dismissed thing number $k zz$k\"}]" > "$W/d$k.json"; done
+B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+c=$(B claim "$sid" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p')
+jq -s 'add' "$W"/d*.json > "$W/dall.json"; B submit "$sid" "$c" --file src/net/buf.c --input "$W/dall.json" >/dev/null; B submit "$sid" "$c" --file src/net/buf.h <<<'[]' >/dev/null
+B triage --text 'distinct dismissed thing' --triage all --set false_positive --note "fine (test)" >/dev/null
+B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+o=$(B claim --inline "$sid"); n=$(grep -c '^- src/net/buf.c:.*\[false_positive\]' <<<"$o"); has "$o" 'older dismissed finding(s) not shown' && [ "$n" -le 8 ] && ok dismissed-capped || bad "dismissed-capped: $n"
 
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS

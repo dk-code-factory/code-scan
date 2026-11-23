@@ -13,9 +13,11 @@ For each finding id the user gives (one agent per finding, never batched into on
 
 1. `$CS show <id>`. If it is already `false_positive`/`wontfix` or already has an issue link, say so and skip
    it unless the user explicitly asks to re-check.
-2. Upstream repo and base (once per run): in the scanned repo,
-   `gh repo view --json nameWithOwner,parent,defaultBranchRef` — use `parent` if the checkout is a fork.
-   `git fetch https://github.com/<upstream>.git <default branch>` and `BASE=$(git rev-parse FETCH_HEAD)` (full sha).
+2. Upstream repo and base (once per run): in the scanned repo, `gh repo view --json nameWithOwner,parent` —
+   the upstream is `parent` (owner/name) if the checkout is a fork, else `nameWithOwner`. Then take the branch from
+   the upstream itself: `gh repo view <upstream> --json defaultBranchRef -q .defaultBranchRef.name` (a fork's
+   default branch may differ). `git fetch https://github.com/<upstream>.git <that branch>` and
+   `BASE=$(git rev-parse FETCH_HEAD)` (full sha).
    Findings are verified on the upstream default branch, not on the scanned checkout (which may be a branch).
 3. Worktree per finding: `git worktree add --detach <scratchpad>/verify-<id> $BASE`.
 4. Prompt: `$CS verify-prompt <id> --repo <upstream> --base $BASE --worktree <that dir> > <scratchpad>/verify-<id>.md`.
@@ -36,5 +38,6 @@ Filing issues is public: only do it because the user asked for verification and 
   shown to future reviewers of the file for dismissed findings, so always give the reason.
 - `$CS link <id> gh:<owner/repo> <number> --kind filed|linked_existing --url <url>` / `$CS unlink <id> [tracker] [key]`
   — which issue covers the finding.
-- `$CS issues-sync` — refresh the state of every linked GitHub issue: closed as completed → finding `fixed`,
-  closed as not planned → `wontfix`; open issues are recorded as open. `$CS show <id>` prints the issue state.
+- `$CS issues-sync` — refresh the state of every linked GitHub issue or PR: closed as completed (or PR merged) →
+  finding `fixed`, closed as not planned → `wontfix`, reopened → back to `confirmed`; duplicates and closes
+  without a reason are recorded but leave the finding alone. `$CS show <id>` prints the state.
