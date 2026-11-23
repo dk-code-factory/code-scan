@@ -38,6 +38,7 @@ if (args.plan) {
   phase('Plan')
   const r = await agent(PLAN_PROMPT, {
     label: 'planner',
+    agentType: args.plannerType || 'code-scan:planner',
     phase: 'Plan',
     schema: { type: 'object', properties: { chunks: { type: 'integer' }, notes: { type: 'string' } }, required: ['chunks'] },
   })

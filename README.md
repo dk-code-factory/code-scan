@@ -1,6 +1,6 @@
 # code-scan
 
-Repository-wide bug scanning for Claude Code. MIT. Version 1.0.0.
+Repository-wide bug scanning for Claude Code. MIT. Version 1.0.1.
 
 Almost all coordination is done by a deterministic CLI (`bin/code-scan.js`, Node 22.5+, no
 dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather than orchestrating it.
@@ -56,8 +56,9 @@ Coordination (the session running the skill, the planner, calibration decisions)
 scan. The rest is reviewers, and two things dominate their non-productive spend:
 
 - **Preamble.** A default workflow agent inherits the parent session's system prompt and every tool,
-  skill and MCP listing: 15k–28k tokens before any code, re-read on every turn. Reviewers run as
-  the plugin's own `reviewer` agent (`agents/reviewer.md`: Bash + Read, short prompt): ~5k.
+  skill and MCP listing: 15k–28k tokens before any code, re-read on every turn. Reviewers and the
+  planner run as the plugin's own agents (`agents/reviewer.md`, `agents/planner.md`: Bash + Read,
+  short prompt): ~5k.
 - **Turns.** Each turn re-reads the whole context. `claim --inline` hands over the code directly when
   it fits in one tool result (~24KB) and otherwise lists the files (paged at 1000 lines) for parallel
   Read calls in a single turn; findings for the whole chunk go in one batch `submit`.
