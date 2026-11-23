@@ -28,6 +28,8 @@ const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const SEVERITIES = ['critical', 'high', 'medium', 'low'];
 const SEV_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
 const TRIAGE = ['open', 'confirmed', 'false_positive', 'fixed', 'wontfix'];
+// confirmation: whether someone checked the finding is real, independent of triage (NULL = unchecked)
+const CONFIRMATION = ['confirmed', 'not_confirmed', 'unchecked'];
 const FILE_STATES = ['pending', 'in_progress', 'partial', 'reviewed', 'excluded', 'unchanged'];
 const MAX_CODE_BYTES = 512 * 1024;
 const STDOUT_ROWS = 50;
@@ -207,7 +209,7 @@ const BOOL_FLAGS = new Set(['include-tests', 'force', 'no-plan', 'replan', 'now'
   'latest', 'stale', 'no-stale', 'reported', 'unreported', 'primary-only', 'new',
   'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules']);
 const MULTI_FLAGS = new Set(['include', 'exclude', 'only', 'force-path', 'path', 'severity',
-  'category', 'triage', 'sort', 'label']);
+  'category', 'triage', 'confirmation', 'sort', 'label']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -319,6 +321,13 @@ function db() {
   if (!calCols.includes('single')) DB.exec('ALTER TABLE calibrations ADD COLUMN single INTEGER NOT NULL DEFAULT 0');
   if (!DB.prepare('PRAGMA table_info(findings)').all().some((c) => c.name === 'gone_scan')) {
     DB.exec('ALTER TABLE findings ADD COLUMN gone_scan INTEGER');
+  }
+  if (!DB.prepare('PRAGMA table_info(findings)').all().some((c) => c.name === 'confirmation')) {
+    try { DB.exec('ALTER TABLE findings ADD COLUMN confirmation TEXT'); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  }
+  // severity set by a human/verifier; rescans keep it instead of overwriting with the reviewer's severity
+  if (!DB.prepare('PRAGMA table_info(findings)').all().some((c) => c.name === 'severity_locked')) {
+    try { DB.exec('ALTER TABLE findings ADD COLUMN severity_locked INTEGER NOT NULL DEFAULT 0'); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
   }
   return DB;
 }
@@ -1147,7 +1156,7 @@ function cmdSubmit(a) {
         similarFinding(d, f, snippet, scanId);
       if (ex) {
         const reopen = ex.triage === 'fixed';
-        d.prepare(`UPDATE findings SET last_scan=?, commit_sha=?, line=?, end_line=?, severity=?, detail=COALESCE(?,detail),
+        d.prepare(`UPDATE findings SET last_scan=?, commit_sha=?, line=?, end_line=?, severity=CASE WHEN severity_locked THEN severity ELSE ? END, detail=COALESCE(?,detail),
           evidence=COALESCE(?,evidence), confidence=COALESCE(?,confidence), blob_sha=?, updated=?, triage=?, note=?,
           snippet=?, gone_scan=NULL WHERE id=?`)
           .run(scanId, scan.commit_sha, f.line, f.end_line, f.severity, f.detail, f.evidence, f.confidence, fr.blob_sha, now(),
@@ -2003,6 +2012,15 @@ function loadFindings(f, { defaultTriage = ['open', 'confirmed'] } = {}) {
   if (tri && tri.includes('all')) tri = null;
   else if (!tri && !f.ids) tri = defaultTriage;
   if (tri) { where.push(`triage IN (${tri.map(() => '?').join(',')})`); params.push(...tri); }
+  const conf = listFlag(f.confirmation);
+  if (conf && !conf.includes('all')) {
+    const bad = conf.filter((c) => !CONFIRMATION.includes(c));
+    if (bad.length) die(`--confirmation must be one of ${CONFIRMATION.join('|')}|all`);
+    const vals = conf.filter((c) => c !== 'unchecked');
+    const ors = vals.length ? [`confirmation IN (${vals.map(() => '?').join(',')})`] : [];
+    if (conf.includes('unchecked')) ors.push('confirmation IS NULL');
+    where.push(`(${ors.join(' OR ')})`); params.push(...vals);
+  }
   if (f.ids) {
     const ids = listFlag(f.ids).map(Number);
     where.push(`id IN (${ids.map(() => '?').join(',')})`); params.push(...ids);
@@ -2044,7 +2062,7 @@ function loadFindings(f, { defaultTriage = ['open', 'confirmed'] } = {}) {
   return sortRows(rows, f.sort);
 }
 
-const SORT_FIELDS = ['severity', 'path', 'line', 'confidence', 'created', 'updated', 'category', 'triage', 'id', 'title', 'unit'];
+const SORT_FIELDS = ['severity', 'path', 'line', 'confidence', 'created', 'updated', 'category', 'triage', 'confirmation', 'id', 'title', 'unit'];
 function sortRows(rows, sortSpec) {
   const specs = listFlag(sortSpec) || ['severity:desc', 'path', 'line'];
   const keys = specs.map((s) => {
@@ -2071,18 +2089,18 @@ function loc(r) { return `${r.path}${r.line ? ':' + r.line + (r.end_line && r.en
 function formatRows(rows, fmt) {
   if (fmt === 'json') return JSON.stringify(rows.map(publicRow), null, 1);
   if (fmt === 'csv') {
-    const cols = ['id', 'severity', 'category', 'path', 'line', 'end_line', 'title', 'triage', 'confidence', 'reported_as', 'dupe_group', 'stale', 'unit', 'first_scan', 'last_scan', 'detail', 'evidence'];
+    const cols = ['id', 'severity', 'category', 'path', 'line', 'end_line', 'title', 'triage', 'confirmation', 'confidence', 'reported_as', 'dupe_group', 'stale', 'unit', 'first_scan', 'last_scan', 'detail', 'evidence'];
     const q = (v) => (v === null || v === undefined ? '' : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
     return [cols.join(','), ...rows.map((r) => cols.map((c) => q(r[c])).join(','))].join('\n');
   }
   if (fmt === 'md') {
     return rows.map((r) => [
       `### #${r.id} [${r.severity}] ${r.title}`,
-      `\`${loc(r)}\` — ${r.category}; triage: ${r.triage}${r.reported_as ? '; reported: ' + r.reported_as : ''}${r.stale ? '; STALE (file changed since)' : ''}${r.confidence !== null ? `; confidence ${r.confidence}` : ''}`,
+      `\`${loc(r)}\` — ${r.category}; triage: ${r.triage}; confirmation: ${r.confirmation || 'unchecked'}${r.reported_as ? '; reported: ' + r.reported_as : ''}${r.stale ? '; STALE (file changed since)' : ''}${r.confidence !== null ? `; confidence ${r.confidence}` : ''}`,
       '', r.detail || '', r.evidence ? `\nEvidence: ${r.evidence}` : '', '',
     ].join('\n')).join('\n');
   }
-  return rows.map((r) => `#${r.id}\t${r.severity}\t${loc(r)}\t${r.triage}${r.gone_scan ? ' gone' : ''}${r.reported_as ? ' R' : ''}${r.dupe_group ? ' g' + r.dupe_group : ''}\t${r.title}`).join('\n');
+  return rows.map((r) => `#${r.id}\t${r.severity}\t${loc(r)}\t${r.triage}${r.confirmation === 'confirmed' ? ' C' : r.confirmation === 'not_confirmed' ? ' NC' : ''}${r.gone_scan ? ' gone' : ''}${r.reported_as ? ' R' : ''}${r.dupe_group ? ' g' + r.dupe_group : ''}\t${r.title}`).join('\n');
 }
 function publicRow(r) {
   const o = { ...r };
@@ -2106,7 +2124,7 @@ function cmdShow(a) {
   const r = db().prepare('SELECT * FROM findings WHERE id=?').get(id);
   if (!r) die(`no finding ${id}`);
   out(`#${r.id} [${r.severity}] ${r.title}`);
-  out(`${loc(r)}  category=${r.category} triage=${r.triage} confidence=${r.confidence ?? '-'} unit=${r.unit || '-'}` +
+  out(`${loc(r)}  category=${r.category} triage=${r.triage} confirmation=${r.confirmation || 'unchecked'} confidence=${r.confidence ?? '-'} unit=${r.unit || '-'}` +
     (r.gone_scan ? `  GONE (not reported when the changed file was re-reviewed in scan ${r.gone_scan})` : ''));
   out(`commit ${r.commit_sha} (first scan ${r.first_scan}, last scan ${r.last_scan}) profile=${r.profile_name}`);
   if (r.snippet) out(`line: ${r.snippet}`);
@@ -2139,7 +2157,7 @@ function cmdSql(a) {
 function selectIds(a) {
   const ids = a.pos.filter((x) => /^\d+(,\d+)*$/.test(x)).flatMap((x) => x.split(',').map(Number));
   if (ids.length) return ids;
-  const hasFilter = ['severity', 'category', 'path', 'triage', 'scan', 'latest', 'text', 'unit', 'group', 'dupe-of', 'ids', 'reported', 'unreported']
+  const hasFilter = ['severity', 'category', 'path', 'triage', 'confirmation', 'scan', 'latest', 'text', 'unit', 'group', 'dupe-of', 'ids', 'reported', 'unreported']
     .some((k) => a.f[k] !== undefined);
   if (!hasFilter) die('give finding ids or filter flags');
   return loadFindings(a.f).map((r) => r.id);
@@ -2157,6 +2175,31 @@ function cmdTriage(a) {
     for (const id of ids) st.run(state, note || null, note || null, now(), id);
   });
   out(`${ids.length} finding(s) → ${state}: ${ids.slice(0, 30).map((i) => '#' + i).join(' ')}${ids.length > 30 ? ' …' : ''}`);
+}
+
+function cmdConfirm(a) {
+  const state = a.f.set;
+  if (!CONFIRMATION.includes(state)) die(`--set must be one of ${CONFIRMATION.join('|')}`);
+  const ids = selectIds(a);
+  if (!ids.length) die('no findings selected');
+  const sev = a.f['set-severity'];
+  if (sev !== undefined && !SEVERITIES.includes(sev)) die(`--set-severity must be one of ${SEVERITIES.join('|')}`);
+  const note = a.f.note ? `[confirmation: ${state}] ${a.f.note}` : null;
+  const changed = [];
+  tx((d) => {
+    const st = d.prepare(`UPDATE findings SET confirmation=?, note=CASE WHEN ? IS NULL THEN note ELSE
+      COALESCE(note || char(10), '') || ? END, updated=? WHERE id=?`);
+    const get = d.prepare('SELECT severity FROM findings WHERE id=?');
+    const ss = d.prepare(`UPDATE findings SET severity=?, severity_locked=1, note=COALESCE(note || char(10), '') || ? WHERE id=?`);
+    for (const id of ids) {
+      st.run(state === 'unchecked' ? null : state, note, note, now(), id);
+      if (sev === undefined) continue;
+      const old = get.get(id)?.severity;
+      if (old && old !== sev) { ss.run(sev, `[severity: ${old} → ${sev}]`, id); changed.push(`#${id} ${old}→${sev}`); }
+    }
+  });
+  out(`${ids.length} finding(s) → confirmation ${state}: ${ids.slice(0, 30).map((i) => '#' + i).join(' ')}${ids.length > 30 ? ' …' : ''}` +
+    (changed.length ? `\nseverity: ${changed.join(', ')}` : ''));
 }
 
 function cmdProfile(a) {
@@ -2794,11 +2837,12 @@ planner:   plan-context <scan> | apply-plan <scan> --file plan.json
 workers:   claim <scan> | submit <scan> <chunk> --file <path> [--slice k] < findings.json
 limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P]; start/restart/continue [--concurrency 1-16, default 10]  | statusline [-- <wrapped status line cmd>]
 progress:  status [--scan id|--all] | files [--state s] [--path p] [--out f]
-findings:  query [--severity critical,high|high+] [--category c] [--path p] [--triage t|all] [--reported|--unreported]
+findings:  query [--severity critical,high|high+] [--category c] [--path p] [--triage t|all] [--confirmation c|all] [--reported|--unreported]
                  [--tracker t] [--scan id|--latest] [--stale|--no-stale] [--gone|--include-gone] [--min-confidence x] [--text s] [--unit u]
                  [--group g] [--dupe-of id] [--primary-only] [--ids 1,2] [--sort severity:desc,path,line]
                  [--limit n] [--format table|md|json|csv] [--out file]
            show <id> | sql "<SELECT ...>" | triage <ids|filters> --set <state> [--note s]
+           confirm <ids|filters> --set confirmed|not_confirmed|unchecked [--set-severity s] [--note s]
 profiles:  profile list | show <name> | add <name> --file f | rm <name>
 dupes:     dupes [filters] [--line-window 10] [--title-sim 0.6] | dupes list | dupes show <g> | dupes merge|split <ids>
 trackers:  tracker-sync gh [--repo o/r] [--state all] [--search q] | tracker-import jira < issues.json
@@ -2814,7 +2858,7 @@ report:    report-config show|set <k> <v>|unset <k> | render [filters] [--target
 const COMMANDS = {
   start: cmdStart, continue: cmdContinue, restart: cmdRestart, stop: cmdStop, 'set-run': cmdSetRun,
   'plan-context': cmdPlanContext, 'apply-plan': cmdApplyPlan, claim: cmdClaim, submit: cmdSubmit,
-  status: cmdStatus, files: cmdFiles, query: cmdQuery, show: cmdShow, sql: cmdSql, triage: cmdTriage,
+  status: cmdStatus, files: cmdFiles, query: cmdQuery, show: cmdShow, sql: cmdSql, triage: cmdTriage, confirm: cmdConfirm,
   profile: cmdProfile, dupes: cmdDupes, 'tracker-sync': cmdTrackerSync, 'tracker-import': cmdTrackerImport,
   match: cmdMatch, link: cmdLink, unlink: cmdUnlink, 'issues-sync': cmdIssuesSync, 'report-config': cmdReportConfig, render: cmdRender,
   drafts: cmdDrafts, calibrate: cmdCalibrate, 'verify-prompt': cmdVerifyPrompt, init: cmdInit, statusline: cmdStatusline, limits: cmdLimits, 'statusline-path': () => out(rateLimitsPath()), 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,
