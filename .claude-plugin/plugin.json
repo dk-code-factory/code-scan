@@ -1,6 +1,6 @@
 {
   "name": "code-scan",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Repository-wide bug scanning for Claude Code: path-based code inventory, a planner, calibrated chunk sizes, parallel minimal-preamble reviewers, per-file progress with a content-hash ledger, a queryable findings store, duplicate and tracker matching, and filing to GitHub or Jira.",
   "author": { "name": "Dmitry Kropachev" },
   "license": "MIT",

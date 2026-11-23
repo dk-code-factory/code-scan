@@ -1,6 +1,6 @@
 # code-scan
 
-Repository-wide bug scanning for Claude Code. MIT. Version 1.1.0.
+Repository-wide bug scanning for Claude Code. MIT. Version 1.2.0.
 
 Almost all coordination is done by a deterministic CLI (`bin/code-scan.js`, Node 22.5+, no
 dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather than orchestrating it.
