@@ -49,7 +49,9 @@ stays current while the session waits on background agents:
 "statusLine": { "type": "command", "command": "node <plugin>/bin/code-scan.js statusline", "refreshInterval": 30 }
 ```
 
-A 5-hour limit with no snapshot from the last 15 minutes counts as crossed.
+A 5-hour limit with no snapshot from the last 15 minutes counts as crossed. Reviewers run in a fixed number of lanes
+(12 by default), so after a limit trips at most one short agent per lane starts and gets nothing.
+Calibration rounds are separate scans and do not count toward a scan's dollar cap.
 
 ## Chunk size
 

@@ -258,18 +258,40 @@ o=$(B claim --inline "$sid"); has "$o" 'NONE (spend \$1.20 reached the \$1 limit
 B limits --max-usd 0 >/dev/null; has "$(B continue)" '"workers"' && has "$(B claim --inline "$sid")" '^CHUNK' && ok usd-limit-lifted || bad usd-limit-lifted
 B limits --max-5h-pct 80 >/dev/null
 o=$(B claim --inline "$sid"); has "$o" 'NONE (5-hour usage is unknown' && ok pct-unknown-stops || bad "pct-unknown-stops: $o"
-mkdir -p "$W/xdg/code-scan"; now=$(date +%s%3N)
-echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":50,\"resets_at\":9999999999}}}" > "$W/xdg/code-scan/rate-limits.json"
+RL=$(B statusline-path); mkdir -p "$(dirname "$RL")"; now=$(date +%s%3N)
+echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":50,\"resets_at\":9999999999}}}" > "$RL"
 B continue >/dev/null; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-under-limit || bad pct-under-limit
-echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":85,\"resets_at\":9999999999}}}" > "$W/xdg/code-scan/rate-limits.json"
+echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":85,\"resets_at\":9999999999}}}" > "$RL"
 o=$(B claim --inline "$sid"); has "$o" 'NONE (5-hour subscription usage 85% reached the 80% limit' && ok pct-stops || bad "pct-stops: $o"
-echo "{\"ts\":$((now-3600000)),\"rate_limits\":{\"five_hour\":{\"used_percentage\":10,\"resets_at\":9999999999}}}" > "$W/xdg/code-scan/rate-limits.json"
-B continue >/dev/null 2>&1; o=$(B claim --inline "$sid"); has "$o" 'unknown' && ok pct-stale-stops || bad "pct-stale-stops: $o"
-echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":95,\"resets_at\":1000}}}" > "$W/xdg/code-scan/rate-limits.json"
+echo "{\"ts\":$((now-3600000)),\"rate_limits\":{\"five_hour\":{\"used_percentage\":10,\"resets_at\":9999999999}}}" > "$RL"
+o=$(B continue 2>&1); has "$o" 'not resuming' && has "$o" 'unknown' && ok pct-stale-stops || bad "pct-stale-stops: $o"
+echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":95,\"resets_at\":1000}}}" > "$RL"
 B continue >/dev/null 2>&1; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-window-reset || bad pct-window-reset
 o=$(echo '{"model":{"display_name":"M"},"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":5},"seven_day":{"used_percentage":2}}}' | B statusline)
-has "$o" '5h 40%' && has "$(cat "$W/xdg/code-scan/rate-limits.json")" '"used_percentage":40' && ok statusline-snapshot || bad "statusline-snapshot: $o"
+has "$o" '5h 40%' && has "$(cat "$RL")" '"used_percentage":40' && ok statusline-snapshot || bad "statusline-snapshot: $o"
 has "$(echo '{}' | B statusline -- echo wrapped)" 'wrapped' && ok statusline-wraps || bad statusline-wraps
+# review fixes: no crash without resets_at, bad values rejected, continue while crossed launches nothing
+echo "{\"ts\":$(date +%s%3N),\"rate_limits\":{\"five_hour\":{\"used_percentage\":90}}}" > "$RL"
+o=$(B continue 2>&1); has "$o" '5-hour subscription usage 90% reached the 80% limit' && ! has "$o" 'Invalid time' && ok pct-no-resets-at || bad "pct-no-resets-at: $o"
+B limits --max-5h-pct 95 >/dev/null; B continue >/dev/null 2>&1; echo "{\"ts\":$(date +%s%3N),\"rate_limits\":{\"five_hour\":{\"used_percentage\":96}}}" > "$RL"
+o=$(B claim --inline "$sid" 2>&1); has "$o" 'NONE (5-hour subscription usage 96% reached the 95% limit)' && ok claim-no-resets-at || bad "claim-no-resets-at: $o"
+B limits --max-5h-pct 80 >/dev/null; echo "{\"ts\":$(date +%s%3N),\"rate_limits\":{\"five_hour\":{\"used_percentage\":90}}}" > "$RL"
+o=$(B continue 2>&1); has "$o" 'not resuming' && has "$o" '"workers":0' && has "$(B status)" '\[stopped\]' && ok continue-while-crossed || bad "continue-while-crossed: $o"
+o=$(B limits --max-usd abc 2>&1); has "$o" 'needs a number' && ok bad-limit-rejected || bad "bad-limit-rejected: $o"
+o=$(B limits --max-usd '' 2>&1); has "$o" 'needs a number' && ok empty-limit-rejected || bad "empty-limit-rejected: $o"
+has "$(echo '{"cost":{"total_cost_usd":null},"rate_limits":{"five_hour":{"used_percentage":1}}}' | B statusline)" '5h 1%' && ok statusline-null-cost || bad statusline-null-cost
+# pricing: older models priced by id, fast mode from usage, transcript mentioning CODESCAN_HOME in code still counts
+B limits --max-5h-pct 0 >/dev/null; B limits --max-usd 1000 >/dev/null
+{ printf '{"type":"user","message":{"role":"user","content":"Run: CODESCAN_HOME=%s node x -C %s claim --inline %s"}}\n' "$CODESCAN_HOME" "$W/repo" "$sid"
+  printf '{"type":"user","message":{"content":"code mentions CODESCAN_HOME=/elsewhere here"}}\n'
+  printf '{"type":"assistant","message":{"id":"h1","model":"claude-haiku-4-5","usage":{"output_tokens":1000000}}}\n'
+  printf '{"type":"assistant","message":{"id":"f1","model":"claude-opus-5-5","usage":{"output_tokens":100000,"speed":"fast"}}}\n'
+  printf '{"type":"assistant","message":{"id":"u1","model":"claude-mythos-1","usage":{"output_tokens":100000}}}\n'
+} > "$W/claude/projects/p/s/subagents/workflows/wf_x/agent-c.jsonl"
+# 1.20 (agent-a) + haiku-4-5 1M out $5 + opus 5.5 fast 100k out $4 + unknown model at max row 100k out $5 = 15.20
+has "$(B limits)" 'spend: \$15.20 of \$1000 limit' && ok pricing-by-id || bad "pricing-by-id: $(B limits)"
+printf '{"type":"assistant","message":{"id":"h2","model":"claude-haiku-4-5","usage":{"output_tokens":200000}}}\n' >> "$W/claude/projects/p/s/subagents/workflows/wf_x/agent-c.jsonl"
+has "$(B limits)" 'spend: \$16.20 of' && ok spend-incremental || bad "spend-incremental: $(B limits)"
 unset CLAUDE_CONFIG_DIR XDG_CACHE_HOME
 
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS

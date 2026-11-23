@@ -46,12 +46,27 @@ if (args.plan) {
   else log('planner failed; reviewing with the heuristic chunking')
 }
 
-const cap = Math.min(workers, 900)
-if (workers > cap) log(`${workers - cap} chunks left for the next run (per-run cap 900) — run continue`)
+// Reviewers run in lanes rather than one queued agent per chunk: each lane keeps starting
+// reviewers until one gets NONE (no chunk left, scan stopped, or a spending limit crossed), so a
+// crossed limit costs at most one short agent per lane instead of one per remaining chunk.
+if (!workers) return { chunks_reviewed: 0, files: 0, findings: 0, failed_agents: 0 }
+const LANES = Math.max(1, Math.min(workers, args.lanes || 12, 900))
 phase('Review')
-log(`reviewing ${cap} chunk(s)`)
-const results = await parallel(Array.from({ length: cap }, (_, i) => () =>
-  agent(WORKER_PROMPT, { label: `review ${i + 1}/${cap}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: args.agentType || 'code-scan:reviewer' })))
+log(`reviewing ${workers} chunk(s) in ${LANES} lane(s)`)
+let started = 0
+const results = []
+await parallel(Array.from({ length: LANES }, (_, lane) => async () => {
+  let failures = 0
+  while (started < 900) {
+    const n = ++started
+    const r = await agent(WORKER_PROMPT, { label: `review ${n}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: args.agentType || 'code-scan:reviewer' })
+    results.push(r)
+    if (!r) { if (++failures >= 2) break; continue }
+    failures = 0
+    if (r.chunk === null) break
+  }
+}))
+if (started >= 900) log('per-run cap of 900 reviewers reached — run continue for the rest')
 const ok = results.filter((r) => r && r.chunk !== null)
 return {
   chunks_reviewed: ok.length,
