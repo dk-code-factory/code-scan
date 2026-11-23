@@ -31,6 +31,7 @@ const TRIAGE = ['open', 'confirmed', 'false_positive', 'fixed', 'wontfix'];
 const FILE_STATES = ['pending', 'in_progress', 'partial', 'reviewed', 'excluded', 'unchanged'];
 const MAX_CODE_BYTES = 512 * 1024;
 const STDOUT_ROWS = 50;
+const RATE_LIMIT_MAX_AGE_MIN = 15;
 // Chunk size for a model that has not been calibrated on this repo. Picked by running the
 // calibration below on real code (see README "Chunk size"); calibration starts from it.
 const DEFAULT_CHUNK_KB = 40;
@@ -619,6 +620,8 @@ function buildOpts(f, base = {}) {
   if (f.include) o.include = f.include;
   if (f.exclude) o.exclude = f.exclude;
   if (f.only) o.only = f.only;
+  if (f['max-usd'] !== undefined) o.maxUsd = Number(f['max-usd']) || null;
+  if (f['max-5h-pct'] !== undefined) o.max5hPct = Number(f['max-5h-pct']) || null;
   if (f['chunk-kb']) { o.chunkKb = Number(f['chunk-kb']); o.chunkSource = 'flag'; }
   if (f.model) o.model = f.model;
   if (!f['chunk-kb'] && (o.chunkSource !== 'flag' || f.model)) {
@@ -712,6 +715,16 @@ function cmdContinue(a) {
   if (!['active', 'stopped'].includes(scan.status)) die(`scan ${scan.id} is ${scan.status}`);
   const head = git(['rev-parse', 'HEAD']).trim();
   setScanStatus(scan.id, 'active');
+  db().prepare('DELETE FROM config WHERE key=?').run(`stop_reason:${scan.id}`);
+  if (a.f['max-usd'] !== undefined || a.f['max-5h-pct'] !== undefined) {
+    const o = JSON.parse(scan.options_json);
+    if (a.f['max-usd'] !== undefined) o.maxUsd = Number(a.f['max-usd']) || null;
+    if (a.f['max-5h-pct'] !== undefined) o.max5hPct = Number(a.f['max-5h-pct']) || null;
+    db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(o), scan.id);
+    scan.options_json = JSON.stringify(o);
+  }
+  const why0 = limitReason(getScan(scan.id));
+  if (why0) out(`warning: ${why0} — workers will get no chunks until it clears`);
   if (a.f.model || a.f['chunk-kb']) {
     // pick up a calibration finished after the scan was created (or an explicit size)
     const opts = buildOpts(a.f, JSON.parse(scan.options_json));
@@ -860,6 +873,16 @@ function worktreeMatches(p, blob) {
 function cmdClaim(a) {
   const scanId = Number(a.pos[0] || (openScan() || {}).id);
   if (!scanId) { out('NONE'); return; }
+  const pre = db().prepare('SELECT * FROM scans WHERE id=?').get(scanId);
+  if (pre && pre.status === 'active') {
+    const why = limitReason(pre);
+    if (why) {
+      setScanStatus(scanId, 'stopped');
+      cfgSet(`stop_reason:${scanId}`, why);
+      out(`NONE (${why})`);
+      return;
+    }
+  }
   const got = tx((d) => {
     const scan = d.prepare('SELECT * FROM scans WHERE id=?').get(scanId);
     if (!scan || scan.status !== 'active') return null;
@@ -1311,6 +1334,187 @@ function cmdCalibrate(a) {
   die('usage: calibrate start --model m [--sample-kb 200] [--medium 40] [--profile p] | next [id] | status | set <model> <kb>');
 }
 
+// -------------------------------------------------------------------- limits
+//
+// A scan can carry a dollar cap and a cap on the 5-hour subscription window. Both are enforced at
+// `claim`: once crossed, no new chunk is handed out (in-flight chunks still finish) and the scan
+// stops with the reason recorded. Dollars are computed from the scan's own agent transcripts at
+// list price; the 5-hour percentage comes from the status line (see `statusline`).
+
+// USD per million tokens: input, cache write 5m, cache write 1h, cache read, output
+const PRICES = [
+  ['claude-fable', [8, 10, 16, 0.20, 40]],
+  ['claude-opus', [4, 5, 8, 0.20, 20]],
+  ['claude-sonnet', [2, 2.5, 4, 0.10, 10]],
+  ['claude-haiku', [0.10, 0.125, 0.20, 0.01, 0.50]],
+];
+const HAIKU_LONG = [0.50, 0.625, 1, 0.05, 2.50]; // prompt over 100k tokens
+
+function messageUsd(model, u, entry) {
+  const m = String(model || '');
+  let p = (PRICES.find(([k]) => m.startsWith(k)) || PRICES[1])[1];
+  const cw = u.cache_creation || {};
+  const w5 = cw.ephemeral_5m_input_tokens ?? (cw.ephemeral_1h_input_tokens === undefined ? (u.cache_creation_input_tokens || 0) : 0);
+  const w1 = cw.ephemeral_1h_input_tokens || 0;
+  const prompt = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+  if (m.startsWith('claude-haiku') && prompt > 100000) p = HAIKU_LONG;
+  let usd = ((u.input_tokens || 0) * p[0] + w5 * p[1] + w1 * p[2] + (u.cache_read_input_tokens || 0) * p[3] + (u.output_tokens || 0) * p[4]) / 1e6;
+  if (entry && entry.speed === 'fast') usd *= 2;
+  if (entry && entry.inference_geo === 'us') usd *= 1.1;
+  return usd;
+}
+
+function transcriptRoot() {
+  return path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
+}
+
+/** Workflow agent transcripts created since `sinceMs` (subagent dirs of every project/session). */
+function recentAgentTranscripts(sinceMs) {
+  const res = [];
+  const root = transcriptRoot();
+  const ls = (d) => { try { return fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return []; } };
+  for (const proj of ls(root)) {
+    if (!proj.isDirectory()) continue;
+    for (const sess of ls(path.join(root, proj.name))) {
+      if (!sess.isDirectory()) continue;
+      const wfRoot = path.join(root, proj.name, sess.name, 'subagents', 'workflows');
+      for (const wf of ls(wfRoot)) {
+        if (!wf.isDirectory()) continue;
+        for (const f of ls(path.join(wfRoot, wf.name))) {
+          if (!f.name.startsWith('agent-') || !f.name.endsWith('.jsonl')) continue;
+          const p = path.join(wfRoot, wf.name, f.name);
+          let st;
+          try { st = fs.statSync(p); } catch (e) { continue; }
+          if (st.mtimeMs >= sinceMs) res.push({ p, size: st.size });
+        }
+      }
+    }
+  }
+  return res;
+}
+
+/** Dollars spent so far by the agents of one scan, from their transcripts (cached by file size). */
+function scanSpendUsd(scan) {
+  const d = db();
+  d.exec(`CREATE TABLE IF NOT EXISTS spend_files (path TEXT PRIMARY KEY, size INTEGER NOT NULL, scan_key TEXT, usd REAL NOT NULL)`);
+  const home = process.env.CODESCAN_HOME ? path.resolve(process.env.CODESCAN_HOME) : null;
+  const key = `${repoRoot()}|${home || ''}|${scan.id}`;
+  // an agent belongs to this scan when its task runs the CLI against this repo + state + scan id
+  const mine = new RegExp(`-C ${escRe(repoRoot())} (?:claim(?: --inline)?|plan-context|apply-plan) ${scan.id}\\b`);
+  const since = Date.parse(scan.created) - 60000;
+  const get = d.prepare('SELECT size, scan_key, usd FROM spend_files WHERE path=?');
+  const put = d.prepare(`INSERT INTO spend_files(path,size,scan_key,usd) VALUES(?,?,?,?)
+    ON CONFLICT(path) DO UPDATE SET size=excluded.size, scan_key=excluded.scan_key, usd=excluded.usd`);
+  let total = 0;
+  for (const { p, size } of recentAgentTranscripts(since)) {
+    const c = get.get(p);
+    if (c && c.size === size) { if (c.scan_key === key) total += c.usd; continue; }
+    let text;
+    try { text = fs.readFileSync(p, 'utf8'); } catch (e) { continue; }
+    const head = text.slice(0, 20000);
+    const homeOk = home ? head.includes(`CODESCAN_HOME=${home} `) : !head.includes('CODESCAN_HOME=');
+    let usd = 0;
+    const belongs = mine.test(head) && homeOk;
+    if (belongs) {
+      const seen = new Set();
+      for (const line of text.split('\n')) {
+        if (!line.includes('"usage"')) continue;
+        let e;
+        try { e = JSON.parse(line); } catch (err) { continue; }
+        if (e.type !== 'assistant' || !e.message || !e.message.usage) continue;
+        if (e.message.id && seen.has(e.message.id)) continue;
+        seen.add(e.message.id);
+        usd += messageUsd(e.message.model, e.message.usage, e);
+      }
+      total += usd;
+    }
+    put.run(p, size, belongs ? key : null, usd);
+  }
+  return total;
+}
+
+function rateLimitsPath() {
+  const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+  return path.join(base, 'code-scan', 'rate-limits.json');
+}
+function readRateLimits() {
+  try { return JSON.parse(fs.readFileSync(rateLimitsPath(), 'utf8')); } catch (e) { return null; }
+}
+
+/** Why work must not be scheduled now, or null. */
+function limitReason(scan) {
+  const o = JSON.parse(scan.options_json);
+  if (o.maxUsd) {
+    const usd = scanSpendUsd(scan);
+    if (usd >= o.maxUsd) return `spend $${usd.toFixed(2)} reached the $${o.maxUsd} limit`;
+  }
+  if (o.max5hPct) {
+    const rl = readRateLimits();
+    const fh = rl && rl.rate_limits && rl.rate_limits.five_hour;
+    const ageMin = rl ? (Date.now() - rl.ts) / 60000 : Infinity;
+    if (!fh || ageMin > RATE_LIMIT_MAX_AGE_MIN) {
+      return `5-hour usage is unknown (no status-line snapshot in the last ${RATE_LIMIT_MAX_AGE_MIN} min; see \`statusline\`)`;
+    }
+    const resetPassed = fh.resets_at && fh.resets_at * 1000 <= Date.now();
+    if (!resetPassed && fh.used_percentage >= o.max5hPct) {
+      return `5-hour subscription usage ${fh.used_percentage}% reached the ${o.max5hPct}% limit (resets ${new Date(fh.resets_at * 1000).toISOString().slice(11, 16)} UTC)`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Status line command. Saves the rate limits Claude Code passes to the status line (the only place
+ * they are exposed) and prints a status line — or the output of the command given after `--`.
+ */
+function cmdStatusline(a) {
+  const raw = fs.readFileSync(0, 'utf8');
+  let j = {};
+  try { j = JSON.parse(raw); } catch (e) { /* keep going: still print something */ }
+  if (j.rate_limits) {
+    const p = rateLimitsPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const tmp = `${p}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ ts: Date.now(), rate_limits: j.rate_limits, session_cost_usd: j.cost && j.cost.total_cost_usd }));
+    fs.renameSync(tmp, p);
+  }
+  if (a.pos.length) {
+    const r = spawnSync(a.pos[0], a.pos.slice(1), { input: raw, encoding: 'utf8', shell: a.pos.length === 1 });
+    process.stdout.write(r.stdout || '');
+    return;
+  }
+  const rl = j.rate_limits || {};
+  const pct = (x) => (x && x.used_percentage !== undefined ? `${Math.round(x.used_percentage)}%` : '–');
+  const model = (j.model && (j.model.display_name || j.model.id)) || '';
+  const cost = j.cost && j.cost.total_cost_usd !== undefined ? ` · $${j.cost.total_cost_usd.toFixed(2)}` : '';
+  out(`${model} · 5h ${pct(rl.five_hour)} · 7d ${pct(rl.seven_day)}${cost}`);
+}
+
+function cmdLimits(a) {
+  const scan = scanArg(a.f);
+  const o = JSON.parse(scan.options_json);
+  if (a.f['max-usd'] !== undefined || a.f['max-5h-pct'] !== undefined) {
+    if (a.f['max-usd'] !== undefined) o.maxUsd = Number(a.f['max-usd']) || null;
+    if (a.f['max-5h-pct'] !== undefined) o.max5hPct = Number(a.f['max-5h-pct']) || null;
+    db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(o), scan.id);
+  }
+  limitLines(getScan(scan.id)).forEach((l) => out(l));
+}
+
+function limitLines(scan) {
+  const o = JSON.parse(scan.options_json);
+  const lines = [];
+  if (o.maxUsd) lines.push(`spend: $${scanSpendUsd(scan).toFixed(2)} of $${o.maxUsd} limit`);
+  if (o.max5hPct) {
+    const rl = readRateLimits();
+    const fh = rl && rl.rate_limits && rl.rate_limits.five_hour;
+    lines.push(fh ? `5-hour window: ${fh.used_percentage}% used (limit ${o.max5hPct}%, snapshot ${Math.round((Date.now() - rl.ts) / 60000)} min old)` : `5-hour window: unknown — no status-line snapshot (limit ${o.max5hPct}%)`);
+  }
+  const why = cfgGet(`stop_reason:${scan.id}`);
+  if (why) lines.push(`stopped by limit: ${why}`);
+  return lines;
+}
+
 // -------------------------------------------------------------------- status
 
 function scanSummary(s) {
@@ -1344,6 +1548,7 @@ function cmdStatus(a) {
   }
   const s = scanArg(a.f);
   scanSummary(s).forEach((l) => out(l));
+  limitLines(s).forEach((l) => out(l));
   const g = d.prepare(`SELECT COUNT(*) n, SUM(NOT EXISTS (SELECT 1 FROM filings x WHERE x.finding_id=f.id AND x.kind!='skipped')) un
     FROM findings f WHERE triage IN ('open','confirmed') AND gone_scan IS NULL`).get();
   out(`all findings (open+confirmed): ${g.n}, unreported: ${g.un || 0}`);
@@ -2138,6 +2343,7 @@ scan:      start [--model m] [--profile p|--prompt-file f] [--only g] [--include
            continue [--scan id] [--model m] | restart [--replan] [--reset-scope] [...start flags] | stop [--now] | set-run <scan> <task>
 planner:   plan-context <scan> | apply-plan <scan> --file plan.json
 workers:   claim <scan> | submit <scan> <chunk> --file <path> [--slice k] < findings.json
+limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P]  | statusline [-- <wrapped status line cmd>]
 progress:  status [--scan id|--all] | files [--state s] [--path p] [--out f]
 findings:  query [--severity critical,high|high+] [--category c] [--path p] [--triage t|all] [--reported|--unreported]
                  [--tracker t] [--scan id|--latest] [--stale|--no-stale] [--gone|--include-gone] [--min-confidence x] [--text s] [--unit u]
@@ -2159,7 +2365,7 @@ const COMMANDS = {
   status: cmdStatus, files: cmdFiles, query: cmdQuery, show: cmdShow, sql: cmdSql, triage: cmdTriage,
   profile: cmdProfile, dupes: cmdDupes, 'tracker-sync': cmdTrackerSync, 'tracker-import': cmdTrackerImport,
   match: cmdMatch, link: cmdLink, unlink: cmdUnlink, 'report-config': cmdReportConfig, render: cmdRender,
-  drafts: cmdDrafts, calibrate: cmdCalibrate, 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,
+  drafts: cmdDrafts, calibrate: cmdCalibrate, statusline: cmdStatusline, limits: cmdLimits, 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,
 };
 
 function main() {

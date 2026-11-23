@@ -40,6 +40,15 @@ Scope: "only src/x and lib/y" → `--only src/x/ --only lib/y/` (restricts the s
 On `restart`, scope flags replace the previous scan's scope entirely; "whole repo again" →
 `restart --reset-scope`.
 
+Spending limits (on `start`/`restart`/`continue`, or later with `$CS limits`): "stop at $20" →
+`--max-usd 20`; "stop when the 5-hour subscription window is 80% used" → `--max-5h-pct 80`. Once a
+limit is crossed, workers get no new chunks, in-flight ones finish, and the scan stops with the
+reason in `$CS status`; `continue` resumes when it clears. Dollars are list-price estimates from the
+scan's own agent transcripts. The 5-hour percentage needs the status line: if `$CS limits` reports it
+unknown, tell the user to set `statusLine` to
+`{"type":"command","command":"node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js statusline","refreshInterval":30}`
+(or `... statusline -- <their existing command>` to keep their own line), and do not start without it.
+
 Other flags only when asked: `--include-tests`, `--chunk-kb N` (skips calibration), `--include <glob>`, `--exclude <glob>`,
 `--no-plan` (skip planner), `--replan` (restart only).
 
