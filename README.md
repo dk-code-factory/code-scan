@@ -1,6 +1,6 @@
 # code-scan
 
-Repository-wide bug scanning for Claude Code. MIT. Version 1.0.1.
+Repository-wide bug scanning for Claude Code. MIT. Version 1.1.0.
 
 Almost all coordination is done by a deterministic CLI (`bin/code-scan.js`, Node 22.5+, no
 dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather than orchestrating it.
@@ -35,6 +35,23 @@ dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather t
    confirms candidates from the code (it never builds or runs anything) and submits.
 4. **Store** — findings, per-file progress and a blob-sha ledger live in
    `~/.cache/code-scan/<repo>/codescan.db` (`CODESCAN_HOME` overrides).
+
+## Spending limits
+
+`--max-usd N` and `--max-5h-pct P` (on `start`/`restart`/`continue`, or `code-scan.js limits`) stop
+handing out chunks once crossed; in-flight chunks finish and the scan stops with the reason recorded.
+Dollars are list-price estimates summed from the scan's own agent transcripts. The 5-hour
+subscription percentage is only exposed to the status line, so `code-scan.js statusline` saves it
+(and prints a line, or wraps your existing command after `--`). Use it with a refresh interval so it
+stays current while the session waits on background agents:
+
+```json
+"statusLine": { "type": "command", "command": "node <plugin>/bin/code-scan.js statusline", "refreshInterval": 30 }
+```
+
+A 5-hour limit with no snapshot from the last 15 minutes counts as crossed. Reviewers run in a fixed number of lanes
+(12 by default), so after a limit trips at most one short agent per lane starts and gets nothing.
+Calibration rounds are separate scans and do not count toward a scan's dollar cap.
 
 ## Chunk size
 
