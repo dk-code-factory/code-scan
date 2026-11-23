@@ -39,7 +39,8 @@ async function run(prompt, opts) {
     }
   }
   const { agentType, ...rest } = opts
-  return agent(prompt, rest)
+  // the default agent lacks the reviewer instructions: have claim print them
+  return agent(prompt.replace(' claim --inline ', ' claim --inline --rules '), rest)
 }
 
 async function reviewRound(m, round) {
@@ -51,7 +52,7 @@ async function reviewRound(m, round) {
       const n = ++started
       const r = await run(`Run: ${CLI} claim --inline ${round.scanId}
 Then follow your instructions. Final reply: {"chunk": <id or null>, "files": <files submitted>, "findings": <findings submitted>}.`,
-        { label: `${m.model} ${round.scanId}.${n}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: 'code-scan:reviewer', model: m.model })
+        { label: `${m.label || m.model} ${round.scanId}.${n}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: 'code-scan:reviewer', ...(m.model ? { model: m.model } : {}) })
       if (!r) { if (++failures >= 2) break; continue }
       failures = 0
       if (r.chunk === null) break
@@ -67,12 +68,12 @@ const results = await parallel(args.runs.map((m) => async () => {
   ${CLI} calibrate next ${m.calId}
 If its last line starts with "DONE chunk_kb=<N>", return {"done": true, "chunk_kb": N, "note": <that line>}.
 If its last line starts with "NEXT ", parse the JSON after it and return {"done": false, "next": {"scanId": <scanId>, "workers": <workers>}, "note": <the line before it>}.`,
-      { label: `${m.model} decide ${i + 1}`, phase: 'Decide', model: 'haiku', effort: 'low', schema: DECIDE_SCHEMA })
-    if (!r) { log(`${m.model}: decision step failed`); return { model: m.model, chunk_kb: null } }
-    log(`${m.model}: ${r.note || ''}`)
-    if (r.done) return { model: m.model, chunk_kb: r.chunk_kb }
+      { label: `${m.label || m.model} decide ${i + 1}`, phase: 'Decide', model: 'haiku', effort: 'low', schema: DECIDE_SCHEMA })
+    if (!r) { log(`${m.label || m.model}: decision step failed`); return { model: m.label || m.model, chunk_kb: null } }
+    log(`${m.label || m.model}: ${r.note || ''}`)
+    if (r.done) return { model: m.label || m.model, chunk_kb: r.chunk_kb }
     round = r.next
   }
-  return { model: m.model, chunk_kb: null }
+  return { model: m.label || m.model, chunk_kb: null }
 }))
 return { initId: args.initId, models: results.filter(Boolean) }

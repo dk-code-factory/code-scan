@@ -204,7 +204,7 @@ function pathMatcher(spec) {
 
 const BOOL_FLAGS = new Set(['include-tests', 'force', 'no-plan', 'replan', 'now', 'all',
   'latest', 'stale', 'no-stale', 'reported', 'unreported', 'primary-only', 'new',
-  'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline']);
+  'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules']);
 const MULTI_FLAGS = new Set(['include', 'exclude', 'only', 'force-path', 'path', 'severity',
   'category', 'triage', 'sort', 'label']);
 
@@ -610,8 +610,11 @@ function cliPrefix() {
 
 /** Workflow agent() model alias for a model id (claude-sonnet-5-5 → sonnet); null = inherit. */
 function modelAlias(id) {
-  const m = String(id || '').match(/^claude-(opus|sonnet|haiku|fable)\b/);
-  return m ? m[1] : null;
+  if (!id) return null;
+  const hit = Object.entries(MODEL_IDS).find(([, v]) => v === id);
+  // a current model maps to its alias; any other id is passed through unchanged so the agent runs
+  // exactly the model that was calibrated and priced (never a different version of the family)
+  return hit ? hit[0] : String(id);
 }
 
 function nextLine(scan, plan) {
@@ -715,6 +718,10 @@ function cmdRestart(a) {
   if (prev && ['active', 'stopped'].includes(prev.status)) setScanStatus(prev.id, 'superseded');
   const base = prev ? JSON.parse(prev.options_json) : {};
   delete base.force; delete base.forcePath;
+  if (!a.f.model && cfgGet('default_model') && base.model !== cfgGet('default_model')) {
+    base.model = cfgGet('default_model'); // picked at init after the previous scan ran
+    if (base.chunkSource !== 'flag') delete base.chunkKb;
+  }
   // a new scope replaces the old one as a whole; --reset-scope clears it
   if (a.f.only || a.f.include || a.f.exclude || a.f['reset-scope']) { delete base.only; delete base.include; delete base.exclude; }
   const profile = (a.f.profile || a.f['prompt-file']) ? profileFromFlags(a.f)
@@ -923,6 +930,11 @@ function cmdClaim(a) {
   out('== REVIEW PROFILE ==');
   out(prof ? prof.text.trim() : '(default)');
   if (unit && unit.hint) { out('== SUBSYSTEM FOCUS =='); out(unit.hint); }
+  if (a.f.rules) {
+    // the default agent (fallback when the plugin agent type is not loaded) has no reviewer instructions
+    const def = path.join(PLUGIN_ROOT, 'agents', 'reviewer.md');
+    if (fs.existsSync(def)) { out('== REVIEWER INSTRUCTIONS =='); out(fs.readFileSync(def, 'utf8').replace(/^---[\s\S]*?---\n/, '').trim()); }
+  }
   if (a.f.inline) {
     const submitHelp = () => {
       out('== SUBMIT (once, after reviewing everything) ==');
@@ -1383,7 +1395,7 @@ function cmdInit(a) {
         VALUES(?,?,?,?,?,?,'running',?,?,?,?)`).run(model, prof.name, commit, sample, total, medium, initId, single, now(), now());
       const cal = d.prepare('SELECT * FROM calibrations WHERE id=?').get(r.lastInsertRowid);
       const round = calRound(cal, medium);
-      runs.push({ calId: cal.id, model: modelAlias(model), scanId: round.scanId, workers: round.workers });
+      runs.push({ calId: cal.id, model: modelAlias(model), label: model, scanId: round.scanId, workers: round.workers });
     }
     const dirs = [...new Set(pick.map((t) => t.path.split('/').slice(0, -1).join('/') || '.'))];
     out(`init ${initId}: ${models.length} model(s) [${models.join(', ')}] on one sample of ${pick.length} files, ${kb(total)} from ${dirs.slice(0, 4).join(', ')}${dirs.length > 4 ? ' …' : ''}`);
@@ -1396,6 +1408,7 @@ function cmdInit(a) {
   const initId = Number(a.pos[1]) || d.prepare('SELECT MAX(init_id) m FROM calibrations').get().m;
   if (sub === 'report') {
     if (!initId) die('no init yet — run `init start`');
+    if (!initCals(initId).length) die(`no init ${initId}`);
     const truth = a.f.truth ? JSON.parse(fs.readFileSync(a.f.truth, 'utf8')) : null;
     const { rows, rec, issues } = initCompare(initId, truth);
     const cal0 = initCals(initId)[0];
@@ -1413,10 +1426,17 @@ function cmdInit(a) {
     const model = modelId(a.pos[1] || '');
     if (!a.pos[1]) die('usage: init pick <model>');
     const cal = d.prepare("SELECT * FROM calibrations WHERE model=? AND status='done' ORDER BY id DESC LIMIT 1").get(model);
-    if (!cal && !a.f.force) die(`${model} has no finished calibration in this repo — run \`init start --models ${modelAlias(model) || model}\` (or --force to use the default chunk size)`);
+    let size = cal ? cal.result_kb : null;
+    if (!size) {
+      // calibration did not finish: use the size the latest init scored it at (what the report showed)
+      const lastInit = d.prepare('SELECT MAX(init_id) m FROM calibrations WHERE model=?').get(model).m;
+      const row = lastInit ? initCompare(lastInit).rows.find((r) => r.model === model) : null;
+      size = row && row.chunkKb;
+    }
+    if (!size && !a.f.force) die(`${model} has no calibration in this repo — run \`init start --models ${modelAlias(model)}\` (or --force to use the default chunk size)`);
     cfgSet('default_model', model);
-    if (cal) cfgSet(`chunk_kb:${model}`, cal.result_kb);
-    out(`default reviewer model: ${model}, chunk size ${cal ? cal.result_kb : DEFAULT_CHUNK_KB}KB`);
+    cfgSet(`chunk_kb:${model}`, size || DEFAULT_CHUNK_KB);
+    out(`default reviewer model: ${model}, chunk size ${size || DEFAULT_CHUNK_KB}KB`);
     return;
   }
   if (sub === 'status') {
@@ -1432,7 +1452,7 @@ function cmdCalibrate(a) {
   const sub = a.pos[0] || 'status';
   const d = db();
   if (sub === 'start') {
-    const model = a.f.model;
+    const model = a.f.model ? modelId(a.f.model) : null;
     if (!model) die('calibrate start needs --model <model id> (calibration is per model)');
     const prof = profileFromFlags(a.f);
     const commit = git(['rev-parse', 'HEAD']).trim();
@@ -1457,7 +1477,8 @@ function cmdCalibrate(a) {
     return;
   }
   if (sub === 'set') {
-    const [, model, val] = a.pos;
+    const [, rawModel, val] = a.pos;
+    const model = rawModel ? modelId(rawModel) : null;
     if (!model || !(Number(val) >= MIN_CHUNK_KB)) die(`usage: calibrate set <model> <kb>  (kb >= ${MIN_CHUNK_KB})`);
     cfgSet(`chunk_kb:${model}`, Number(val));
     out(`chunk_kb for ${model} = ${val}KB`);

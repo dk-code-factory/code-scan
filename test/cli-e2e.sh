@@ -329,4 +329,16 @@ has "$o" 'calibrated for good-model' && ! has "$o" '^INIT' && ok init-default-us
 B sql "delete from config where key='default_model'" >/dev/null 2>&1 || node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"delete from config where key='default_model'\")"
 has "$(B start --new --no-plan --force)" '^INIT' && ok init-hint || bad init-hint
 
+# --- review fixes for init
+has "$(B init report 99 2>&1)" 'no init 99' && ok init-report-bad-id || bad init-report-bad-id
+B calibrate set sonnet 24 >/dev/null; has "$(B sql "select value from config where key='chunk_kb:claude-sonnet-5-5'")" 24 && ok calibrate-set-normalizes || bad calibrate-set-normalizes
+B init pick good-model >/dev/null; B stop >/dev/null 2>&1; B start --new --no-plan --force --model claude-sonnet-5-5 >/dev/null
+B init pick weak-model >/dev/null; B stop >/dev/null 2>&1; o=$(B restart --no-plan --force)
+has "$o" 'calibrated for weak-model' && ok restart-honours-pick || bad "restart-honours-pick: $o"
+has "$o" '"model":"weak-model"' && ok model-id-passthrough || bad "model-id-passthrough: $o"
+o=$(B start --new --no-plan --force --model sonnet); has "$o" '"model":"sonnet"' && has "$o" 'calibrated for claude-sonnet-5-5' && ok model-alias-current || bad "model-alias-current: $o"
+sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p'); o=$(B claim --inline --rules "$sid"); has "$o" '== REVIEWER INSTRUCTIONS ==' && has "$o" 'Submit once' && ok claim-rules || bad "claim-rules: $(head -c 300 <<<"$o")"
+node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"update calibrations set status='failed', result_kb=null where model='weak-model'\")"
+has "$(B init pick weak-model)" 'default reviewer model: weak-model' && ok pick-unfinished-calibration || bad pick-unfinished-calibration
+
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS

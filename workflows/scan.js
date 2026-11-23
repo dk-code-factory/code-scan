@@ -47,7 +47,8 @@ async function run(prompt, opts) {
     }
   }
   const { agentType, ...rest } = opts
-  return agent(prompt, rest)
+  // the default agent lacks the reviewer instructions: have claim print them
+  return agent(prompt.replace(' claim --inline ', ' claim --inline --rules '), rest)
 }
 
 let workers = args.workers || 0
