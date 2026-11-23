@@ -2639,7 +2639,7 @@ scan:      start [--model m] [--profile p|--prompt-file f] [--only g] [--include
            continue [--scan id] [--model m] | restart [--replan] [--reset-scope] [...start flags] | stop [--now] | set-run <scan> <task>
 planner:   plan-context <scan> | apply-plan <scan> --file plan.json
 workers:   claim <scan> | submit <scan> <chunk> --file <path> [--slice k] < findings.json
-limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P] [--concurrency 1-16 (default 10)]  | statusline [-- <wrapped status line cmd>]
+limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P]; start/restart/continue [--concurrency 1-16, default 10]  | statusline [-- <wrapped status line cmd>]
 progress:  status [--scan id|--all] | files [--state s] [--path p] [--out f]
 findings:  query [--severity critical,high|high+] [--category c] [--path p] [--triage t|all] [--reported|--unreported]
                  [--tracker t] [--scan id|--latest] [--stale|--no-stale] [--gone|--include-gone] [--min-confidence x] [--text s] [--unit u]
