@@ -1,6 +1,6 @@
 # code-scan
 
-Repository-wide bug scanning for Claude Code. MIT. Version 1.3.0.
+Repository-wide bug scanning for Claude Code. MIT. Version 1.4.0.
 
 Almost all coordination is done by a deterministic CLI (`bin/code-scan.js`, Node 22.5+, no
 dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather than orchestrating it.
@@ -23,6 +23,8 @@ dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather t
 - `/code-scan:findings` — filter/sort/export findings (severity, category, path, triage, reported, …), read-only SQL.
 - `/code-scan:triage` — confirmed / false_positive / fixed / wontfix, with notes.
 - `/code-scan:dupes` — duplicate groups and matching against existing GitHub/Jira issues.
+- `/code-scan:verify` — double-check one finding (or each of several) in a fresh agent against the upstream
+  default branch: reproduce, search for existing reports, file only if real and new, record the outcome.
 - `/code-scan:report` — file findings to GitHub (or Jira via the Atlassian MCP), persisting what was filed.
 - `/code-scan:profiles` — review prompts: `default` (critical bugs, vulnerabilities, memory handling,
   leaks, panics, correctness), `security`, `memory`, `concurrency`, or your own.

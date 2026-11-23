@@ -306,6 +306,8 @@ function db() {
   if (!scanCols.includes('kind')) DB.exec("ALTER TABLE scans ADD COLUMN kind TEXT NOT NULL DEFAULT 'scan'");
   if (!scanCols.includes('cal_id')) DB.exec('ALTER TABLE scans ADD COLUMN cal_id INTEGER');
   if (!DB.prepare('PRAGMA table_info(cal_findings)').all().some((c) => c.name === 'end_line')) DB.exec('ALTER TABLE cal_findings ADD COLUMN end_line INTEGER');
+  const filCols = DB.prepare('PRAGMA table_info(filings)').all().map((c) => c.name);
+  if (!filCols.includes('issue_state')) DB.exec('ALTER TABLE filings ADD COLUMN issue_state TEXT; ALTER TABLE filings ADD COLUMN issue_reason TEXT; ALTER TABLE filings ADD COLUMN checked_at TEXT');
   const calCols = DB.prepare('PRAGMA table_info(calibrations)').all().map((c) => c.name);
   if (!calCols.includes('init_id')) DB.exec('ALTER TABLE calibrations ADD COLUMN init_id INTEGER');
   if (!calCols.includes('single')) DB.exec('ALTER TABLE calibrations ADD COLUMN single INTEGER NOT NULL DEFAULT 0');
@@ -934,6 +936,15 @@ function cmdClaim(a) {
   out('== REVIEW PROFILE ==');
   out(prof ? prof.text.trim() : '(default)');
   if (unit && unit.hint) { out('== SUBSYSTEM FOCUS =='); out(unit.hint); }
+  // findings already judged not to be bugs (or not worth fixing) for these files: tell the reviewer, so a
+  // rescan does not report them again under new wording unless the code has really changed
+  const paths = [...new Set(items.map((i) => i.path))];
+  const dismissed = db().prepare(`SELECT path, line, title, triage, note FROM findings WHERE triage IN ('false_positive','wontfix')
+    AND path IN (${paths.map(() => '?').join(',')}) ORDER BY path, line`).all(...paths);
+  if (dismissed.length) {
+    out('== ALREADY DISMISSED FOR THESE FILES (do not report again unless the code changed so the reason no longer holds) ==');
+    for (const x of dismissed) out(`- ${x.path}:${x.line || '?'} [${x.triage}] ${x.title}${x.note ? ` — ${String(x.note).split('\n').pop().slice(0, 300)}` : ''}`);
+  }
   if (a.f.rules) {
     // the default agent (fallback when the plugin agent type is not loaded) has no reviewer instructions
     const def = path.join(PLUGIN_ROOT, 'agents', 'reviewer.md');
@@ -1559,6 +1570,63 @@ function cmdCalibrate(a) {
   die('usage: calibrate start --model m [--sample-kb 200] [--medium 40] [--profile p] | next [id] | status | set <model> <kb>');
 }
 
+// ------------------------------------------------------------------- verify
+//
+// Prompt for a fresh, context-free agent that double-checks one finding against the upstream default
+// branch, reproduces it if it can, searches for existing reports, files an issue only for a real and
+// new bug, and records the outcome here. Everything the agent needs is in the prompt.
+
+function cmdVerifyPrompt(a) {
+  const id = Number(a.pos[0]);
+  const r = db().prepare('SELECT * FROM findings WHERE id=?').get(id);
+  if (!r) die(`no finding ${id}`);
+  const repo = a.f.repo, base = a.f.base, wt = a.f.worktree;
+  if (!repo || !base || !wt) die('usage: verify-prompt <id> --repo owner/name --base <full sha> --worktree <dir>');
+  const cli = cliPrefix();
+  const rec = (kind) => `${cli} ${kind}`;
+  out(`You are verifying ONE suspected bug in ${repo} (GitHub) and, if it is real and not already reported, filing a GitHub issue for it.
+
+## The suspected bug (from an automated code review; treat it as an unverified claim)
+Title: ${r.title}
+Reported at: ${loc(r)} at commit ${r.commit_sha} (the scanned checkout; it may be a branch). Severity ${r.severity}, category ${r.category}.
+Claim: ${r.detail || '(none)'}
+Reviewer's evidence: ${r.evidence || '(none)'}
+
+## Where to work
+- A git worktree of ${repo}'s default branch at commit ${base} is at ${wt} — it is yours alone. Work only there.
+  You may add a temporary test to prove the bug, but never commit, push, or touch any other directory or repo.
+- Build/test only what you need: the narrowest test command the project supports, under \`timeout\` (a hang or crash
+  is evidence — record it). Keep build output out of other checkouts (e.g. CARGO_TARGET_DIR=${wt}-target for Rust,
+  a separate cache dir for others). Never run the full suite or anything needing a database or network service.
+
+## Steps
+1. Verify against ${base} (the worktree), not the scanned commit — line numbers and code may differ. Read the code
+   paths, check guards, caller contracts and git history/comments for intent (\`git log -S\`/\`-L\`). If feasible,
+   write a minimal test that demonstrates it and run it. Decide: REAL, PARTIALLY REAL (say which part), or NOT REAL.
+2. Search for existing reports, open and closed: \`gh search issues --repo ${repo} "<keywords>" --state all\` and
+   \`gh search prs --repo ${repo} "<keywords>" --state all\` with several keyword variants (function names, symptoms,
+   error names). If search is rate-limited, list issues/PRs through \`gh issue list\`/\`gh pr list --state all\`
+   and grep. Open plausible hits and judge whether they are the same bug.
+3. Only if REAL (or the real part) and NOT already reported, create the issue:
+   \`gh issue create --repo ${repo} --title "..." --body-file <file> --label <labels>\` — use \`bug\` and one matching
+   area label if the repo has them (\`gh label list --repo ${repo}\`). Body: what goes wrong, triggering path/input,
+   impact, minimal reproduction (test + output) if you made one, one-paragraph fix direction. Reference code with raw
+   permalinks pinned to ${base}: https://github.com/${repo}/blob/${base}/<path>#L10-L20 — each bare URL on its own
+   line with blank lines around it (no link text, no code fence). No AI/assistant attribution, "generated by" lines,
+   or AI labels: write it as a normal engineer's bug report.
+4. Record the outcome in the findings store (finding ${id}) — always, so it is never investigated again:
+   - filed: \`${rec(`triage ${id} --set confirmed --note "<one line>"`)}\` then
+     \`${rec(`link ${id} gh:${repo} <issue number> --kind filed --url <issue url>`)}\`
+   - already reported: triage confirmed with a note, then \`${rec(`link ${id} gh:${repo} <number> --kind linked_existing --url <url>`)}\`
+   - not real: \`${rec(`triage ${id} --set false_positive --note "<why, with evidence (commit/PR/line)>"`)}\`
+   - real but not worth an issue (e.g. intended trade-off): \`${rec(`triage ${id} --set wontfix --note "<why>"`)}\`
+5. Remove any temporary test you added.
+
+## Final reply (short)
+Verdict with the key evidence in 2-4 sentences, whether you reproduced it (and how), the duplicate search result,
+and the created or existing issue URL (or why none).`);
+}
+
 // -------------------------------------------------------------------- limits
 //
 // A scan can carry a dollar cap and a cap on the 5-hour subscription window. Both are enforced at
@@ -2020,7 +2088,7 @@ function cmdShow(a) {
   if (r.evidence) out(`\nEvidence: ${r.evidence}`);
   if (r.note) out(`\nNote: ${r.note}`);
   const fl = db().prepare('SELECT * FROM filings WHERE finding_id=?').all(id);
-  for (const x of fl) out(`${x.kind}: ${x.tracker} ${x.key} ${x.url || ''} (${x.filed_at.slice(0, 10)})`);
+  for (const x of fl) out(`${x.kind}: ${x.tracker} ${x.key} ${x.url || ''} (${x.filed_at.slice(0, 10)})${x.issue_state ? ` — issue ${x.issue_state}${x.issue_reason ? ` (${x.issue_reason})` : ''}, checked ${String(x.checked_at).slice(0, 10)}` : ''}`);
   const g = db().prepare('SELECT group_id FROM dupe_groups WHERE finding_id=?').get(id);
   if (g) {
     const mem = db().prepare('SELECT f.id, f.path, f.line, g.is_primary FROM dupe_groups g JOIN findings f ON f.id=g.finding_id WHERE g.group_id=? AND f.id!=?').all(g.group_id, id);
@@ -2414,6 +2482,40 @@ function cmdLink(a) {
   out(`${ids.length} finding(s) → ${kind} ${tracker} ${key}`);
 }
 
+/**
+ * Pull the state of every filed/linked GitHub issue back into the store. An issue closed as completed
+ * marks its open/confirmed findings fixed; closed as not planned marks them wontfix (note says which).
+ */
+function cmdIssuesSync(a) {
+  const d = db();
+  const rows = d.prepare(`SELECT DISTINCT tracker, key FROM filings WHERE kind != 'skipped' AND tracker LIKE 'gh:%'
+    ${a.f.tracker ? 'AND tracker = ?' : ''}`).all(...(a.f.tracker ? [a.f.tracker] : []));
+  let open = 0, fixed = 0, wont = 0, failed = 0;
+  for (const { tracker, key } of rows) {
+    const repo = tracker.slice(3);
+    const r = spawnSync('gh', ['issue', 'view', String(key), '--repo', repo, '--json', 'state,stateReason,url'], { encoding: 'utf8' });
+    if (r.status !== 0) { failed++; out(`could not read ${tracker} #${key}: ${(r.stderr || '').trim().split('\n')[0]}`); continue; }
+    let j;
+    try { j = JSON.parse(r.stdout); } catch (e) { failed++; continue; }
+    const state = String(j.state || '').toLowerCase();
+    const reason = String(j.stateReason || '').toLowerCase();
+    tx(() => {
+      d.prepare('UPDATE filings SET issue_state=?, issue_reason=?, checked_at=?, url=COALESCE(url, ?) WHERE tracker=? AND key=?')
+        .run(state, reason || null, now(), j.url || null, tracker, String(key));
+      if (state !== 'closed') { open++; return; }
+      const to = reason === 'not_planned' ? 'wontfix' : 'fixed';
+      const ids = d.prepare(`SELECT f.id FROM findings f JOIN filings x ON x.finding_id=f.id
+        WHERE x.tracker=? AND x.key=? AND f.triage IN ('open','confirmed')`).all(tracker, String(key)).map((x) => x.id);
+      for (const id of ids) {
+        d.prepare(`UPDATE findings SET triage=?, note=COALESCE(note || char(10), '') || ?, updated=? WHERE id=?`)
+          .run(to, `${tracker} #${key} closed as ${reason || 'completed'}`, now(), id);
+      }
+      if (to === 'fixed') fixed += ids.length; else wont += ids.length;
+    });
+  }
+  out(`${rows.length} issue(s) checked: ${open} open; findings marked fixed ${fixed}, wontfix ${wont}${failed ? `; ${failed} unreadable` : ''}`);
+}
+
 function cmdUnlink(a) {
   const [id, tracker, key] = a.pos;
   const r = db().prepare('DELETE FROM filings WHERE finding_id=? AND (? IS NULL OR tracker=?) AND (? IS NULL OR key=?)')
@@ -2651,8 +2753,10 @@ dupes:     dupes [filters] [--line-window 10] [--title-sim 0.6] | dupes list | d
 trackers:  tracker-sync gh [--repo o/r] [--state all] [--search q] | tracker-import jira < issues.json
            match [filters] [--tracker t] [--include-reported] [--top 3] | match show <id> | match export [--min-score 3] [--out f]
            link <id|ids|gN> <tracker> <key> [--url u] [--kind k] | unlink <id> [tracker] [key]
+           issues-sync [--tracker gh:o/r]   (issue state → findings: closed completed = fixed, not planned = wontfix)
 init:      init start [--models opus,sonnet,haiku,fable] [--only g] | init report [id] [--truth f] | init pick <model> | init status
 calibrate: calibrate start --model m [--only g] [--sample-kb 200] [--medium 40] | calibrate report [id] [--truth f.json] | calibrate next [id] | calibrate status | calibrate set <m> <kb>
+verify:    verify-prompt <id> --repo owner/name --base <sha> --worktree <dir>   (prompt for a fresh verifying agent)
 report:    report-config show|set <k> <v>|unset <k> | render [filters] [--target t] [--group-by g] [--max n]
            drafts | file-gh [--drafts d1,d2] [--dry-run] | record-filing <draft> <tracker> <key> [url]`;
 
@@ -2661,8 +2765,8 @@ const COMMANDS = {
   'plan-context': cmdPlanContext, 'apply-plan': cmdApplyPlan, claim: cmdClaim, submit: cmdSubmit,
   status: cmdStatus, files: cmdFiles, query: cmdQuery, show: cmdShow, sql: cmdSql, triage: cmdTriage,
   profile: cmdProfile, dupes: cmdDupes, 'tracker-sync': cmdTrackerSync, 'tracker-import': cmdTrackerImport,
-  match: cmdMatch, link: cmdLink, unlink: cmdUnlink, 'report-config': cmdReportConfig, render: cmdRender,
-  drafts: cmdDrafts, calibrate: cmdCalibrate, init: cmdInit, statusline: cmdStatusline, limits: cmdLimits, 'statusline-path': () => out(rateLimitsPath()), 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,
+  match: cmdMatch, link: cmdLink, unlink: cmdUnlink, 'issues-sync': cmdIssuesSync, 'report-config': cmdReportConfig, render: cmdRender,
+  drafts: cmdDrafts, calibrate: cmdCalibrate, 'verify-prompt': cmdVerifyPrompt, init: cmdInit, statusline: cmdStatusline, limits: cmdLimits, 'statusline-path': () => out(rateLimitsPath()), 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,
 };
 
 function main() {

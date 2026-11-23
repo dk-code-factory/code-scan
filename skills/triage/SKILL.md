@@ -17,3 +17,8 @@ the count with the user when it is more than 10.
 If the user asks you to judge whether a finding is real, `$CS show <id>`, read the cited code,
 decide, then triage with a one-line note giving the reason. Only `confirmed` findings are filed
 by default (`/code-scan:report`).
+
+Always give the reason with `--note` when marking `false_positive` or `wontfix`: reviewers of later
+scans are shown dismissed findings for their files with that note, so they do not report them again.
+
+`$CS issues-sync` updates findings from their linked GitHub issues (closed completed → fixed, not planned → wontfix).

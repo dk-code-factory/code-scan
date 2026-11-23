@@ -9,7 +9,7 @@
       "name": "code-scan",
       "source": "./",
       "description": "Repository-wide bug scanning: scan, status, findings, triage, dupes, report, profiles.",
-      "version": "1.3.0"
+      "version": "1.4.0"
     }
   ]
 }
