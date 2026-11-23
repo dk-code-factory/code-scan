@@ -301,4 +301,9 @@ B limits --scan "$sid2" >/dev/null   # the new scan scans the transcripts first:
 first=$(B limits --scan "$o_sid"); has "$first" 'spend: \$16.20 of' && has "$(B limits --scan "$sid2")" 'spend: \$1.00 of' && ok spend-owner-per-scan || bad "spend-owner-per-scan: $(B limits --scan "$sid2") / $(B limits --scan "$o_sid")"
 unset CLAUDE_CONFIG_DIR XDG_CACHE_HOME
 
+# --- calibration whose reviewers never run stops instead of looping
+B calibrate start --model ghost --sample-kb 40 --medium 16 >/dev/null
+r=""; for i in 1 2 3 4 5 6; do r=$(B calibrate next | tail -1); has "$r" '^DONE' && break; done
+has "$r" 'calibration failed' && has "$(B calibrate status)" 'ghost \[failed\]' && ok calibrate-gives-up || bad "calibrate-gives-up: $r"
+
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS

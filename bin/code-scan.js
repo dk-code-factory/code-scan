@@ -605,9 +605,17 @@ function cliPrefix() {
   return `${h}node ${CLI} -C ${repoRoot()}`;
 }
 
+/** Workflow agent() model alias for a model id (claude-sonnet-5-5 → sonnet); null = inherit. */
+function modelAlias(id) {
+  const m = String(id || '').match(/^claude-(opus|sonnet|haiku|fable)\b/);
+  return m ? m[1] : null;
+}
+
 function nextLine(scan, plan) {
   const workers = Math.min(pendingChunks(scan.id), MAX_WORKERS_PER_RUN);
   const o = { cli: CLI, root: repoRoot(), scanId: scan.id, plan: !!plan, workers };
+  const alias = modelAlias(JSON.parse(getScan(scan.id).options_json).model);
+  if (alias) o.model = alias;
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
   return 'NEXT ' + JSON.stringify(o);
 }
@@ -1148,7 +1156,8 @@ function cmdSubmit(a) {
 // last size before the drop.
 
 function calSample(commit, opts, sampleKb) {
-  const tree = lsTree(commit);
+  const only = pathMatcher(opts.only);
+  const tree = lsTree(commit).filter((t) => !only || only(t.path));
   const code = tree.filter((t) => classifyPath(t.path, t.mode, t.size, opts).code && t.size <= sampleKb * 1024 / 2);
   const ling = linguistFlags(commit, code.map((t) => t.path));
   const files = code.filter((t) => !ling.has(t.path));
@@ -1259,6 +1268,7 @@ function calNext(cal) {
 
 function calLine(cal, round) {
   const o = { cli: CLI, root: repoRoot(), calId: cal.id, scanId: round.scanId, workers: Math.min(round.workers, MAX_WORKERS_PER_RUN) };
+  if (modelAlias(cal.model)) o.model = modelAlias(cal.model);
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
   return 'NEXT ' + JSON.stringify(o);
 }
@@ -1273,7 +1283,7 @@ function cmdCalibrate(a) {
     const commit = git(['rev-parse', 'HEAD']).trim();
     const sampleKb = Number(a.f['sample-kb'] || CAL_SAMPLE_KB);
     const medium = Number(a.f.medium || DEFAULT_CHUNK_KB);
-    const { pick, total } = calSample(commit, { includeTests: false }, sampleKb);
+    const { pick, total } = calSample(commit, { includeTests: false, only: a.f.only }, sampleKb);
     if (total < 2 * medium * 1024) {
       // fewer than two medium chunks of code: every size reviews it in one or two chunks, nothing to compare
       cfgSet(`chunk_kb:${model}`, medium);
@@ -1311,6 +1321,29 @@ function cmdCalibrate(a) {
     return;
   }
   if (!cal) die('no calibration — run `calibrate start --model <id>`');
+  if (sub === 'report') {
+    // per round: chunk size, work, distinct-issue score, dollars; with --truth, recall of known bugs
+    const truth = a.f.truth ? JSON.parse(fs.readFileSync(a.f.truth, 'utf8')) : null;
+    const { score, rounds } = calScores(cal);
+    out(`calibration #${cal.id} model=${cal.model} [${cal.status}]${cal.result_kb ? ` → ${cal.result_kb}KB` : ''}; sample ${kb(cal.sample_bytes)}`);
+    out(['size', 'chunks', 'findings', 'score', 'usd', ...(truth ? ['recall', 'extra', 'hit'] : [])].join('\t'));
+    for (const r of rounds) {
+      const sc = getScan(r.id);
+      const fs_ = d.prepare('SELECT * FROM cal_findings WHERE scan_id=?').all(r.id);
+      const chunks = d.prepare("SELECT COUNT(*) n FROM chunks WHERE scan_id=? AND state!='void'").get(r.id).n;
+      const row = [`${r.size}KB`, chunks, fs_.length, r.status === 'done' ? (score.get(r.size) ?? 0).toFixed(2) : r.status, scanSpendUsd(sc).toFixed(2)];
+      if (truth) {
+        // a known bug may span several ranges; it counts once
+        const ids = [...new Set(truth.map((t) => t.id))];
+        const hits = (f) => truth.filter((t) => f.path === t.path && linesNear(f, { line: t.start, end_line: t.end }, 2));
+        const hit = ids.filter((id) => fs_.some((f) => hits(f).some((t) => t.id === id)));
+        const extra = fs_.filter((f) => !hits(f).length).length;
+        row.push(`${hit.length}/${ids.length}`, extra, hit.join(','));
+      }
+      out(row.join('\t'));
+    }
+    return;
+  }
   if (sub === 'next') {
     if (cal.status !== 'running') { out(`DONE chunk_kb=${cal.result_kb} (${cal.status})`); return; }
     const last = d.prepare("SELECT * FROM scans WHERE kind='cal' AND cal_id=? ORDER BY id DESC LIMIT 1").get(cal.id);
@@ -1324,6 +1357,14 @@ function cmdCalibrate(a) {
       setScanStatus(last.id, 'failed');
     }
     const dec = calNext(cal);
+    // a size whose rounds keep failing (reviewers never ran) cannot be measured: give up, keep defaults
+    const failedAt = dec.next ? d.prepare("SELECT COUNT(*) n FROM scans WHERE kind='cal' AND cal_id=? AND status='failed' AND json_extract(options_json,'$.chunkKb')=?").get(cal.id, dec.next).n : 0;
+    if (failedAt >= 2) {
+      const why = `rounds at ${dec.next}KB failed ${failedAt} times — reviewers did not run`;
+      d.prepare("UPDATE calibrations SET status='failed', decision=?, updated=? WHERE id=?").run(why, now(), cal.id);
+      out(`DONE chunk_kb=${cal.medium_kb} (calibration failed: ${why}; nothing saved)`);
+      return;
+    }
     if (dec.next) {
       const sc = calScores(cal).score;
       out(`scores so far: ${[...sc.entries()].sort((x, y) => x[0] - y[0]).map(([k, v]) => `${k}KB=${v.toFixed(2)}`).join(' ')}; next ${dec.next}KB`);
@@ -2422,7 +2463,7 @@ dupes:     dupes [filters] [--line-window 10] [--title-sim 0.6] | dupes list | d
 trackers:  tracker-sync gh [--repo o/r] [--state all] [--search q] | tracker-import jira < issues.json
            match [filters] [--tracker t] [--include-reported] [--top 3] | match show <id> | match export [--min-score 3] [--out f]
            link <id|ids|gN> <tracker> <key> [--url u] [--kind k] | unlink <id> [tracker] [key]
-calibrate: calibrate start --model m [--sample-kb 200] [--medium 40] | calibrate next [id] | calibrate status | calibrate set <m> <kb>
+calibrate: calibrate start --model m [--only g] [--sample-kb 200] [--medium 40] | calibrate report [id] [--truth f.json] | calibrate next [id] | calibrate status | calibrate set <m> <kb>
 report:    report-config show|set <k> <v>|unset <k> | render [filters] [--target t] [--group-by g] [--max n]
            drafts | file-gh [--drafts d1,d2] [--dry-run] | record-filing <draft> <tracker> <key> [url]`;
 

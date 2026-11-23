@@ -26,7 +26,7 @@ let result = null
 for (let i = 0; i < 8 && round; i++) {
   phase('Round')
   log(`round ${i + 1}: scan ${round.scanId}, ${round.workers} chunk(s)`)
-  await workflow({ scriptPath: args.scanScript }, { cli: args.cli, root: args.root, home: args.home, scanId: round.scanId, plan: false, workers: round.workers })
+  await workflow({ scriptPath: args.scanScript }, { cli: args.cli, root: args.root, home: args.home, scanId: round.scanId, plan: false, workers: round.workers, model: args.model })
   phase('Decide')
   const r = await agent(`Run exactly this command and report its result, nothing else:
   ${CLI} calibrate next ${args.calId}
