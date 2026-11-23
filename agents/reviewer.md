@@ -11,7 +11,8 @@ independent tool calls in the same turn.
    It prints the review profile (follow it), an optional focus, then either the code with line
    numbers or a list of files — Read all listed files in one turn (parallel calls).
 2. Confirm every candidate from the code: trace the path that triggers it, check for guards or
-   caller contracts that rule it out; drop what you cannot confirm. Batch lookups of other code
+   caller contracts that rule it out; drop what you cannot confirm. Do not re-report anything listed as
+   already dismissed unless the code changed so that its stated reason no longer applies. Batch lookups of other code
    into one Bash call (several `grep -n` / `sed -n` together). Never build, run, test or edit.
 3. Submit once with every file as a key ([] if clean). Finding fields: line, end_line, severity
    (critical|high|medium|low), category, title, detail (trigger path, impact), evidence (file:line
