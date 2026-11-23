@@ -1422,8 +1422,9 @@ function scanSpendUsd(scan) {
   const key = `${repoRoot()}|${home || ''}|${scan.id}`;
   // an agent belongs to this scan when its task command runs the CLI against this repo + state + scan;
   // the prefix is matched on the command itself (code under review may mention CODESCAN_HOME too)
-  const cmd = `node \\S+ -C ${escRe(repoRoot())} (?:claim(?: --inline)?|plan-context|apply-plan) ${scan.id}\\b`;
-  const mine = home ? new RegExp(`CODESCAN_HOME=${escRe(home)} ${cmd}`) : new RegExp(`(?<!CODESCAN_HOME=\\S{1,4096} )${cmd}`);
+  // The owner (repo, state dir, scan) is parsed from the task command itself — never judged against
+  // the scan that happens to ask first, since other scans (calibration rounds) share the cache.
+  const owner = /(?:CODESCAN_HOME=(\S+) )?node \S+ -C (\S+) (?:claim(?: --inline)?|plan-context|apply-plan) (\d+)\b/;
   const since = Date.parse(scan.created) - 60000;
   const get = d.prepare('SELECT size, scan_key, usd, last_id FROM spend_files2 WHERE path=?');
   const put = d.prepare(`INSERT INTO spend_files2(path,size,scan_key,usd,last_id) VALUES(?,?,?,?,?)
@@ -1433,7 +1434,7 @@ function scanSpendUsd(scan) {
     const c = get.get(p);
     if (c && c.size === size) { if (c.scan_key === key) total += c.usd; continue; }
     // ownership is decided once, from the task at the top of the file
-    if (c && c.scan_key !== key) { put.run(p, size, c.scan_key, 0, null); continue; }
+    if (c && c.scan_key !== key) continue; // not ours; its owner reads it when asked
     let belongs = c ? true : null;
     let from = c && belongs ? c.size : 0;
     let usd = c && belongs ? c.usd : 0;
@@ -1444,8 +1445,11 @@ function scanSpendUsd(scan) {
       if (belongs === null) {
         const head = Buffer.alloc(Math.min(size, 20000));
         fs.readSync(fd, head, 0, head.length, 0);
-        belongs = mine.test(head.toString('utf8'));
-        if (!belongs) { put.run(p, size, null, 0, null); continue; }
+        const m = head.toString('utf8').match(owner);
+        const ownerKey = m ? `${m[2]}|${m[1] ? path.resolve(m[1]) : ''}|${m[3]}` : null;
+        belongs = ownerKey === key;
+        // another scan's agent: remember its owner (usage is counted when that scan asks)
+        if (!belongs) { put.run(p, ownerKey ? 0 : size, ownerKey, 0, null); continue; }
       }
       const buf = Buffer.alloc(size - from);
       fs.readSync(fd, buf, 0, buf.length, from);
