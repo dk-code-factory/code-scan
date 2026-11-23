@@ -69,7 +69,7 @@ if (args.plan) {
 // reviewers until one gets NONE (no chunk left, scan stopped, or a spending limit crossed), so a
 // crossed limit costs at most one short agent per lane instead of one per remaining chunk.
 if (!workers) return { chunks_reviewed: 0, files: 0, findings: 0, failed_agents: 0 }
-const LANES = Math.max(1, Math.min(workers, args.lanes || 12, 900))
+const LANES = Math.max(1, Math.min(workers, args.lanes || 10, 900))
 phase('Review')
 log(`reviewing ${workers} chunk(s) in ${LANES} lane(s)`)
 let started = 0

@@ -341,4 +341,7 @@ sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p'); o=$(B claim --inline --rul
 node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"update calibrations set status='failed', result_kb=null where model='weak-model'\")"
 has "$(B init pick weak-model)" 'default reviewer model: weak-model' && ok pick-unfinished-calibration || bad pick-unfinished-calibration
 
+o=$(B start --new --no-plan --force --concurrency 4); has "$o" '"lanes":4' && ok concurrency-flag || bad "concurrency-flag: $o"
+has "$(B start --new --no-plan --force --concurrency 40 2>&1)" 'whole number 1-16' && ok concurrency-validated || bad concurrency-validated
+
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS

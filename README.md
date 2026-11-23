@@ -1,6 +1,6 @@
 # code-scan
 
-Repository-wide bug scanning for Claude Code. MIT. Version 1.2.0.
+Repository-wide bug scanning for Claude Code. MIT. Version 1.3.0.
 
 Almost all coordination is done by a deterministic CLI (`bin/code-scan.js`, Node 22.5+, no
 dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather than orchestrating it.
@@ -53,7 +53,7 @@ stays current while the session waits on background agents:
 ```
 
 A 5-hour limit with no snapshot from the last 15 minutes counts as crossed. Reviewers run in a fixed number of lanes
-(12 by default), so after a limit trips at most one short agent per lane starts and gets nothing.
+(10 by default), so after a limit trips at most one short agent per lane starts and gets nothing.
 Calibration rounds are separate scans and do not count toward a scan's dollar cap.
 
 ## Chunk size
