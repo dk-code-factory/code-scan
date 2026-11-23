@@ -292,6 +292,13 @@ B limits --max-5h-pct 0 >/dev/null; B limits --max-usd 1000 >/dev/null
 has "$(B limits)" 'spend: \$15.20 of \$1000 limit' && ok pricing-by-id || bad "pricing-by-id: $(B limits)"
 printf '{"type":"assistant","message":{"id":"h2","model":"claude-haiku-4-5","usage":{"output_tokens":200000}}}\n' >> "$W/claude/projects/p/s/subagents/workflows/wf_x/agent-c.jsonl"
 has "$(B limits)" 'spend: \$16.20 of' && ok spend-incremental || bad "spend-incremental: $(B limits)"
+# spend of one scan's agents is still counted after another scan looked at the same transcripts first
+o_sid=$sid; B stop >/dev/null 2>&1; B restart --no-plan --force --only src/pat/ --chunk-kb 1 --max-usd 1000 >/dev/null; sid2=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+B limits --scan "$sid2" >/dev/null   # the new scan scans the transcripts first: none are its own
+{ printf '{"type":"user","message":{"role":"user","content":"Run: CODESCAN_HOME=%s node x -C %s claim --inline %s"}}\n' "$CODESCAN_HOME" "$W/repo" "$sid2"
+  printf '{"type":"assistant","message":{"id":"n1","model":"claude-opus-5-5","usage":{"output_tokens":50000}}}\n'
+} > "$W/claude/projects/p/s/subagents/workflows/wf_x/agent-d.jsonl"
+first=$(B limits --scan "$o_sid"); has "$first" 'spend: \$16.20 of' && has "$(B limits --scan "$sid2")" 'spend: \$1.00 of' && ok spend-owner-per-scan || bad "spend-owner-per-scan: $(B limits --scan "$sid2") / $(B limits --scan "$o_sid")"
 unset CLAUDE_CONFIG_DIR XDG_CACHE_HOME
 
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS
