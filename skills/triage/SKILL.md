@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Mark code-scan findings as confirmed, false_positive, fixed, wontfix or open, with notes — by id or by filter (e.g. "all low findings in tests/ are wontfix"). Triage state persists across rescans (a fixed finding that reappears is reopened). Use for "mark 12 and 15 false positive", "confirm #3", "these are fixed".
+description: Mark code-scan findings as confirmed, false_positive, fixed, wontfix or open, with notes — by id or by filter (e.g. "all low findings in tests/ are wontfix"); set or classify finding types (crash, leak, logic, ...). Triage state persists across rescans (a fixed finding that reappears is reopened). Use for "mark 12 and 15 false positive", "confirm #3", "these are fixed", "#7 is a leak, not a crash", "classify the findings by type".
 ---
 
 # code-scan: triage
@@ -22,5 +22,15 @@ Always give the reason with `--note` when marking `false_positive` or `wontfix`:
 scans are shown dismissed findings for their files with that note, so they do not report them again.
 
 To have agents check findings in bulk (verdict, severity, fix size, existing issue), use `/code-scan:auto-triage`.
+
+## Types
+
+`$CS retype <ids|filters> --set <type> [--note "why"]` — set the type (locked against rescans). Types:
+crash memory-safety leak concurrency data-integrity logic error-handling integer validation security dos other.
+
+"Classify / retype findings": run `$CS retype --auto [filters]` (fills untyped, unlocked findings from their
+category; `--force` recomputes all unlocked ones), then `$CS retype --list-other [filters]`, decide each
+leftover's type from its category, title and detail (do not read source), and apply with one
+`$CS retype <ids> --set <type>` per type. Report the counts per type.
 
 `$CS issues-sync` updates findings from their linked GitHub issues (closed completed → fixed, not planned → wontfix).

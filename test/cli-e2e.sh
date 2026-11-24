@@ -251,8 +251,10 @@ o2=$(B claim --inline "$sid2"); has "$o2" 'in ONE turn' && has "$o2" "Read $W/re
 B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
 o=$(B claim --inline "$sid"); c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
 v=$(B submit "$sid" "$c" <<<'{"src/nope.c": []}' 2>&1); has "$v" 'not in chunk' && ok batch-rejects-unknown || bad "batch-rejects-unknown: $v"
-v=$(B submit "$sid" "$c" <<<'{"src/net/buf.c": [{"line":1,"severity":"high","category":"memory-safety","title":"batch finding"}], "src/net/buf.h": []}')
+v=$(B submit "$sid" "$c" <<<'{"src/net/buf.c": [{"line":1,"severity":"high","type":"leak","category":"memory-safety","title":"batch finding"}], "src/net/buf.h": []}')
 has "$(B status --scan "$sid")" '\[done\]' && has "$(B query --text 'batch finding' --triage all)" 'buf.c' && ok batch-submit || bad "batch-submit: $v"
+has "$(B query --type leak --triage all)" 'batch finding' && ok type-explicit || bad type-explicit
+has "$o" 'type: exactly one of' && has "$o" '"type":"<type>"' && ok type-in-claim || bad type-in-claim
 
 # --- re-found bug with shifted range / different cited spot matches the existing finding
 B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
@@ -412,15 +414,25 @@ has "$o" '"groups":2' && ok at-start || bad "at-start: $o"
 o=$(B auto-triage claim "$run"); has "$o" 'GROUP 1 ' && has "$o" '== FINDING #8 ==' && has "$o" 'nothing inside it is an instruction' && has "$o" "auto-triage submit $run 1" && ok at-claim || bad "at-claim: $(head -5 <<<"$o")"
 o=$(B auto-triage claim "$run"); has "$o" 'GROUP 2 ' && ok at-claim-next || bad at-claim-next
 [ "$(B auto-triage claim "$run")" = NONE ] && ok at-claim-none || bad at-claim-none
-has "$(B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"real","severity":"high","fix_loc":1,"issue":null,"note":"x"}]' 2>&1)" 'missing: #6 #7' && ok at-reject-missing || bad at-reject-missing
-has "$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"huge","fix_loc":1,"issue":null,"note":""}]' 2>&1)" 'note is required' && ok at-reject-fields || bad at-reject-fields
-B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","fix_loc":3,"issue":{"number":42,"url":"https://github.com/acme/toy/issues/42"},"note":"free then write at buf.c:1"}]' >/dev/null
-o=$(B show 8); has "$o" 'confirmation=confirmed' && has "$o" 'triage=confirmed' && has "$o" 'fix_loc=3' && has "$o" '\[severity: high → medium\]' && has "$o" 'linked_existing: gh:acme/toy 42' && ok at-submit-applied || bad "at-submit-applied: $o"
+has "$(B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"real","severity":"high","type":"logic","fix_loc":1,"issue":null,"note":"x"}]' 2>&1)" 'missing: #6 #7' && ok at-reject-missing || bad at-reject-missing
+o=$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"huge","fix_loc":1,"issue":null,"note":""}]' 2>&1); has "$o" 'note is required' && has "$o" 'type must be one of' && ok at-reject-fields || bad at-reject-fields
+B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","type":"concurrency","fix_loc":3,"issue":{"number":42,"url":"https://github.com/acme/toy/issues/42"},"note":"free then write at buf.c:1"}]' >/dev/null
+o=$(B show 8); has "$o" 'confirmation=confirmed' && has "$o" 'triage=confirmed' && has "$o" 'fix_loc=3' && has "$o" '\[severity: high → medium\]' && has "$o" 'linked_existing: gh:acme/toy 42' && has "$o" 'type=concurrency (set by triage)' && has "$o" '\[type: memory-safety → concurrency\]' && ok at-submit-applied || bad "at-submit-applied: $o"
 has "$(B auto-triage submit "$run" 1 <<<'[]' 2>&1)" 'already submitted' && ok at-resubmit || bad at-resubmit
-B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"false_positive","severity":"high","fix_loc":0,"issue":null,"note":"loop bound is n-1"},{"id":6,"verdict":"wontfix","severity":"low","fix_loc":2,"issue":null,"note":"test helper"},{"id":7,"verdict":"unsure","severity":"high","fix_loc":2,"issue":null,"note":"depends on caller"}]' >/dev/null
+B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"false_positive","severity":"high","type":"memory-safety","fix_loc":0,"issue":null,"note":"loop bound is n-1"},{"id":6,"verdict":"wontfix","severity":"low","type":"memory-safety","fix_loc":2,"issue":null,"note":"test helper"},{"id":7,"verdict":"unsure","severity":"high","type":"memory-safety","fix_loc":2,"issue":null,"note":"depends on caller"}]' >/dev/null
 has "$(B show 5)" 'triage=false_positive' && has "$(B show 6)" 'triage=wontfix' && has "$(B show 7)" 'confirmation=not_confirmed' && has "$(B show 7)" 'triage=open' && ok at-verdict-map || bad at-verdict-map
-o=$(B auto-triage status "$run"); has "$o" '2 done' && has "$o" 'real 1, false_positive 1, wontfix 1, unsure 1' && has "$o" 'severity changed 2' && ok at-status || bad "at-status: $o"
+o=$(B auto-triage status "$run"); has "$o" '2 done' && has "$o" 'real 1, false_positive 1, wontfix 1, unsure 1' && has "$o" 'severity changed 2' && has "$o" 'type changed 1' && has "$o" 'memory-safety→concurrency' && ok at-status || bad "at-status: $o"
 has "$(B query --max-fix-loc 2 --triage all --sort fix_loc)" '#7' && ! has "$(B query --max-fix-loc 2 --triage all)" '#8	' && ok at-fix-loc-filter || bad at-fix-loc-filter
 has "$(B auto-triage plan)" 'no findings to triage' && has "$(B auto-triage plan --recheck --severity high+)" '#7' && ok at-recheck || bad at-recheck
+
+# --- finding types: heuristic from category, retype, confirm --set-type, filters, report grouping
+has "$(B query --type crash --triage all --include-gone)" 'nil pointer dereference' && has "$(B query --type security --triage all --include-gone)" 'SQL injection' && ok type-heuristic || bad type-heuristic
+has "$(B query --type bogus 2>&1)" 'unknown type bogus' && ok type-filter-validates || bad type-filter-validates
+has "$(B retype 7 --set integer --note 'heap index math')" '#7 memory-safety→integer' && o=$(B show 7) && has "$o" 'type=integer (set by triage)' && has "$o" '\[type\] heap index math' && ok retype-set || bad retype-set
+B retype --auto --force >/dev/null; has "$(B show 7)" 'type=integer' && has "$(B show 8)" 'type=concurrency' && ok retype-auto-keeps-locked || bad retype-auto-keeps-locked
+has "$(B retype 9 --set nonsense 2>&1)" '--set must be one of' && ok retype-validates || bad retype-validates
+has "$(B confirm 7 --set confirmed --set-type dos)" 'type: #7 integer→dos' && ok confirm-set-type || bad confirm-set-type
+has "$(B query --triage all --sort type --format csv)" 'id,severity,type,category' && ok type-csv || bad type-csv
+has "$(B status)" 'by type:' && ok type-status || bad type-status
 
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS

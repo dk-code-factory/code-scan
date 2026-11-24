@@ -20,19 +20,43 @@ dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather t
 - `/code-scan:scan` — start, continue (same commit), restart (new HEAD; unchanged files skipped by
   content hash), stop. Takes a named profile or a free-text review focus, and `--only <dir>` scopes.
 - `/code-scan:status` — progress, per-file state.
-- `/code-scan:findings` — filter/sort/export findings (severity, category, path, triage, reported, …), read-only SQL.
-- `/code-scan:triage` — confirmed / false_positive / fixed / wontfix, with notes.
+- `/code-scan:findings` — filter/sort/export findings (severity, type, category, path, triage, reported, …), read-only SQL.
+- `/code-scan:triage` — confirmed / false_positive / fixed / wontfix, with notes; set or classify finding types.
 - `/code-scan:confirm` — confirmation status (confirmed / not_confirmed / unchecked), separate from triage.
 - `/code-scan:dupes` — duplicate groups and matching against existing GitHub/Jira issues.
 - `/code-scan:auto-triage` — agent-driven triage of chosen findings (ids or filters) in groups of N
   (default 5): each agent checks its findings against the checkout, sets real / false positive / wontfix /
-  unsure, corrects severity, estimates the production LOC of a fix (`fix_loc`) and links an existing GitHub
+  unsure, corrects severity and type, estimates the production LOC of a fix (`fix_loc`) and links an existing GitHub
   issue or PR. Never files anything.
 - `/code-scan:verify` — double-check one finding (or each of several) in a fresh agent against the upstream
   default branch: reproduce, search for existing reports, file only if real and new, record the outcome.
 - `/code-scan:report` — file findings to GitHub (or Jira via the Atlassian MCP), persisting what was filed.
 - `/code-scan:profiles` — review prompts: `default` (critical bugs, vulnerabilities, memory handling,
   leaks, panics, correctness), `security`, `memory`, `concurrency`, or your own.
+
+## Finding types
+
+Every finding has a fixed `type` next to the reviewer's free-form `category` (which stays part of the
+finding's fingerprint). Reviewers pick it, auto-triage agents confirm or correct it, and findings without one
+get it from their category. A type set by triage or by hand (`retype`, `confirm --set-type`) is locked
+against rescans and noted as `[type: old → new]`.
+
+| type | covers |
+|---|---|
+| `crash` | panic, nil/null dereference, unhandled exception, failed assert, stack overflow |
+| `memory-safety` | use-after-free/move, out-of-bounds, uninitialized read, undefined behavior, buffer misuse |
+| `leak` | memory/fd/goroutine/permit/resource leak, missing cleanup, unbounded growth |
+| `concurrency` | data race, deadlock, atomicity violation, lifecycle/ordering race |
+| `data-integrity` | data loss or corruption, wrong data persisted or returned |
+| `logic` | wrong result, off-by-one, broken invariant, wrong query or generated code |
+| `error-handling` | swallowed/ignored error, wrong error propagation, exception safety |
+| `integer` | overflow, underflow, truncation, sign error |
+| `validation` | missing input/argument/length checks on untrusted or caller data |
+| `security` | injection, authn/authz, TLS verification, path traversal, info leak, XSS |
+| `dos` | resource exhaustion, infinite loop, unbounded recursion |
+| `other` | anything else |
+
+`query --type crash,leak`, `--sort type`, report `group_by type` and `{{type}}` in templates.
 
 ## How a scan runs
 

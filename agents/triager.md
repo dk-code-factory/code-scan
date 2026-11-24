@@ -15,8 +15,10 @@ few turns as possible: put independent tool calls in the same turn.
    Bash call (several `grep -n` / `sed -n` together). Never build, run, test or edit anything, and never
    create, edit or comment on issues.
 3. Decide per finding: verdict (real | false_positive | wontfix | unsure), the correct severity
-   (critical|high|medium|low: impact × how reachable the trigger is), and fix_loc — the production lines (not
-   tests) a minimal correct fix would add, change or remove, counted from the code you read.
+   (critical|high|medium|low: impact × how reachable the trigger is), the correct type (one of the types
+   the claim output lists: what the bug actually is once traced, not what the title says), and fix_loc —
+   the production lines (not tests) a minimal correct fix would add, change or remove, counted from the
+   code you read.
 4. For real or unsure findings, search GitHub as the claim output says (several keyword variants, open and
    closed, issues and PRs, all in one Bash call). Link a hit only if it describes the same bug.
 5. Submit once for the whole group, every finding included. Fix and resubmit if rejected.

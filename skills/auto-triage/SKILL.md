@@ -1,6 +1,6 @@
 ---
 name: auto-triage
-description: Triage code-scan findings with agents — split the chosen findings into groups of N (default 5), one agent per group checks each finding against the current checkout, decides real / false positive / wontfix / unsure, corrects the severity, estimates the production LOC of a fix and looks for an existing GitHub issue or PR, then records it all in the store. The user picks which findings (ids or filters). Use for "auto-triage the high findings", "validate findings 12 15 18", "triage everything unchecked in src/net in groups of 3". For marking states by hand use /code-scan:triage; for reproducing and filing one finding use /code-scan:verify.
+description: Triage code-scan findings with agents — split the chosen findings into groups of N (default 5), one agent per group checks each finding against the current checkout, decides real / false positive / wontfix / unsure, corrects the severity and type, estimates the production LOC of a fix and looks for an existing GitHub issue or PR, then records it all in the store. The user picks which findings (ids or filters). Use for "auto-triage the high findings", "validate findings 12 15 18", "triage everything unchecked in src/net in groups of 3". For marking states by hand use /code-scan:triage; for reproducing and filing one finding use /code-scan:verify.
 ---
 
 # code-scan: auto-triage
@@ -68,7 +68,7 @@ one per group, each with the prompt `Run: <cli> auto-triage claim <runId>` then 
 | wontfix | confirmed | wontfix |
 | unsure | not_confirmed | unchanged |
 
-A corrected severity is locked against rescans with a `[severity: old → new]` note; `fix_loc` (estimated
+A corrected severity or type is locked against rescans with a `[severity: old → new]` / `[type: old → new]` note; `fix_loc` (estimated
 production lines of a fix) is stored and sortable/filterable (`--sort fix_loc`, `--max-fix-loc N`); an existing
 issue or PR is linked as `linked_existing`; the agent's reason is appended to the note as
 `[auto-triage run R: verdict] ...` (dismissed findings' notes are shown to future reviewers).
