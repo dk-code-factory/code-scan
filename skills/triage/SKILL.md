@@ -21,4 +21,6 @@ by default (`/code-scan:report`).
 Always give the reason with `--note` when marking `false_positive` or `wontfix`: reviewers of later
 scans are shown dismissed findings for their files with that note, so they do not report them again.
 
+To have agents check findings in bulk (verdict, severity, fix size, existing issue), use `/code-scan:auto-triage`.
+
 `$CS issues-sync` updates findings from their linked GitHub issues (closed completed → fixed, not planned → wontfix).

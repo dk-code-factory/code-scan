@@ -8,8 +8,8 @@
     {
       "name": "code-scan",
       "source": "./",
-      "description": "Repository-wide bug scanning: scan, status, findings, triage, dupes, report, profiles.",
-      "version": "1.5.0"
+      "description": "Repository-wide bug scanning: scan, status, findings, triage, auto-triage, dupes, report, profiles.",
+      "version": "1.6.0"
     }
   ]
 }
