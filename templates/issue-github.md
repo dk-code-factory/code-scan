@@ -1,3 +1,3 @@
-**Severity:** {{severity}} · **Category:** {{category}} · **Commit:** {{short_commit}}
+**Severity:** {{severity}} · **Type:** {{type}} · **Category:** {{category}} · **Commit:** {{short_commit}}
 
 {{findings}}

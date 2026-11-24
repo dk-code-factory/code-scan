@@ -15,10 +15,10 @@ Never add Claude/Anthropic attribution to issue titles or bodies.
 ## Configure (once per repo; ask only for what is missing)
 `$CS report-config show`. If `target` is unset, ask the user for it (`gh:owner/repo` or
 `jira:PROJ`) and set it. Other keys only when the user mentions them:
-`labels`, `assignee`, `group_by` (dupe-group default | finding | file | category), `min_severity`
+`labels`, `assignee`, `group_by` (dupe-group default | finding | file | category | type), `min_severity`
 (default high), `require_triage` (default confirmed; `any` = open+confirmed), `priority_map`
 (JSON), `issue_type`/`components` (Jira), `title_template`, `body_template` (file path; variables
-`{{title}} {{severity}} {{severity_upper}} {{category}} {{path}} {{basename}} {{line}} {{count}}
+`{{title}} {{severity}} {{severity_upper}} {{type}} {{category}} {{path}} {{basename}} {{line}} {{count}}
 {{commit}} {{short_commit}} {{findings}} {{locations}} {{severities}}`), `max_per_run`,
 `code_repo` (owner/repo for permalinks), `marker` (yes/no). Set with `$CS report-config set <k> <v>`.
 One-off overrides on render: `--target`, `--group-by`, `--min-severity`, `--triage`, `--max`,

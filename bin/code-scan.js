@@ -27,6 +27,46 @@ const CLI = path.resolve(__filename);
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const SEVERITIES = ['critical', 'high', 'medium', 'low'];
 const SEV_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
+// Fixed finding types (category stays the reviewer's free-form tag and is part of the fingerprint).
+const TYPE_DESC = {
+  crash: 'panic, nil/null dereference, unhandled exception, failed assert, stack overflow',
+  'memory-safety': 'use-after-free/move, out-of-bounds access, uninitialized read, undefined behavior, buffer misuse',
+  leak: 'memory/fd/goroutine/permit/resource leak, missing cleanup, unbounded growth',
+  concurrency: 'data race, deadlock, atomicity violation, lifecycle/ordering race',
+  'data-integrity': 'data loss or corruption, wrong data persisted or returned',
+  logic: 'wrong result, off-by-one, broken invariant, wrong query or generated code',
+  'error-handling': 'swallowed/ignored error, wrong error propagation, exception safety',
+  integer: 'integer overflow, underflow, truncation, sign error',
+  validation: 'missing input/argument/length checks on untrusted or caller data',
+  security: 'injection, authn/authz, TLS verification, path traversal, info leak, XSS',
+  dos: 'resource exhaustion, infinite loop, unbounded recursion',
+  other: 'anything that fits none of the above',
+};
+const TYPES = Object.keys(TYPE_DESC);
+// Ordered: first match wins. Security before leak/crash so "info-leak" is not a leak.
+const TYPE_RULES = [
+  ['security', /inject|auth|tls|traversal|xss|redirect|vulnerab|secur|deserializ|info.?leak|data.?leak|ssrf|csrf|privilege|crypto/],
+  ['concurrency', /\brace|deadlock|concurren|atomic|thread.?safe|immutab/],
+  ['memory-safety', /use.?after|out.?of.?bounds|\boob\b|uninit|undefined.?behav|\bub\b|buffer|memory.?safety|dangling|double.?free|lifetime/],
+  ['leak', /leak|cleanup|lifecycle|unbounded.?growth/],
+  ['dos', /\bdos\b|exhaust|infinite|recursion|resource.?limit|\bhang|unbounded.?(alloc|memory)/],
+  ['crash', /panic|crash|\bnil\b|null|unhandled|stack.?overflow|assert|abort|segfault/],
+  ['integer', /overflow|underflow|truncat|integer|sign(ed)?.?(error|conversion)/],
+  ['data-integrity', /data.?(loss|corrupt|integrity)|output.?corrupt|corrupt/],
+  ['logic', /logic|correct|invariant|off.?by.?one|codegen/],
+  ['error-handling', /error|exception|swallow/],
+  ['validation', /valid|untrusted|length|bounds|unchecked|sanit|input/],
+  ['logic', /query|syntax|wrong|initialization/],
+];
+/** Best-effort type for a finding from its free-form category, falling back to its title. */
+function typeFromCategory(category, title) {
+  for (const s of [String(category || '').toLowerCase(), String(title || '').toLowerCase()]) {
+    if (TYPES.includes(s)) return s;
+    for (const [t, re] of TYPE_RULES) if (re.test(s)) return t;
+  }
+  return 'other';
+}
+function typeList() { return TYPES.map((t) => `  ${t}: ${TYPE_DESC[t]}`).join('\n'); }
 const TRIAGE = ['open', 'confirmed', 'false_positive', 'fixed', 'wontfix'];
 // confirmation: whether someone checked the finding is real, independent of triage (NULL = unchecked)
 const CONFIRMATION = ['confirmed', 'not_confirmed', 'unchecked'];
@@ -353,6 +393,26 @@ function db() {
   CREATE TABLE IF NOT EXISTS triage_results (run_id INTEGER NOT NULL, finding_id INTEGER NOT NULL, verdict TEXT NOT NULL,
     severity_old TEXT, severity_new TEXT, fix_loc INTEGER, issue TEXT, note TEXT, ts TEXT NOT NULL,
     PRIMARY KEY (run_id, finding_id));`);
+  // fixed finding type (TYPES); type_locked: set by a triager/human, rescans keep it
+  const fCols = DB.prepare('PRAGMA table_info(findings)').all().map((c) => c.name);
+  for (const [col, def] of [['type', 'TEXT'], ['type_locked', 'INTEGER NOT NULL DEFAULT 0']]) {
+    if (fCols.includes(col)) continue;
+    try { DB.exec(`ALTER TABLE findings ADD COLUMN ${col} ${def}`); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  }
+  const trCols = DB.prepare('PRAGMA table_info(triage_results)').all().map((c) => c.name);
+  for (const col of ['type_old', 'type_new']) {
+    if (trCols.includes(col)) continue;
+    try { DB.exec(`ALTER TABLE triage_results ADD COLUMN ${col} TEXT`); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  }
+  if (!DB.prepare('PRAGMA table_info(cal_findings)').all().some((c) => c.name === 'type')) {
+    try { DB.exec('ALTER TABLE cal_findings ADD COLUMN type TEXT'); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  }
+  const untyped = DB.prepare('SELECT id, category, title FROM findings WHERE type IS NULL').all();
+  if (untyped.length) {
+    const st = DB.prepare('UPDATE findings SET type=? WHERE id=? AND type IS NULL');
+    DB.exec('BEGIN IMMEDIATE');
+    try { for (const r of untyped) st.run(typeFromCategory(r.category, r.title), r.id); DB.exec('COMMIT'); } catch (e) { DB.exec('ROLLBACK'); throw e; }
+  }
   return DB;
 }
 
@@ -1007,7 +1067,8 @@ function cmdClaim(a) {
     const submitHelp = () => {
       out('== SUBMIT (once, after reviewing everything) ==');
       out(`${cliPrefix()} submit ${scanId} ${c.id} <<'EOF'\n{${items.map((it) => JSON.stringify(it.path) + ': [ ]').join(', ')}}\nEOF`);
-      out('Each key maps to that file\'s confirmed findings: [] if none, else objects {"line":N,"end_line":N,"severity":"critical|high|medium|low","category":"...","title":"...","detail":"...","evidence":"...","confidence":0.0-1.0}.');
+      out('Each key maps to that file\'s confirmed findings: [] if none, else objects {"line":N,"end_line":N,"severity":"critical|high|medium|low","type":"<type>","category":"...","title":"...","detail":"...","evidence":"...","confidence":0.0-1.0}.');
+      out(`type: exactly one of\n${typeList()}\ncategory: your own short free-form tag (e.g. "nil-deref", "fd-leak").`);
     };
     const texts = items.map((it) => {
       const lines = catBlob(blobs.get(it.path)).split('\n');
@@ -1046,8 +1107,9 @@ function cmdClaim(a) {
     out(`- ${it.path}${rng}\n    read: ${how}`);
   }
   out('== SUBMIT (once per file/slice above, as soon as you finish it) ==');
-  out(`${cliPrefix()} submit ${scanId} ${c.id} --file <path> [--slice <k>] <<'EOF'\n[ {"path":"...","line":N,"end_line":N,"severity":"critical|high|medium|low","category":"...","title":"...","detail":"...","evidence":"...","confidence":0.0-1.0} ]\nEOF`);
+  out(`${cliPrefix()} submit ${scanId} ${c.id} --file <path> [--slice <k>] <<'EOF'\n[ {"path":"...","line":N,"end_line":N,"severity":"critical|high|medium|low","type":"<type>","category":"...","title":"...","detail":"...","evidence":"...","confidence":0.0-1.0} ]\nEOF`);
   out('Submit [] for a file with no confirmed issues.');
+  out(`type: exactly one of\n${typeList()}\ncategory: your own short free-form tag (e.g. "nil-deref", "fd-leak").`);
 }
 
 function normTitle(t) { return String(t).toLowerCase().replace(/[`'"]/g, '').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim(); }
@@ -1153,7 +1215,8 @@ function cmdSubmit(a) {
     if (conf !== null && conf > 1) conf = conf / 100;
     return {
       path: p, line, end_line: x.end_line || x.endLine ? parseInt(x.end_line || x.endLine, 10) : null,
-      severity: sev, category: String(x.category || 'correctness').toLowerCase().trim(),
+      severity: sev, category: String(x.category || x.type || 'correctness').toLowerCase().trim(),
+      type: TYPES.includes(String(x.type || '').toLowerCase().trim()) ? String(x.type).toLowerCase().trim() : typeFromCategory(x.category, x.title),
       title: String(x.title || '').trim().slice(0, 300), detail: x.detail ? String(x.detail) : null,
       evidence: x.evidence ? (typeof x.evidence === 'string' ? x.evidence : JSON.stringify(x.evidence)) : null,
       confidence: conf,
@@ -1167,8 +1230,8 @@ function cmdSubmit(a) {
       if (scan.kind === 'cal') {
         const b = blobQ.get(scanId, f.path) || { blob_sha: (git(['rev-parse', `${scan.commit_sha}:${f.path}`], { allowFail: true }) || '').trim() };
         if (!b.blob_sha) throw new Error(`finding path ${f.path} is not a tracked file at the scanned commit`);
-        d.prepare('INSERT INTO cal_findings(scan_id,path,line,end_line,severity,category,title,snippet) VALUES(?,?,?,?,?,?,?,?)')
-          .run(scanId, f.path, f.line, f.end_line, f.severity, f.category, f.title, lineText(b.blob_sha, f.line));
+        d.prepare('INSERT INTO cal_findings(scan_id,path,line,end_line,severity,category,title,snippet,type) VALUES(?,?,?,?,?,?,?,?,?)')
+          .run(scanId, f.path, f.line, f.end_line, f.severity, f.category, f.title, lineText(b.blob_sha, f.line), f.type);
         added++;
         continue;
       }
@@ -1180,19 +1243,20 @@ function cmdSubmit(a) {
         similarFinding(d, f, snippet, scanId);
       if (ex) {
         const reopen = ex.triage === 'fixed';
-        d.prepare(`UPDATE findings SET last_scan=?, commit_sha=?, line=?, end_line=?, severity=CASE WHEN severity_locked THEN severity ELSE ? END, detail=COALESCE(?,detail),
+        d.prepare(`UPDATE findings SET last_scan=?, commit_sha=?, line=?, end_line=?, severity=CASE WHEN severity_locked THEN severity ELSE ? END,
+          type=CASE WHEN type_locked THEN type ELSE ? END, detail=COALESCE(?,detail),
           evidence=COALESCE(?,evidence), confidence=COALESCE(?,confidence), blob_sha=?, updated=?, triage=?, note=?,
           snippet=?, gone_scan=NULL WHERE id=?`)
-          .run(scanId, scan.commit_sha, f.line, f.end_line, f.severity, f.detail, f.evidence, f.confidence, fr.blob_sha, now(),
+          .run(scanId, scan.commit_sha, f.line, f.end_line, f.severity, f.type, f.detail, f.evidence, f.confidence, fr.blob_sha, now(),
             reopen ? 'open' : ex.triage, reopen ? `${ex.note ? ex.note + '\n' : ''}reappeared in scan ${scanId}` : ex.note,
             snippet, ex.id);
         d.prepare('INSERT OR IGNORE INTO seen VALUES(?,?)').run(ex.id, scanId);
         updated++;
       } else {
         const r = d.prepare(`INSERT INTO findings(fingerprint,first_scan,last_scan,commit_sha,path,line,end_line,severity,category,
-          title,detail,evidence,snippet,confidence,blob_sha,unit,profile_name,created,updated)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(fp, scanId, scanId, scan.commit_sha, f.path, f.line, f.end_line,
-          f.severity, f.category, f.title, f.detail, f.evidence, snippet, f.confidence, fr.blob_sha, fr.unit, scan.profile_name, now(), now());
+          title,detail,evidence,snippet,confidence,blob_sha,unit,profile_name,created,updated,type)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(fp, scanId, scanId, scan.commit_sha, f.path, f.line, f.end_line,
+          f.severity, f.category, f.title, f.detail, f.evidence, snippet, f.confidence, fr.blob_sha, fr.unit, scan.profile_name, now(), now(), f.type);
         d.prepare('INSERT OR IGNORE INTO seen VALUES(?,?)').run(r.lastInsertRowid, scanId);
         added++;
       }
@@ -1977,6 +2041,9 @@ function cmdStatus(a) {
   const g = d.prepare(`SELECT COUNT(*) n, SUM(NOT EXISTS (SELECT 1 FROM filings x WHERE x.finding_id=f.id AND x.kind!='skipped')) un
     FROM findings f WHERE triage IN ('open','confirmed') AND gone_scan IS NULL`).get();
   out(`all findings (open+confirmed): ${g.n}, unreported: ${g.un || 0}`);
+  const bt = d.prepare(`SELECT COALESCE(type,'other') t, COUNT(*) n FROM findings WHERE triage IN ('open','confirmed') AND gone_scan IS NULL
+    GROUP BY 1 ORDER BY 2 DESC`).all();
+  if (bt.length) out(`by type: ${bt.map((x) => `${x.t} ${x.n}`).join(', ')}`);
 }
 
 function cmdFiles(a) {
@@ -2034,6 +2101,12 @@ function loadFindings(f, { defaultTriage = ['open', 'confirmed'] } = {}) {
   }
   const cat = listFlag(f.category);
   if (cat) { where.push(`(${cat.map(() => 'category LIKE ?').join(' OR ')})`); params.push(...cat.map((c) => `%${c}%`)); }
+  const typ = listFlag(f.type);
+  if (typ) {
+    const bad = typ.filter((t) => !TYPES.includes(t));
+    if (bad.length) die(`unknown type ${bad.join(', ')}; types: ${TYPES.join(', ')}`);
+    where.push(`type IN (${typ.map(() => '?').join(',')})`); params.push(...typ);
+  }
   let tri = listFlag(f.triage);
   if (tri && tri.includes('all')) tri = null;
   else if (!tri && !f.ids) tri = defaultTriage;
@@ -2089,7 +2162,7 @@ function loadFindings(f, { defaultTriage = ['open', 'confirmed'] } = {}) {
   return sortRows(rows, f.sort);
 }
 
-const SORT_FIELDS = ['severity', 'path', 'line', 'confidence', 'created', 'updated', 'category', 'triage', 'confirmation', 'id', 'title', 'unit', 'fix_loc'];
+const SORT_FIELDS = ['severity', 'path', 'line', 'confidence', 'created', 'updated', 'category', 'type', 'triage', 'confirmation', 'id', 'title', 'unit', 'fix_loc'];
 function sortRows(rows, sortSpec) {
   const specs = listFlag(sortSpec) || ['severity:desc', 'path', 'line'];
   const keys = specs.map((s) => {
@@ -2116,14 +2189,14 @@ function loc(r) { return `${r.path}${r.line ? ':' + r.line + (r.end_line && r.en
 function formatRows(rows, fmt) {
   if (fmt === 'json') return JSON.stringify(rows.map(publicRow), null, 1);
   if (fmt === 'csv') {
-    const cols = ['id', 'severity', 'category', 'path', 'line', 'end_line', 'title', 'triage', 'confirmation', 'confidence', 'fix_loc', 'reported_as', 'dupe_group', 'stale', 'unit', 'first_scan', 'last_scan', 'detail', 'evidence'];
+    const cols = ['id', 'severity', 'type', 'category', 'path', 'line', 'end_line', 'title', 'triage', 'confirmation', 'confidence', 'fix_loc', 'reported_as', 'dupe_group', 'stale', 'unit', 'first_scan', 'last_scan', 'detail', 'evidence'];
     const q = (v) => (v === null || v === undefined ? '' : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
     return [cols.join(','), ...rows.map((r) => cols.map((c) => q(r[c])).join(','))].join('\n');
   }
   if (fmt === 'md') {
     return rows.map((r) => [
       `### #${r.id} [${r.severity}] ${r.title}`,
-      `\`${loc(r)}\` — ${r.category}; triage: ${r.triage}; confirmation: ${r.confirmation || 'unchecked'}${r.reported_as ? '; reported: ' + r.reported_as : ''}${r.stale ? '; STALE (file changed since)' : ''}${r.confidence !== null ? `; confidence ${r.confidence}` : ''}`,
+      `\`${loc(r)}\` — ${r.type || 'other'} (${r.category}); triage: ${r.triage}; confirmation: ${r.confirmation || 'unchecked'}${r.reported_as ? '; reported: ' + r.reported_as : ''}${r.stale ? '; STALE (file changed since)' : ''}${r.confidence !== null ? `; confidence ${r.confidence}` : ''}`,
       '', r.detail || '', r.evidence ? `\nEvidence: ${r.evidence}` : '', '',
     ].join('\n')).join('\n');
   }
@@ -2151,7 +2224,7 @@ function cmdShow(a) {
   const r = db().prepare('SELECT * FROM findings WHERE id=?').get(id);
   if (!r) die(`no finding ${id}`);
   out(`#${r.id} [${r.severity}] ${r.title}`);
-  out(`${loc(r)}  category=${r.category} triage=${r.triage} confirmation=${r.confirmation || 'unchecked'} confidence=${r.confidence ?? '-'} unit=${r.unit || '-'}${r.fix_loc !== null && r.fix_loc !== undefined ? ` fix_loc=${r.fix_loc}` : ''}` +
+  out(`${loc(r)}  type=${r.type || 'other'}${r.type_locked ? ' (set by triage)' : ''} category=${r.category} triage=${r.triage} confirmation=${r.confirmation || 'unchecked'} confidence=${r.confidence ?? '-'} unit=${r.unit || '-'}${r.fix_loc !== null && r.fix_loc !== undefined ? ` fix_loc=${r.fix_loc}` : ''}` +
     (r.gone_scan ? `  GONE (not reported when the changed file was re-reviewed in scan ${r.gone_scan})` : ''));
   out(`commit ${r.commit_sha} (first scan ${r.first_scan}, last scan ${r.last_scan}) profile=${r.profile_name}`);
   if (r.snippet) out(`line: ${r.snippet}`);
@@ -2181,7 +2254,7 @@ function cmdSql(a) {
   emit(a.f.format === 'json' ? JSON.stringify(rows, null, 1) : text, a.f, rows.length, a.f.format === 'json' ? 1e9 : STDOUT_ROWS + 1);
 }
 
-const FINDING_FILTERS = ['severity', 'category', 'path', 'triage', 'confirmation', 'scan', 'latest', 'text', 'unit', 'group', 'dupe-of', 'ids', 'reported', 'unreported', 'max-fix-loc', 'min-confidence'];
+const FINDING_FILTERS = ['severity', 'category', 'type', 'path', 'triage', 'confirmation', 'scan', 'latest', 'text', 'unit', 'group', 'dupe-of', 'ids', 'reported', 'unreported', 'max-fix-loc', 'min-confidence'];
 function hasFindingFilter(f) { return FINDING_FILTERS.some((k) => f[k] !== undefined); }
 
 function selectIds(a) {
@@ -2215,6 +2288,65 @@ function setSeverity(d, id, sev) {
   return old;
 }
 
+/** Change a finding's type, lock it against rescans and note the old value. Returns the old type if it changed. */
+function setType(d, id, type, { lock = true } = {}) {
+  const cur = d.prepare('SELECT type, type_locked FROM findings WHERE id=?').get(id);
+  if (!cur) return null;
+  if (cur.type === type) {
+    if (lock && !cur.type_locked) d.prepare('UPDATE findings SET type_locked=1 WHERE id=?').run(id);
+    return null;
+  }
+  const old = cur.type || 'other';
+  d.prepare(`UPDATE findings SET type=?, type_locked=?, note=COALESCE(note || char(10), '') || ?, updated=? WHERE id=?`)
+    .run(type, lock ? 1 : cur.type_locked, `[type: ${old} → ${type}]`, now(), id);
+  return old;
+}
+
+function cmdRetype(a) {
+  if (a.f['list-other']) {
+    const rows = loadFindings({ ...a.f, type: 'other' }, { defaultTriage: ['open', 'confirmed'] });
+    if (!rows.length) { out('no findings of type other'); return; }
+    out(`${rows.length} finding(s) of type other. Assign each with: ${cliPrefix()} retype <ids> --set <type>`);
+    out(`types:\n${typeList()}`);
+    for (const r of rows) out(`#${r.id}\t${r.category}\t${quoteData(r.title)}\t${quoteData(String(r.detail || '').replace(/\s+/g, ' ').slice(0, 200))}`);
+    return;
+  }
+  if (a.f.auto) {
+    const hasSel = a.pos.some((x) => /^\d+(,\d+)*$/.test(x)) || hasFindingFilter(a.f);
+    const ids = hasSel ? selectIds(a) : db().prepare('SELECT id FROM findings').all().map((r) => r.id);
+    const counts = {};
+    let changed = 0;
+    tx((d) => {
+      const get = d.prepare('SELECT id, category, title, type, type_locked FROM findings WHERE id=?');
+      const st = d.prepare('UPDATE findings SET type=? WHERE id=?');
+      for (const id of ids) {
+        const r = get.get(id);
+        if (!r || r.type_locked) continue;
+        if (r.type && !a.f.force) { counts[r.type] = (counts[r.type] || 0) + 1; continue; }
+        const t = typeFromCategory(r.category, r.title);
+        counts[t] = (counts[t] || 0) + 1;
+        if (t !== r.type) { st.run(t, id); changed++; }
+      }
+    });
+    out(`${changed} finding(s) retyped from category; unlocked by type: ${Object.entries(counts).sort((x, y) => y[1] - x[1]).map(([t, n]) => `${t} ${n}`).join(', ') || 'none'}`);
+    if (counts.other) out(`${counts.other} left as other: \`${cliPrefix()} retype --list-other\` lists them`);
+    return;
+  }
+  const type = a.f.set;
+  if (!TYPES.includes(type)) die(`--set must be one of ${TYPES.join('|')} (or use --auto / --list-other)`);
+  const ids = selectIds(a);
+  if (!ids.length) die('no findings selected');
+  const changed = [];
+  tx((d) => {
+    for (const id of ids) {
+      const old = setType(d, id, type);
+      if (old) changed.push(`#${id} ${old}→${type}`);
+      if (a.f.note) d.prepare(`UPDATE findings SET note=COALESCE(note || char(10), '') || ? WHERE id=?`).run(`[type] ${a.f.note}`, id);
+    }
+  });
+  out(`${ids.length} finding(s) → type ${type} (locked)${changed.length ? `: ${changed.slice(0, 30).join(', ')}${changed.length > 30 ? ' …' : ''}` : ''}`);
+}
+
 function cmdConfirm(a) {
   const state = a.f.set;
   if (!CONFIRMATION.includes(state)) die(`--set must be one of ${CONFIRMATION.join('|')}`);
@@ -2222,20 +2354,23 @@ function cmdConfirm(a) {
   if (!ids.length) die('no findings selected');
   const sev = a.f['set-severity'];
   if (sev !== undefined && !SEVERITIES.includes(sev)) die(`--set-severity must be one of ${SEVERITIES.join('|')}`);
+  const typ = a.f['set-type'];
+  if (typ !== undefined && !TYPES.includes(typ)) die(`--set-type must be one of ${TYPES.join('|')}`);
   const note = a.f.note ? `[confirmation: ${state}] ${a.f.note}` : null;
-  const changed = [];
+  const changed = [], retyped = [];
   tx((d) => {
     const st = d.prepare(`UPDATE findings SET confirmation=?, note=CASE WHEN ? IS NULL THEN note ELSE
       COALESCE(note || char(10), '') || ? END, updated=? WHERE id=?`);
     for (const id of ids) {
       st.run(state === 'unchecked' ? null : state, note, note, now(), id);
+      if (typ !== undefined) { const ot = setType(d, id, typ); if (ot) retyped.push(`#${id} ${ot}→${typ}`); }
       if (sev === undefined) continue;
       const old = setSeverity(d, id, sev);
       if (old) changed.push(`#${id} ${old}→${sev}`);
     }
   });
   out(`${ids.length} finding(s) → confirmation ${state}: ${ids.slice(0, 30).map((i) => '#' + i).join(' ')}${ids.length > 30 ? ' …' : ''}` +
-    (changed.length ? `\nseverity: ${changed.join(', ')}` : ''));
+    (changed.length ? `\nseverity: ${changed.join(', ')}` : '') + (retyped.length ? `\ntype: ${retyped.join(', ')}` : ''));
 }
 
 function cmdProfile(a) {
@@ -2663,7 +2798,7 @@ const CONFIG_KEYS = {
   assignee: 'assignee login / account id',
   components: 'Jira components, comma-separated',
   priority_map: 'JSON severity→priority, e.g. {"critical":"P0","high":"P1"}',
-  group_by: 'finding | dupe-group | file | category (default dupe-group)',
+  group_by: 'finding | dupe-group | file | category | type (default dupe-group)',
   min_severity: 'critical|high|medium|low (default high)',
   require_triage: 'comma list of triage states eligible (default confirmed; "any" = open,confirmed)',
   title_template: 'default "{{severity_upper}}: {{title}} ({{basename}})"',
@@ -2685,7 +2820,7 @@ function cmdReportConfig(a) {
     if (!CONFIG_KEYS[key]) die(`unknown key ${key}; keys: ${Object.keys(CONFIG_KEYS).join(', ')}`);
     const val = rest.join(' ');
     if (key === 'target' && !/^(gh:[\w.-]+\/[\w.-]+|jira:[A-Z][A-Z0-9_]+)$/.test(val)) die('target must be gh:owner/repo or jira:PROJ');
-    if (key === 'group_by' && !['finding', 'dupe-group', 'file', 'category'].includes(val)) die('group_by: finding|dupe-group|file|category');
+    if (key === 'group_by' && !['finding', 'dupe-group', 'file', 'category', 'type'].includes(val)) die('group_by: finding|dupe-group|file|category|type');
     if (key === 'min_severity' && !SEVERITIES.includes(val)) die(`min_severity: ${SEVERITIES.join('|')}`);
     if (key === 'priority_map') { try { JSON.parse(val); } catch (e) { die('priority_map must be JSON'); } }
     if (key === 'body_template' && !fs.existsSync(val)) die(`no such file ${val}`);
@@ -2737,6 +2872,7 @@ function cmdRender(a) {
     if (groupBy === 'finding') k = `f${r.id}`;
     else if (groupBy === 'file') k = `p${r.path}`;
     else if (groupBy === 'category') k = `c${r.category}`;
+    else if (groupBy === 'type') k = `t${r.type || 'other'}`;
     else k = groupsOf.has(r.id) ? `g${groupsOf.get(r.id)}` : `f${r.id}`;
     if (!bucket.has(k)) bucket.set(k, []);
     bucket.get(k).push(r);
@@ -2781,8 +2917,8 @@ function cmdRender(a) {
     }).join('\n\n');
     const sevs = [...new Set(g.map((r) => r.severity))];
     const vars = {
-      title: groupBy === 'file' ? `${g.length} issue(s) in ${lead.path}` : groupBy === 'category' ? `${g.length} ${lead.category} issue(s)` : lead.title,
-      severity: lead.severity, severity_upper: lead.severity.toUpperCase(), category: lead.category,
+      title: groupBy === 'file' ? `${g.length} issue(s) in ${lead.path}` : groupBy === 'category' ? `${g.length} ${lead.category} issue(s)` : groupBy === 'type' ? `${g.length} ${lead.type || 'other'} issue(s)` : lead.title,
+      severity: lead.severity, severity_upper: lead.severity.toUpperCase(), category: lead.category, type: lead.type || 'other',
       path: lead.path, basename: lead.path.split('/').pop(), line: lead.line, count: g.length,
       commit: lead.commit_sha, short_commit: lead.commit_sha.slice(0, 12), findings: blocks,
       locations: g.map((r) => `- \`${loc(r)}\``).join('\n'), severities: sevs.join(', '),
@@ -3030,7 +3166,7 @@ function atClaim(a) {
     const r = d.prepare('SELECT * FROM findings WHERE id=?').get(id);
     if (!r) continue;
     out(`\n== FINDING #${r.id} ==`);
-    out(`${loc(r)} severity=${r.severity} category=${r.category} confidence=${r.confidence ?? '-'} scanned at ${r.commit_sha.slice(0, 12)}` +
+    out(`${loc(r)} severity=${r.severity} type=${r.type || 'other'} category=${r.category} confidence=${r.confidence ?? '-'} scanned at ${r.commit_sha.slice(0, 12)}` +
       (hb && hb.get(r.path) !== r.blob_sha ? ' — FILE CHANGED SINCE (re-locate the code)' : ''));
     out('```text');
     out(`Title: ${quoteData(r.title)}`);
@@ -3061,12 +3197,14 @@ function atClaim(a) {
   }
   out('\n== SUBMIT (once, every finding of the group) ==');
   out(`${cliPrefix()} auto-triage submit ${runId} ${g.gid} <<'EOF'`);
-  out(JSON.stringify(ids.map((id) => ({ id, verdict: 'real|false_positive|wontfix|unsure', severity: 'critical|high|medium|low', fix_loc: 0, issue: null, note: '...' }))));
+  out(JSON.stringify(ids.map((id) => ({ id, verdict: 'real|false_positive|wontfix|unsure', severity: 'critical|high|medium|low', type: '<type>', fix_loc: 0, issue: null, note: '...' }))));
   out('EOF');
   out('verdict: real = the bug exists as described (or its core does); false_positive = it does not (a guard, contract or');
   out('misread rules it out); wontfix = real but intended/negligible; unsure = could not decide from the code.');
-  out('severity: your corrected severity (repeat the given one if it is right). fix_loc: production lines (not tests) a');
-  out('minimal fix would add+change+remove; 0 for false_positive. issue: {"number":N,"url":"..."} of an existing issue/PR');
+  out('severity: your corrected severity (repeat the given one if it is right).');
+  out(`type: the kind of bug (repeat the given one if it is right; for a false_positive, what it claimed to be), exactly one of:\n${typeList()}`);
+  out('fix_loc: production lines (not tests) a minimal fix would add+change+remove; 0 for false_positive.');
+  out('issue: {"number":N,"url":"..."} of an existing issue/PR');
   out('describing the same bug (add "repo":"owner/name" if it is in another repo), else null.');
   out('note: one or two sentences with the deciding evidence (file:line), written for a human.');
 }
@@ -3093,6 +3231,7 @@ function atSubmit(a) {
     seen.add(x.id);
     if (!AT_VERDICTS.includes(x.verdict)) errs.push(`${at}: verdict must be one of ${AT_VERDICTS.join('|')}`);
     if (!SEVERITIES.includes(x.severity)) errs.push(`${at}: severity must be one of ${SEVERITIES.join('|')}`);
+    if (!TYPES.includes(x.type)) errs.push(`${at}: type must be one of ${TYPES.join('|')}`);
     if (!Number.isInteger(x.fix_loc) || x.fix_loc < 0) errs.push(`${at}: fix_loc must be a whole number >= 0`);
     if (typeof x.note !== 'string' || !x.note.trim()) errs.push(`${at}: note is required`);
     if (x.issue !== null && x.issue !== undefined) {
@@ -3106,10 +3245,10 @@ function atSubmit(a) {
   if (errs.length) die(`rejected, fix and resubmit:\n${errs.join('\n')}`);
   const summary = [];
   tx((d) => {
-    const getF = d.prepare('SELECT severity, triage FROM findings WHERE id=?');
+    const getF = d.prepare('SELECT severity, triage, type FROM findings WHERE id=?');
     const upd = d.prepare(`UPDATE findings SET confirmation=?, triage=?, fix_loc=?, note=COALESCE(note || char(10), '') || ?, updated=? WHERE id=?`);
-    const res = d.prepare(`INSERT OR REPLACE INTO triage_results(run_id,finding_id,verdict,severity_old,severity_new,fix_loc,issue,note,ts)
-      VALUES(?,?,?,?,?,?,?,?,?)`);
+    const res = d.prepare(`INSERT OR REPLACE INTO triage_results(run_id,finding_id,verdict,severity_old,severity_new,fix_loc,issue,note,ts,type_old,type_new)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
     for (const x of arr) {
       const cur = getF.get(x.id);
       const conf = x.verdict === 'real' || x.verdict === 'wontfix' ? 'confirmed' : 'not_confirmed';
@@ -3117,14 +3256,15 @@ function atSubmit(a) {
         : x.verdict === 'real' && cur.triage === 'open' ? 'confirmed' : cur.triage;
       upd.run(conf, tri, x.fix_loc, `[auto-triage run ${runId}: ${x.verdict}] ${x.note.trim()}`, now(), x.id);
       const old = setSeverity(d, x.id, x.severity);
+      const oldType = setType(d, x.id, x.type);
       let issue = null;
       if (x.issue) {
         const repo = x.issue.repo || run.repo;
         linkFinding(d, x.id, `gh:${repo}`, String(x.issue.number), x.issue.url || null, 'linked_existing');
         issue = `gh:${repo}#${x.issue.number}`;
       }
-      res.run(runId, x.id, x.verdict, cur.severity, x.severity, x.fix_loc, issue, x.note.trim(), now());
-      summary.push(`#${x.id} ${x.verdict}${old ? ` ${old}→${x.severity}` : ''} fix~${x.fix_loc}${issue ? ` ${issue}` : ''}`);
+      res.run(runId, x.id, x.verdict, cur.severity, x.severity, x.fix_loc, issue, x.note.trim(), now(), cur.type || 'other', x.type);
+      summary.push(`#${x.id} ${x.verdict}${old ? ` ${old}→${x.severity}` : ''}${oldType ? ` ${oldType}→${x.type}` : ''} fix~${x.fix_loc}${issue ? ` ${issue}` : ''}`);
     }
     d.prepare("UPDATE triage_groups SET state='done', done_at=? WHERE run_id=? AND gid=?").run(now(), runId, gid);
   });
@@ -3152,9 +3292,11 @@ function atStatus(a) {
   const by = {};
   for (const r of rs) by[r.verdict] = (by[r.verdict] || 0) + 1;
   const sevCh = rs.filter((r) => r.severity_old !== r.severity_new).length;
-  out(`verdicts: ${AT_VERDICTS.filter((v) => by[v]).map((v) => `${v} ${by[v]}`).join(', ')}; severity changed ${sevCh}; existing issue found ${rs.filter((r) => r.issue).length}`);
+  const typeCh = rs.filter((r) => r.type_new && r.type_old !== r.type_new).length;
+  out(`verdicts: ${AT_VERDICTS.filter((v) => by[v]).map((v) => `${v} ${by[v]}`).join(', ')}; severity changed ${sevCh}; type changed ${typeCh}; existing issue found ${rs.filter((r) => r.issue).length}`);
   for (const r of rs) {
-    out(`#${r.finding_id}\t${r.verdict}\t${r.severity_old === r.severity_new ? r.severity_new : `${r.severity_old}→${r.severity_new}`}\tfix~${r.fix_loc}\t${r.issue || '-'}\t${String(r.note || '').slice(0, 140)}`);
+    const ty = !r.type_new ? '-' : r.type_old === r.type_new ? r.type_new : `${r.type_old}→${r.type_new}`;
+    out(`#${r.finding_id}\t${r.verdict}\t${r.severity_old === r.severity_new ? r.severity_new : `${r.severity_old}→${r.severity_new}`}\t${ty}\tfix~${r.fix_loc}\t${r.issue || '-'}\t${String(r.note || '').slice(0, 140)}`);
   }
 }
 
@@ -3168,12 +3310,14 @@ planner:   plan-context <scan> | apply-plan <scan> --file plan.json
 workers:   claim <scan> | submit <scan> <chunk> --file <path> [--slice k] < findings.json
 limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P]; start/restart/continue [--concurrency 1-16, default 10]  | statusline [-- <wrapped status line cmd>]
 progress:  status [--scan id|--all] | files [--state s] [--path p] [--out f]
-findings:  query [--severity critical,high|high+] [--category c] [--path p] [--triage t|all] [--confirmation c|all] [--reported|--unreported]
+findings:  query [--severity critical,high|high+] [--category c] [--type t1,t2] [--path p] [--triage t|all] [--confirmation c|all] [--reported|--unreported]
                  [--tracker t] [--scan id|--latest] [--stale|--no-stale] [--gone|--include-gone] [--min-confidence x] [--max-fix-loc n] [--text s] [--unit u]
                  [--group g] [--dupe-of id] [--primary-only] [--ids 1,2] [--sort severity:desc,path,line]
                  [--limit n] [--format table|md|json|csv] [--out file]
            show <id> | sql "<SELECT ...>" | triage <ids|filters> --set <state> [--note s]
-           confirm <ids|filters> --set confirmed|not_confirmed|unchecked [--set-severity s] [--note s]
+           confirm <ids|filters> --set confirmed|not_confirmed|unchecked [--set-severity s] [--set-type t] [--note s]
+           retype <ids|filters> --set <type> [--note s] | retype --auto [filters] [--force] | retype --list-other [filters]
+           types: ${TYPES.join(' ')}
 profiles:  profile list | show <name> | add <name> --file f | rm <name>
 dupes:     dupes [filters] [--line-window 10] [--title-sim 0.6] | dupes list | dupes show <g> | dupes merge|split <ids>
 trackers:  tracker-sync gh [--repo o/r] [--state all] [--search q] | tracker-import jira < issues.json
@@ -3191,7 +3335,7 @@ report:    report-config show|set <k> <v>|unset <k> | render [filters] [--target
 const COMMANDS = {
   start: cmdStart, continue: cmdContinue, restart: cmdRestart, stop: cmdStop, 'set-run': cmdSetRun,
   'plan-context': cmdPlanContext, 'apply-plan': cmdApplyPlan, claim: cmdClaim, submit: cmdSubmit,
-  status: cmdStatus, files: cmdFiles, query: cmdQuery, show: cmdShow, sql: cmdSql, triage: cmdTriage, confirm: cmdConfirm,
+  status: cmdStatus, files: cmdFiles, query: cmdQuery, show: cmdShow, sql: cmdSql, triage: cmdTriage, confirm: cmdConfirm, retype: cmdRetype,
   profile: cmdProfile, dupes: cmdDupes, 'tracker-sync': cmdTrackerSync, 'tracker-import': cmdTrackerImport,
   match: cmdMatch, link: cmdLink, unlink: cmdUnlink, 'issues-sync': cmdIssuesSync, 'report-config': cmdReportConfig, render: cmdRender,
   drafts: cmdDrafts, calibrate: cmdCalibrate, 'verify-prompt': cmdVerifyPrompt, 'auto-triage': cmdAutoTriage, init: cmdInit, statusline: cmdStatusline, limits: cmdLimits, 'statusline-path': () => out(rateLimitsPath()), 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,

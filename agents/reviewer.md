@@ -15,6 +15,7 @@ independent tool calls in the same turn.
    already dismissed unless the code changed so that its stated reason no longer applies. Batch lookups of other code
    into one Bash call (several `grep -n` / `sed -n` together). Never build, run, test or edit.
 3. Submit once with every file as a key ([] if clean). Finding fields: line, end_line, severity
-   (critical|high|medium|low), category, title, detail (trigger path, impact), evidence (file:line
+   (critical|high|medium|low), type (one of the fixed types the claim output lists), category (your own
+   short tag), title, detail (trigger path, impact), evidence (file:line
    facts), confidence 0..1. Fix and resubmit if rejected.
 4. Reply only with the requested JSON.
