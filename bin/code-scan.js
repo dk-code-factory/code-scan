@@ -191,10 +191,23 @@ function globRe(g) {
 }
 function escRe(s) { return s.replace(/[.+^$()|[\]\\{}*?]/g, '\\$&'); }
 
+/** Split a comma-separated spec list, keeping commas inside `{a,b}` brace groups. */
+function splitSpecs(s) {
+  const parts = [];
+  let depth = 0, cur = '';
+  for (const c of s) {
+    if (c === '{') depth++;
+    else if (c === '}' && depth > 0) depth--;
+    if (c === ',' && depth === 0) { parts.push(cur); cur = ''; } else cur += c;
+  }
+  parts.push(cur);
+  return parts;
+}
+
 /** `dir/` → prefix, glob → glob, plain path → exact file or directory prefix. */
 function pathMatcher(spec) {
   if (!spec) return null;
-  const specs = [].concat(spec).flatMap((s) => s.split(',')).map((s) => s.trim()).filter(Boolean);
+  const specs = [].concat(spec).flatMap(splitSpecs).map((s) => s.trim()).filter(Boolean);
   const ms = specs.map((s) => {
     if (/[*?{]/.test(s) || s.endsWith('/')) return globRe(s);
     const clean = s.replace(/^\.\//, '').replace(/\/$/, '');
@@ -2688,7 +2701,7 @@ function codeRepo() {
   const c = cfgGet('code_repo');
   if (c) return c;
   const u = (git(['remote', 'get-url', 'origin'], { allowFail: true }) || '').trim();
-  const m = u.match(/github\.com[:/]([^/]+\/[^/.]+?)(?:\.git)?$/);
+  const m = u.match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/);
   return m ? m[1] : null;
 }
 

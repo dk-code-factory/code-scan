@@ -127,13 +127,15 @@ echo '[{"key":"PROJ-1","fields":{"summary":"x","status":{"name":"Open"},"descrip
 
 # --- report: render, file, idempotence, marker roundtrip
 B report-config set labels code-scan >/dev/null
+git -C "$W/repo" remote set-url origin https://github.com/acme/toy.js.git   # dotted repo name
 r=$(B render)
+git -C "$W/repo" remote set-url origin https://github.com/acme/toy.git
 has "$r" '2 draft(s)' && ok render || bad "render: $r"
-body=$(B drafts | sed -n 2p | cut -f5); grep -q 'github.com/acme/toy/blob/' "$body" && grep -q 'code-scan:fp=' "$body" && ok permalinks-marker || bad permalinks-marker
+body=$(B drafts | sed -n 2p | cut -f5); grep -q 'github.com/acme/toy.js/blob/' "$body" && grep -q 'code-scan:fp=' "$body" && ok permalinks-marker || bad permalinks-marker
 python3 - "$body" <<'PY' && ok permalink-own-paragraph || bad permalink-own-paragraph
 import sys, re
 lines = open(sys.argv[1]).read().split('\n')
-idx = [i for i, l in enumerate(lines) if 'github.com/acme/toy/blob/' in l]
+idx = [i for i, l in enumerate(lines) if 'github.com/acme/toy.js/blob/' in l]
 assert idx and all(lines[i].startswith('https://') and lines[i-1] == '' and lines[i+1] == '' for i in idx), lines
 PY
 has "$(B file-gh)" 'filed 2' && ok file-gh || bad file-gh
@@ -237,6 +239,8 @@ has "$(B files --path src/store/db.py)" 'out-of-scope' && ok only-vs-planner || 
 B stop >/dev/null 2>&1; B restart --no-plan --exclude src/net/ >/dev/null; B stop >/dev/null 2>&1
 o=$(B restart --no-plan --force --only src/net/); has "$o" 'to review: 2 files' && ok restart-scope-replaces || bad "restart-scope-replaces: $o"
 B stop >/dev/null 2>&1; o=$(B restart --no-plan --force --reset-scope); ! has "$o" 'out-of-scope' && ! has "$o" 'user-exclude' && ok reset-scope || bad "reset-scope: $o"
+B stop >/dev/null 2>&1; o=$(B restart --no-plan --force --only 'src/{net,pat}/**')
+has "$o" 'to review: 5 files' && ok only-brace-glob || bad "only-brace-glob: $o"
 
 # --- inline claim + one batch submit for the whole chunk
 B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
