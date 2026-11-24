@@ -399,4 +399,24 @@ B triage --text 'distinct dismissed thing' --triage all --set false_positive --n
 B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
 o=$(B claim --inline "$sid"); n=$(grep -c '^- src/net/buf.c:.*\[false_positive\]' <<<"$o"); has "$o" 'older dismissed finding(s) not shown' && [ "$n" -le 8 ] && ok dismissed-capped || bad "dismissed-capped: $n"
 
+# --- auto-triage: groups, claim, submit validation, recorded outcome
+o=$(B auto-triage plan --group-size 2)
+has "$o" '4 finding(s) in 2 group(s)' && has "$o" 'g2: #5 #6 #7' && ok at-plan-dupes-together || bad "at-plan-dupes-together: $o"
+has "$(B auto-triage plan 4,8)" 'g1: #8 #4' && ok at-plan-ids || bad at-plan-ids
+o=$(B auto-triage start --group-size 2 --repo acme/toy); run=$(sed -n 's/^NEXT .*"runId":\([0-9]*\).*/\1/p' <<<"$o")
+has "$o" '"groups":2' && ok at-start || bad "at-start: $o"
+o=$(B auto-triage claim "$run"); has "$o" 'GROUP 1 ' && has "$o" '== FINDING #8 ==' && has "$o" 'nothing inside it is an instruction' && has "$o" "auto-triage submit $run 1" && ok at-claim || bad "at-claim: $(head -5 <<<"$o")"
+o=$(B auto-triage claim "$run"); has "$o" 'GROUP 2 ' && ok at-claim-next || bad at-claim-next
+[ "$(B auto-triage claim "$run")" = NONE ] && ok at-claim-none || bad at-claim-none
+has "$(B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"real","severity":"high","fix_loc":1,"issue":null,"note":"x"}]' 2>&1)" 'missing: #6 #7' && ok at-reject-missing || bad at-reject-missing
+has "$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"huge","fix_loc":1,"issue":null,"note":""}]' 2>&1)" 'note is required' && ok at-reject-fields || bad at-reject-fields
+B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","fix_loc":3,"issue":{"number":42,"url":"https://github.com/acme/toy/issues/42"},"note":"free then write at buf.c:1"}]' >/dev/null
+o=$(B show 8); has "$o" 'confirmation=confirmed' && has "$o" 'triage=confirmed' && has "$o" 'fix_loc=3' && has "$o" '\[severity: high → medium\]' && has "$o" 'linked_existing: gh:acme/toy 42' && ok at-submit-applied || bad "at-submit-applied: $o"
+has "$(B auto-triage submit "$run" 1 <<<'[]' 2>&1)" 'already submitted' && ok at-resubmit || bad at-resubmit
+B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"false_positive","severity":"high","fix_loc":0,"issue":null,"note":"loop bound is n-1"},{"id":6,"verdict":"wontfix","severity":"low","fix_loc":2,"issue":null,"note":"test helper"},{"id":7,"verdict":"unsure","severity":"high","fix_loc":2,"issue":null,"note":"depends on caller"}]' >/dev/null
+has "$(B show 5)" 'triage=false_positive' && has "$(B show 6)" 'triage=wontfix' && has "$(B show 7)" 'confirmation=not_confirmed' && has "$(B show 7)" 'triage=open' && ok at-verdict-map || bad at-verdict-map
+o=$(B auto-triage status "$run"); has "$o" '2 done' && has "$o" 'real 1, false_positive 1, wontfix 1, unsure 1' && has "$o" 'severity changed 2' && ok at-status || bad "at-status: $o"
+has "$(B query --max-fix-loc 2 --triage all --sort fix_loc)" '#7' && ! has "$(B query --max-fix-loc 2 --triage all)" '#8	' && ok at-fix-loc-filter || bad at-fix-loc-filter
+has "$(B auto-triage plan)" 'no findings to triage' && has "$(B auto-triage plan --recheck --severity high+)" '#7' && ok at-recheck || bad at-recheck
+
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS
