@@ -9,6 +9,8 @@ description: Manage code-scan review profiles — the reviewer prompt that defin
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
+If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+
 - List: `$CS profile list` · Show: `$CS profile show <name>`
 - Create/edit from a description: write a reviewer instruction list in the style of
   `${CLAUDE_PLUGIN_ROOT}/profiles/default.md` (what to report, each class concrete; what to skip;

@@ -9,6 +9,8 @@ description: Browse code-scan results — filter, sort and export findings by se
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
+If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+
 Translate the request into flags; run once; relay. Don't read source to re-check findings unless
 the user asks you to investigate a specific one.
 

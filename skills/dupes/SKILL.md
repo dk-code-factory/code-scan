@@ -9,6 +9,8 @@ description: Find duplicate code-scan findings (same bug reported twice, or the 
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
+If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+
 ## Local duplicates (deterministic, no agents)
 - `$CS dupes [filters]` → clusters open/confirmed findings (same file + nearby lines + similar
   title; or same category + similar title + same code shape across files). Manual groups are kept.

@@ -1,16 +1,79 @@
 # code-scan
 
-Repository-wide bug scanning for Claude Code. MIT. Version 1.6.0.
+Repository-wide bug scanning for agentic coding CLIs: Claude Code, OpenAI Codex CLI, Gemini CLI,
+Antigravity (`agy`), GitHub Copilot CLI, Cursor CLI and OpenCode. MIT. Version 1.7.0.
 
 Almost all coordination is done by a deterministic CLI (`bin/code-scan.js`, Node 22.5+, no
 dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather than orchestrating it.
 
 ## Install
 
+Claude Code:
+
 ```text
 /plugin marketplace add dk-code-factory/code-scan
 /plugin install code-scan@code-scan
 ```
+
+Codex CLI and Copilot CLI read Claude plugin manifests (`.claude-plugin/`) and `${CLAUDE_PLUGIN_ROOT}`:
+
+```text
+codex plugin marketplace add dk-code-factory/code-scan      # then: codex plugin add code-scan
+copilot plugin install dk-code-factory/code-scan
+```
+
+Gemini CLI (Antigravity can import it with `agy plugin import gemini`):
+
+```text
+gemini extensions install https://github.com/dk-code-factory/code-scan
+```
+
+Any host that reads Agent Skills (Cursor, OpenCode, and the above if their plugin route does not work for
+you): clone the repo and render its skills into `~/.agents/skills` (`--project` for `<repo>/.agents/skills`,
+`--dir` for another skills directory; `--uninstall` removes them):
+
+```text
+git clone https://github.com/dk-code-factory/code-scan && node code-scan/bin/code-scan.js install
+```
+
+Outside Claude Code the skills are named `code-scan-scan`, `code-scan-findings`, … instead of
+`/code-scan:scan`, `/code-scan:findings`, ….
+
+## Runners
+
+Reviewer, planner and triage agents run either as Claude Code `Workflow` agents (Claude Code with a
+Claude model, as before) or as headless processes of an agent CLI started by `code-scan.js run` — which
+works from any host, a plain shell or CI. The runner claims work and stores results itself, so these
+agents are read-only: they get the code and reply with JSON.
+
+| runner | binary | started as | usage / cost |
+|---|---|---|---|
+| claude | `claude` | `claude -p --output-format json`, read-only tool allowlist | tokens + reported USD |
+| codex | `codex` | `codex exec --json --sandbox read-only` | tokens (priced from the list below) |
+| gemini | `gemini` | `gemini -p -o json --approval-mode=yolo` | tokens |
+| agy | `agy` | `agy -p --output-format json` | tokens |
+| copilot | `copilot` | `copilot -p --output-format=json`, read-only shell allowlist, writes denied | none reported |
+| cursor | `cursor-agent` / `agent` | `-p --output-format json -f` | tokens if reported |
+| opencode | `opencode` | `opencode run --format json`, edits denied, read-only bash allowlist | tokens + reported USD |
+
+Which runner a scan uses: `--runner <name>` or `--model <runner>:<model>` (e.g. `codex:gpt-6.2-sol`,
+`gemini:gemini-3.1-pro-preview`, `opencode:anthropic/claude-sonnet-5-5`) → the model chosen at init (bare
+ids like `opus` are Claude) → `$CODESCAN_RUNNER` → the agent CLI the command runs inside (parent processes,
+then the variables hosts set such as `CLAUDECODE`, `CODEX_SANDBOX`, `GEMINI_CLI`, `OPENCODE`) → the first CLI
+on `PATH`. The choice is saved with the scan; `code-scan.js runners` shows what is installed and what a new
+scan would use.
+
+```text
+code-scan.js start --runner codex          # prints RUN <cmd> and NEXT {...}
+code-scan.js run --detach                  # reviewers in the background (pid + log in `status`)
+code-scan.js stop [--now]                  # --now kills the runner and releases claimed chunks
+```
+
+`auto-triage run`, `calibrate run`, `init run` and `run-prompt <file>` (one isolated agent, used by verify
+outside Claude Code; `--full` gives it the host's unattended full-access mode) work the same way. `init`
+can compare models across vendors: `init start --models sonnet,codex:gpt-6.2-sol,gemini:gemini-3.1-pro-preview`.
+Extra arguments for one CLI: `CODESCAN_<RUNNER>_ARGS` (e.g. `CODESCAN_CODEX_ARGS="--sandbox workspace-write -c sandbox_workspace_write.network_access=true"`
+so triage agents can run `gh`); another binary: `CODESCAN_<RUNNER>_BIN`.
 
 ## Skills
 
@@ -74,7 +137,10 @@ against rescans and noted as `[type: old → new]`.
 
 `--max-usd N` and `--max-5h-pct P` (on `start`/`restart`/`continue`, or `code-scan.js limits`) stop
 handing out chunks once crossed; in-flight chunks finish and the scan stops with the reason recorded.
-Dollars are list-price estimates summed from the scan's own agent transcripts. The 5-hour
+Dollars are list-price estimates summed from the scan's own agent transcripts (Workflow) and from
+the token usage each runner agent reports (CLI-reported USD when there is one; unknown models are priced at
+their vendor's most expensive known model and marked estimated). The copilot runner reports no usage, so
+`--max-usd` is refused there; `--max-5h-pct` needs the claude runner. The 5-hour
 subscription percentage is only exposed to the status line, so `code-scan.js statusline` saves it
 (and prints a line, or wraps your existing command after `--`). Use it with a refresh interval so it
 stays current while the session waits on background agents:
@@ -99,7 +165,8 @@ The medium default (40KB) comes from a calibration of claude-opus-5-5 on gocql (
 the driver's Go code): 80KB → 0.46, 40KB → 0.71, 20KB → 0.56. Calibration cost there: 29 agents,
 ~1.3M subagent tokens, ~3.5 minutes.
 
-Tests: `test/cli-e2e.sh` (no LLM; simulated reviewers, fake `gh`).
+Tests: `test/cli-e2e.sh` (no LLM; simulated reviewers, fake `gh`) and `test/runners-e2e.sh` (every runner,
+with `test/fake-runners/fake-agent.js` standing in for each agent CLI).
 
 ## Token cost
 
