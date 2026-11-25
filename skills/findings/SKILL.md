@@ -21,7 +21,9 @@ the user asks you to investigate a specific one.
 - `--triage open,confirmed` (default) · `--triage all` · `--triage false_positive`
 - `--confirmation confirmed|not_confirmed|unchecked` (comma list; default: any) — table marks `C` / `NC`
 - `--reported [--tracker gh|jira:PROJ]` · `--unreported`
-- `--scan N` · `--latest` (found in latest scan) · `--stale` / `--no-stale` (file changed since)
+- `--scan N` or `--scan a,b` (id, label or profile) · `--latest` (found in latest scan) · `--stale` / `--no-stale` (file changed since)
+- `--profile p` (reported by any version of a review profile; `p@2` / `#id` for one version) ·
+  `--seen-by-all a,b` · `--not-seen-by b` (e.g. what opus found that codex did not)
 - `--gone` / `--include-gone`: findings not re-reported when their changed file was re-reviewed
   (likely fixed) are hidden by default
 - `--min-confidence 0.7` · `--text "use after free"` · `--unit <planner unit>`
@@ -29,9 +31,11 @@ the user asks you to investigate a specific one.
 - `--sort severity:desc,path,line` (fields: severity path line confidence created updated category type triage id title unit; `-field` = desc)
 - `--limit N` · `--format table|md|json|csv` · `--out file`
 
-Details: `$CS show <id>` (detail, evidence, filings, duplicate group, tracker candidates).
-Anything else: `$CS sql "SELECT ..."` (read-only). Tables: findings, seen(finding_id,scan_id),
-files(scan_id,path,state,...), scans, filings(finding_id,tracker,key,url,kind), dupe_groups,
+Details: `$CS show <id>` (detail, evidence, every scan that reported it with its own severity/type/line,
+filings, duplicate group, tracker candidates). Comparing scans: `/code-scan:compare`.
+Anything else: `$CS sql "SELECT ..."` (read-only). Tables: findings (the merged, triaged record),
+seen(finding_id,scan_id,profile_id,severity,type,line,title,… — what each scan reported),
+files(scan_id,path,state,...), scans(…,profile_id,label,run_json), review_profiles(id,name,version,hash,spec_json), filings(finding_id,tracker,key,url,kind), dupe_groups,
 tracker_issues, match_candidates. Use `$CS sql "PRAGMA table_info(findings)"` for columns.
 
 Output: the table output is already compact — show it as is. For md/json/csv exports or more than

@@ -18,7 +18,9 @@ const { spawn, spawnSync } = require('child_process');
 const RO_CMDS = ['git', 'grep', 'rg', 'sed', 'cat', 'head', 'tail', 'wc', 'ls', 'find', 'awk', 'sort', 'uniq', 'cut', 'tr', 'nl', 'file', 'gh'];
 const ARG_PROMPT_MAX = 96 * 1024; // one argv string is capped at 128KB on Linux
 
-function extraArgs(name) {
+/** Extra CLI arguments: the list a review profile froze (o.extra), else CODESCAN_<RUNNER>_ARGS. */
+function extraArgs(name, o) {
+  if (o && Array.isArray(o.extra)) return o.extra;
   const v = process.env[`CODESCAN_${name.toUpperCase()}_ARGS`];
   return v ? v.split(/\s+/).filter(Boolean) : [];
 }
@@ -48,7 +50,7 @@ const RUNNERS = {
       ...(o.full ? ['--dangerously-skip-permissions']
         : ['--allowedTools', ['Read', 'Grep', 'Glob', ...RO_CMDS.map((c) => `Bash(${c}:*)`)].join(','),
           '--disallowedTools', 'Edit,Write,NotebookEdit']),
-      ...extraArgs('claude')],
+      ...extraArgs('claude', o)],
     parse(stdout) {
       const j = firstJson(stdout);
       if (!j) return { text: stdout };
@@ -67,7 +69,7 @@ const RUNNERS = {
     bins: ['codex'], vendor: 'openai', stdin: true,
     argv: (o) => ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-C', o.cwd,
       ...(o.full ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--sandbox', 'read-only']),
-      ...(o.model ? ['-m', o.model] : []), ...extraArgs('codex'), '-'],
+      ...(o.model ? ['-m', o.model] : []), ...extraArgs('codex', o), '-'],
     parse(stdout) {
       let text = '', err = null;
       const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -92,7 +94,7 @@ const RUNNERS = {
       ...(o.full ? ['--approval-mode=yolo']
         : ['--approval-mode=default', '--allowed-tools', ['read_file', 'read_many_files', 'glob', 'search_file_content', 'list_directory',
           ...RO_CMDS.map((c) => `run_shell_command(${c})`)].join(',')]),
-      ...(o.model ? ['-m', o.model] : []), ...extraArgs('gemini')],
+      ...(o.model ? ['-m', o.model] : []), ...extraArgs('gemini', o)],
     parse(stdout) {
       const j = firstJson(stdout);
       if (!j) return { text: stdout };
@@ -112,7 +114,7 @@ const RUNNERS = {
   agy: {
     bins: ['agy'], vendor: 'google', stdin: false,
     argv: (o) => ['-p', o.prompt, '--output-format', 'json', ...(o.full ? ['--dangerously-skip-permissions'] : []),
-      ...(o.model ? ['--model', o.model] : []), ...extraArgs('agy')],
+      ...(o.model ? ['--model', o.model] : []), ...extraArgs('agy', o)],
     parse(stdout) {
       const j = firstJson(stdout);
       if (!j) return { text: stdout };
@@ -129,7 +131,7 @@ const RUNNERS = {
     bins: ['copilot'], vendor: null, stdin: false,
     argv: (o) => ['-p', o.prompt, '-s', '--no-ask-user', '--output-format=json',
       ...(o.full ? ['--allow-all-tools'] : [...RO_CMDS.flatMap((c) => ['--allow-tool', `shell(${c}:*)`]), '--deny-tool', 'write']),
-      ...(o.model ? [`--model=${o.model}`] : []), ...extraArgs('copilot')],
+      ...(o.model ? [`--model=${o.model}`] : []), ...extraArgs('copilot', o)],
     parse(stdout) {
       let text = '';
       const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -153,7 +155,7 @@ const RUNNERS = {
   cursor: {
     bins: ['cursor-agent', 'agent'], vendor: null, stdin: false,
     argv: (o) => ['-p', o.prompt, '--output-format', 'json', '--workspace', o.cwd, '--trust', ...(o.full ? ['-f'] : []),
-      ...(o.model ? ['--model', o.model] : []), ...extraArgs('cursor')],
+      ...(o.model ? ['--model', o.model] : []), ...extraArgs('cursor', o)],
     parse(stdout) {
       const j = firstJson(stdout);
       if (!j) return { text: stdout };
@@ -167,7 +169,7 @@ const RUNNERS = {
   },
   opencode: {
     bins: ['opencode'], vendor: null, stdin: false,
-    argv: (o) => ['run', '--format', 'json', '--dir', o.cwd, ...(o.model ? ['-m', o.model] : []), ...extraArgs('opencode'), o.prompt],
+    argv: (o) => ['run', '--format', 'json', '--dir', o.cwd, ...(o.model ? ['-m', o.model] : []), ...extraArgs('opencode', o), o.prompt],
     env: (o) => (o.full ? {} : { OPENCODE_PERMISSION: JSON.stringify({ edit: 'deny', webfetch: 'deny', bash: Object.fromEntries([...RO_CMDS.map((c) => [`${c} *`, 'allow']), ['*', 'deny']]) }) }),
     parse(stdout) {
       let text = '', cost = 0, sawCost = false, err = null;
@@ -361,7 +363,7 @@ function killAll(sig = 'SIGTERM') {
 /**
  * Run one agent. Resolves (never rejects) with {ok, text, usage, costUsd, model, exit, error, ms, pid}.
  */
-function runAgent({ runner, model, prompt, cwd, full = false, timeoutMs = 45 * 60 * 1000, tmpDir, onSpawn }) {
+function runAgent({ runner, model, prompt, cwd, full = false, extra, timeoutMs = 45 * 60 * 1000, tmpDir, onSpawn }) {
   const r = RUNNERS[runner];
   const bin = binOf(runner);
   if (!r || !bin) return Promise.resolve({ ok: false, error: `${runner} CLI not found`, exit: null, ms: 0 });
@@ -375,7 +377,7 @@ function runAgent({ runner, model, prompt, cwd, full = false, timeoutMs = 45 * 6
     promptFile = f;
     p = `Read the file ${f} completely (it is long; read all of it) and follow the instructions in it exactly. Your final reply is what that file asks for.`;
   }
-  const o = { prompt: p, model, cwd, full };
+  const o = { prompt: p, model, cwd, full, extra };
   const args = r.argv(o);
   const env = { ...process.env, ...(r.env ? r.env(o) : {}) };
   const t0 = Date.now();
@@ -432,4 +434,4 @@ function defaultModel(name) {
   return null;
 }
 
-module.exports = { defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, resolve, extractJson, runAgent, killAll };
+module.exports = { extraArgs, defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, resolve, extractJson, runAgent, killAll };

@@ -1,6 +1,6 @@
 {
   "name": "code-scan",
-  "version": "1.7.0",
+  "version": "2.0.0",
   "description": "Repository-wide bug scanning with parallel reviewer agents from any agentic coding CLI (Claude Code, Codex, Gemini, Antigravity, Copilot, Cursor, OpenCode).",
   "license": "MIT",
   "repository": "github:dk-code-factory/code-scan",

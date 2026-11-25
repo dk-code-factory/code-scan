@@ -1,7 +1,7 @@
 # code-scan
 
 Repository-wide bug scanning for agentic coding CLIs: Claude Code, OpenAI Codex CLI, Gemini CLI,
-Antigravity (`agy`), GitHub Copilot CLI, Cursor CLI and OpenCode. MIT. Version 1.7.0.
+Antigravity (`agy`), GitHub Copilot CLI, Cursor CLI and OpenCode. MIT. Version 2.0.0.
 
 Almost all coordination is done by a deterministic CLI (`bin/code-scan.js`, Node 22.5+, no
 dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather than orchestrating it.
@@ -56,15 +56,16 @@ agents are read-only: they get the code and reply with JSON.
 | cursor | `cursor-agent` / `agent` | `-p --output-format json` | tokens if reported |
 | opencode | `opencode` | `opencode run --format json`, edits denied, read-only bash allowlist | tokens + reported USD |
 
-Which runner a scan uses: `--runner <name>` or `--model <runner>:<model>` (e.g. `codex:gpt-6.2-sol`,
-`gemini:gemini-3.1-pro-preview`, `opencode:anthropic/claude-sonnet-5-5`) → the model chosen at init (bare
-ids like `opus` are Claude) → `$CODESCAN_RUNNER` → the agent CLI the command runs inside (parent processes,
-then the variables hosts set such as `CLAUDECODE`, `CODEX_SANDBOX`, `GEMINI_CLI`, `OPENCODE`) → the first CLI
-on `PATH`. The choice is saved with the scan; `code-scan.js runners` shows what is installed and what a new
-scan would use.
+Which runner a scan uses is fixed by its review profile's model (see below): `<runner>:<model>` (e.g.
+`codex:gpt-6.2-sol`, `gemini:gemini-3.1-pro-preview`, `opencode:anthropic/claude-sonnet-5-5`) runs on that
+CLI, bare ids like `opus` on Claude. Auto-triage, calibration and `run-prompt` still pick with `--runner` /
+`--model` → the model chosen at init → `$CODESCAN_RUNNER` → the agent CLI the command runs inside (parent
+processes, then the variables hosts set such as `CLAUDECODE`, `CODEX_SANDBOX`, `GEMINI_CLI`, `OPENCODE`) →
+the first CLI on `PATH`; `code-scan.js runners` shows what is installed.
 
 ```text
-code-scan.js start --runner codex          # prints RUN <cmd> and NEXT {...}
+code-scan.js profile register sec-codex --prompt security --model codex:gpt-6.2-sol
+code-scan.js start --profile sec-codex     # prints RUN <cmd> and NEXT {...}
 code-scan.js run --detach                  # reviewers in the background (pid + log in `status`)
 code-scan.js stop [--now]                  # --now kills the runner and releases claimed chunks
 ```
@@ -72,7 +73,8 @@ code-scan.js stop [--now]                  # --now kills the runner and releases
 `auto-triage run`, `calibrate run`, `init run` and `run-prompt <file>` (one isolated agent, used by verify
 outside Claude Code; `--full` gives it the host's unattended full-access mode) work the same way. `init`
 can compare models across vendors: `init start --models sonnet,codex:gpt-6.2-sol,gemini:gemini-3.1-pro-preview`.
-Extra arguments for one CLI: `CODESCAN_<RUNNER>_ARGS` (e.g. `CODESCAN_CODEX_ARGS="--sandbox workspace-write -c sandbox_workspace_write.network_access=true"`
+Extra arguments for one CLI: `CODESCAN_<RUNNER>_ARGS` (frozen into a review profile when it is registered, or
+`profile register --runner-args "…"`; e.g. `CODESCAN_CODEX_ARGS="--sandbox workspace-write -c sandbox_workspace_write.network_access=true"`
 so triage agents can run `gh`); another binary: `CODESCAN_<RUNNER>_BIN`.
 
 ## Skills
@@ -81,7 +83,7 @@ so triage agents can run `gh`); another binary: `CODESCAN_<RUNNER>_BIN`.
   $/1k lines, best chunk size per model) and pick the model scans use. Runs automatically before the
   first scan.
 - `/code-scan:scan` — start, continue (same commit), restart (new HEAD; unchanged files skipped by
-  content hash), stop. Takes a named profile or a free-text review focus, and `--only <dir>` scopes.
+  content hash), repeat, stop. Runs one or several registered review profiles side by side.
 - `/code-scan:status` — progress, per-file state.
 - `/code-scan:findings` — filter/sort/export findings (severity, type, category, path, triage, reported, …), read-only SQL.
 - `/code-scan:triage` — confirmed / false_positive / fixed / wontfix, with notes; set or classify finding types.
@@ -94,8 +96,68 @@ so triage agents can run `gh`); another binary: `CODESCAN_<RUNNER>_BIN`.
 - `/code-scan:verify` — double-check one finding (or each of several) in a fresh agent against the upstream
   default branch: reproduce, search for existing reports, file only if real and new, record the outcome.
 - `/code-scan:report` — file findings to GitHub (or Jira via the Atlassian MCP), persisting what was filed.
-- `/code-scan:profiles` — review prompts: `default` (critical bugs, vulnerabilities, memory handling,
-  leaks, panics, correctness), `security`, `memory`, `concurrency`, or your own.
+- `/code-scan:profiles` — register review profiles (prompt + model + scope + chunk size, versioned) from
+  prompts `default` (critical bugs, vulnerabilities, memory handling, leaks, panics, correctness),
+  `security`, `memory`, `concurrency`, or your own.
+- `/code-scan:compare` — compare scans (profiles/models on one commit, or one profile across commits);
+  list, label, repeat and remove stored scans.
+
+## Review profiles
+
+A scan runs a registered review profile — an immutable spec of everything that shapes the review:
+
+| field | |
+|---|---|
+| prompt | the review-focus text, frozen (from the prompt library: `default`, `security`, `memory`, `concurrency`, or `prompt add`) |
+| reviewer instructions | the plugin's reviewer instructions at registration (runner reviewers and `--rules` get this copy) |
+| runner, model, runner args | e.g. `codex` / `codex:gpt-6.2-sol` / `CODESCAN_CODEX_ARGS` at registration |
+| chunk size | the repo's calibration for that model, or `--chunk-kb` |
+| scope | `--only`, `--include`, `--exclude`, `--include-tests` |
+| planner, dismissed context | `--no-plan`, `--no-dismissed` |
+
+```text
+code-scan.js profile register sec-opus  --prompt security --model opus
+code-scan.js profile register sec-codex --prompt security --model codex:gpt-6.2-sol --only src/
+code-scan.js profile list | show <ref> | diff sec-opus sec-codex | default <ref> | retire <ref>
+```
+
+Each profile is `name@version`, `#id` and a hash; refs accept any of them (a bare name is the latest
+version). Registering an unchanged spec returns the existing version, a changed one the next version.
+Scans refuse spec flags (`--model`, `--only`, `--chunk-kb`, …): those belong to a profile, so every scan
+traces back to exactly how it ran. The hash keys the "already reviewed" ledger (a new model or prompt
+re-reviews everything; the same profile skips unchanged files). `init pick` registers the `default`
+profile. Run-time knobs (lanes, `--max-usd`, `--max-5h-pct`, commit) stay on the scan. Stores made by
+1.x get `legacy-<prompt>@N` profiles for their past scans on first use.
+
+## Parallel scans, repeating, comparing
+
+`start --profile a,b,c` starts one scan per profile at the same commit; scans that use the planner share
+one planner run (a Claude-model scan plans; the others adopt its plan), so they review the same code.
+One Workflow (NEXT `follow`) serves all Claude-model scans; each other one runs from its own `RUN` line.
+With several scans open, commands that act on one take `--scan <id|label|profile>`; `stop --close`
+ends a scan for good.
+
+Every scan stores its profile id/hash and a run record (plugin version and commit, node, runner binary,
+version and exact argv, host). Each chunk records the hash of the exact prompt reviewers got and its
+non-code context (subsystem hint, already-dismissed findings). `repeat <scan>` reruns it with the same
+profile, commit, plan, chunks in the same order and the same dismissed context, and reports drift
+(runner or plugin version, argv). Model sampling still varies between runs.
+
+The same bug found by several scans is one finding (triage is shared); what each scan reported (severity,
+type, line, title) is kept per scan (`show <id>`, table `seen`). A finding is marked gone only by a
+rescan of the profile lineage that reported it.
+
+```text
+code-scan.js scans [--profile p] [--model m] [--status done]       # stored scans
+code-scan.js compare sec-opus sec-codex                            # same commit: overlap, disagreements, quality vs $
+code-scan.js compare 12 31                                         # same profile, two commits: new / gone / still there
+code-scan.js query --scan sec-opus --not-seen-by sec-codex
+code-scan.js repeat 12 | scans label 12 baseline | scans rm 12
+```
+
+`compare` on one commit uses only files every scan reviewed (same content) and reports per scan:
+findings, unique, severity-weighted share of everything any of them found, confirmed and
+false-positive counts from triage (precision), $ and $/100KB.
 
 ## Finding types
 

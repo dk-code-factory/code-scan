@@ -11,8 +11,9 @@ CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 
 If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
 
-- Progress of the open/latest scan: `$CS status` (`--scan N` for another, `--all` for the list).
-- File-level questions: `$CS files [--state pending|in_progress|partial|reviewed|excluded|unchanged] [--path dir/|glob|file]`.
+- Progress: `$CS status` — the open scan, or one block per open scan when several run side by side
+  (`--scan <id|label|profile>` for one; `--all` or `$CS scans [--profile p] [--status s]` for the list).
+- File-level questions: `$CS files [--scan s] [--state pending|in_progress|partial|reviewed|excluded|unchanged] [--path dir/|glob|file]`.
   The `reason` column explains exclusions (test, generated/vendored, docs, unknown-ext, plan: …).
 
 Relay the output in 1–3 lines. Do not read the database or source files.
