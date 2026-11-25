@@ -18,8 +18,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { DatabaseSync } = require('node:sqlite');
+const RN = require('./lib/runners');
 
 process.stdout.on('error', (e) => { if (e.code === 'EPIPE') process.exit(0); });
 
@@ -260,7 +261,8 @@ function pathMatcher(spec) {
 
 const BOOL_FLAGS = new Set(['include-tests', 'force', 'no-plan', 'replan', 'now', 'all',
   'latest', 'stale', 'no-stale', 'reported', 'unreported', 'primary-only', 'new',
-  'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules', 'recheck']);
+  'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules', 'recheck',
+  'detach', 'reply', 'full', 'uninstall', 'user', 'project']);
 const MULTI_FLAGS = new Set(['include', 'exclude', 'only', 'force-path', 'path', 'severity',
   'category', 'triage', 'confirmation', 'sort', 'label']);
 
@@ -406,6 +408,16 @@ function db() {
   }
   if (!DB.prepare('PRAGMA table_info(cal_findings)').all().some((c) => c.name === 'type')) {
     try { DB.exec('ALTER TABLE cal_findings ADD COLUMN type TEXT'); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  }
+  // agents started by `run` (any runner): usage and dollars, since their transcripts live elsewhere
+  DB.exec(`CREATE TABLE IF NOT EXISTS agent_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER, triage_run_id INTEGER,
+    kind TEXT NOT NULL, runner TEXT NOT NULL, model TEXT, unit TEXT, pid INTEGER, started TEXT NOT NULL, ended TEXT, exit_code INTEGER,
+    ok INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER, cache_read INTEGER, cache_write INTEGER,
+    usd REAL, usd_estimated INTEGER NOT NULL DEFAULT 0, error TEXT);
+  CREATE INDEX IF NOT EXISTS agent_runs_scan ON agent_runs(scan_id);
+  CREATE INDEX IF NOT EXISTS agent_runs_tr ON agent_runs(triage_run_id);`);
+  if (!DB.prepare('PRAGMA table_info(triage_runs)').all().some((c) => c.name === 'runner')) {
+    try { DB.exec('ALTER TABLE triage_runs ADD COLUMN runner TEXT'); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
   }
   const untyped = DB.prepare('SELECT id, category, title FROM findings WHERE type IS NULL').all();
   if (untyped.length) {
@@ -712,6 +724,7 @@ function cliPrefix() {
 /** Workflow agent() model alias for a model id (claude-sonnet-5-5 → sonnet); null = inherit. */
 function modelAlias(id) {
   if (!id) return null;
+  if (RN.splitModel(id).runner !== 'claude') return null; // other vendors run through the CLI runner
   const hit = Object.entries(MODEL_IDS).find(([, v]) => v === id);
   // a current model maps to its alias; any other id is passed through unchanged so the agent runs
   // exactly the model that was calibrated and priced (never a different version of the family)
@@ -725,8 +738,29 @@ function nextLine(scan, plan) {
   const alias = modelAlias(so.model);
   if (alias) o.model = alias;
   if (so.lanes) o.lanes = so.lanes;
+  o.runner = so.runner || null;
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
-  return 'NEXT ' + JSON.stringify(o);
+  const run = workers || plan ? `RUN ${cliPrefix()} run ${scan.id} --detach\n` : '';
+  return run + 'NEXT ' + JSON.stringify(o);
+}
+
+/** Resolve and record which agent CLI runs this scan's agents (see bin/lib/runners.js). */
+function applyRunner(o, f) {
+  const explicit = f.runner || f.model;
+  let r;
+  try {
+    r = RN.resolve({ flagRunner: f.runner, flagModel: f.model ? modelId(f.model) : null, storedModel: o.model || null, storedRunner: explicit ? null : o.runner });
+  } catch (e) { die(e.message); }
+  if (explicit) o.model = r.model ? modelId(r.model) : null;
+  o.runner = r.runner;
+  o.runnerWhy = r.why;
+  return o;
+}
+
+/** Limits a runner can enforce: dollars need token usage, the 5-hour window needs Claude's status line. */
+function checkRunnerLimits(o) {
+  if (o.max5hPct && o.runner && o.runner !== 'claude') die(`--max-5h-pct needs the claude runner (the 5-hour window is only exposed by Claude Code's status line); this scan runs on ${o.runner} — use --max-usd`);
+  if (o.maxUsd && o.runner === 'copilot') die('--max-usd cannot be enforced with the copilot runner: Copilot CLI reports no token usage');
 }
 
 // ------------------------------------------------------------- scan commands
@@ -741,8 +775,10 @@ function buildOpts(f, base = {}) {
   if (f.concurrency !== undefined) o.lanes = parseConcurrency(f.concurrency);
   if (f['chunk-kb']) { o.chunkKb = Number(f['chunk-kb']); o.chunkSource = 'flag'; }
   if (f.model) o.model = modelId(f.model);
-  else if (!o.model && cfgGet('default_model')) o.model = cfgGet('default_model');
-  if (!f['chunk-kb'] && (o.chunkSource !== 'flag' || f.model)) {
+  else if (!o.model && !f.runner && cfgGet('default_model')) o.model = cfgGet('default_model');
+  applyRunner(o, f);
+  checkRunnerLimits(o);
+  if (!f['chunk-kb'] && (o.chunkSource !== 'flag' || f.model || f.runner)) {
     const cal = o.model ? cfgGet(`chunk_kb:${o.model}`) : null;
     o.chunkKb = cal ? Number(cal) : DEFAULT_CHUNK_KB;
     o.chunkSource = cal ? `calibrated for ${o.model}` : 'default';
@@ -797,6 +833,7 @@ function createScan(f, base, profile) {
   out(`to review: ${pk.files} files, ${kb(pk.bytes)} in ${pk.chunks} chunks${pre}; unchanged (skipped): ${st.unchanged}`);
   out(`excluded: ${excl || 'none'}`);
   out(`chunk size: ${opts.chunkKb}KB (${opts.chunkSource || 'default'})`);
+  out(opts.runner ? `runner: ${opts.runner}${opts.model ? ` model ${opts.model}` : ' (its default model)'} — ${opts.runnerWhy}` : `runner: none — ${opts.runnerWhy}`);
   if (!opts.model && opts.chunkSource !== 'flag') {
     out('INIT this repo has no reviewer model chosen — run `init start` to compare models and pick one (reviewers inherit the session model meanwhile)');
   } else if (opts.model && !cfgGet(`chunk_kb:${opts.model}`) && opts.chunkSource !== 'flag') {
@@ -824,6 +861,7 @@ function cmdRestart(a) {
   delete base.force; delete base.forcePath;
   if (!a.f.model && cfgGet('default_model') && base.model !== cfgGet('default_model')) {
     base.model = cfgGet('default_model'); // picked at init after the previous scan ran
+    delete base.runner; // the new model decides the runner
     if (base.chunkSource !== 'flag') delete base.chunkKb;
   }
   // a new scope replaces the old one as a whole; --reset-scope clears it
@@ -843,6 +881,7 @@ function cmdContinue(a) {
   if (a.f['max-usd'] !== undefined || a.f['max-5h-pct'] !== undefined || a.f.concurrency !== undefined) {
     const o = applyLimitFlags(JSON.parse(scan.options_json), a.f);
     if (a.f.concurrency !== undefined) o.lanes = parseConcurrency(a.f.concurrency);
+    checkRunnerLimits(o);
     db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(o), scan.id);
     scan.options_json = JSON.stringify(o);
   }
@@ -855,13 +894,14 @@ function cmdContinue(a) {
     out('NEXT ' + JSON.stringify({ cli: CLI, root: repoRoot(), scanId: scan.id, plan: false, workers: 0 }));
     return;
   }
-  if (a.f.model || a.f['chunk-kb']) {
+  if (a.f.model || a.f['chunk-kb'] || a.f.runner) {
     // pick up a calibration finished after the scan was created (or an explicit size)
     const opts = buildOpts(a.f, JSON.parse(scan.options_json));
     opts.force = JSON.parse(scan.options_json).force;
     opts.forcePath = JSON.parse(scan.options_json).forcePath;
     db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(opts), scan.id);
     out(`chunk size: ${opts.chunkKb}KB (${opts.chunkSource})`);
+    out(`runner: ${opts.runner || 'none'}${opts.model ? ` model ${opts.model}` : ''} — ${opts.runnerWhy}`);
   }
   const pk = tx(() => pack(getScan(scan.id)));
   const unplanned = !scan.plan_json && !JSON.parse(scan.options_json).noPlan;
@@ -882,7 +922,10 @@ function cmdStop(a) {
     }
   });
   out(`scan ${scan.id} stopped; workers stop claiming new chunks${a.f.now ? ', claimed chunks released' : ' and in-flight chunks finish'}`);
-  if (a.f.now && scan.workflow_task) out(`TASK ${scan.workflow_task}`);
+  if (a.f.now && scan.workflow_task) {
+    if (/^pid:/.test(scan.workflow_task)) out(killRunner(scan.workflow_task) ? `runner ${scan.workflow_task} killed` : `runner ${scan.workflow_task} was not running`);
+    else out(`TASK ${scan.workflow_task}`);
+  }
 }
 
 function cmdSetRun(a) {
@@ -954,12 +997,15 @@ function applyPlan(scan, plan) {
         incs.some((x) => x.m(r.path))) {
       const force = opts.force || (forced && forced(r.path));
       state = !force && reviewedQ.get(r.blob_sha, scan.profile_hash) ? 'unchanged' : 'pending';
-      reason = null; added++;
+      reason = null;
     }
     const ex = excs.find((x) => x.m(r.path));
     if (ex && ['pending', 'unchanged', 'partial'].includes(state)) {
-      state = 'excluded'; reason = `plan: ${ex.reason || 'excluded'}`.slice(0, 120); removed++;
+      state = 'excluded'; reason = `plan: ${ex.reason || 'excluded'}`.slice(0, 120);
     }
+    // net change only: a file a broad include pulls in and a narrower exclude drops again is neither
+    if (r.state === 'excluded' && state !== 'excluded') added++;
+    else if (r.state !== 'excluded' && state === 'excluded') removed++;
     const u = units.find((x) => x.ms.some((m) => m(r.path)));
     upd.run(state, reason, u ? u.name : defaultUnit(r.path), extOf(r.path).slice(1) || 'other', scan.id, r.path);
   }
@@ -1059,14 +1105,21 @@ function cmdClaim(a) {
     out(dismissedText);
   }
   if (a.f.rules) {
-    // the default agent (fallback when the plugin agent type is not loaded) has no reviewer instructions
-    const def = path.join(PLUGIN_ROOT, 'agents', 'reviewer.md');
+    // the default agent (fallback when the plugin agent type is not loaded) has no reviewer instructions;
+    // a headless runner agent (--reply) gets the variant that answers instead of submitting
+    const def = path.join(PLUGIN_ROOT, a.f.reply ? 'prompts' : 'agents', 'reviewer.md');
     if (fs.existsSync(def)) { out('== REVIEWER INSTRUCTIONS =='); out(fs.readFileSync(def, 'utf8').replace(/^---[\s\S]*?---\n/, '').trim()); }
   }
   if (a.f.inline) {
+    const keys = `{${items.map((it) => JSON.stringify(it.slice !== undefined ? `${it.path}#${it.slice}` : it.path) + ': [ ]').join(', ')}}`;
     const submitHelp = () => {
-      out('== SUBMIT (once, after reviewing everything) ==');
-      out(`${cliPrefix()} submit ${scanId} ${c.id} <<'EOF'\n{${items.map((it) => JSON.stringify(it.path) + ': [ ]').join(', ')}}\nEOF`);
+      if (a.f.reply) {
+        out('== REPLY (your final answer is the submission; do not run any submit command) ==');
+        out(`Reply with exactly one JSON object, nothing before or after it, every key present:\n${keys}`);
+      } else {
+        out('== SUBMIT (once, after reviewing everything) ==');
+        out(`${cliPrefix()} submit ${scanId} ${c.id} <<'EOF'\n${keys}\nEOF`);
+      }
       out('Each key maps to that file\'s confirmed findings: [] if none, else objects {"line":N,"end_line":N,"severity":"critical|high|medium|low","type":"<type>","category":"...","title":"...","detail":"...","evidence":"...","confidence":0.0-1.0}.');
       out(`type: exactly one of\n${typeList()}\ncategory: your own short free-form tag (e.g. "nil-deref", "fd-leak").`);
     };
@@ -1421,8 +1474,9 @@ function calNext(cal) {
 function calLine(cal, round) {
   const o = { cli: CLI, root: repoRoot(), calId: cal.id, scanId: round.scanId, workers: Math.min(round.workers, MAX_WORKERS_PER_RUN) };
   if (modelAlias(cal.model)) o.model = modelAlias(cal.model);
+  o.runner = RN.splitModel(cal.model).runner;
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
-  return 'NEXT ' + JSON.stringify(o);
+  return `RUN ${cliPrefix()} calibrate run ${cal.id} --detach\nNEXT ` + JSON.stringify(o);
 }
 
 // ---------------------------------------------------------------- repo init
@@ -1434,7 +1488,11 @@ function calLine(cal, round) {
 
 const MODEL_IDS = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5', fable: 'claude-fable-5-2' };
 const INIT_DEFAULT_MODELS = 'opus,sonnet,haiku,fable';
-function modelId(x) { return MODEL_IDS[x] || x; }
+function modelId(x) {
+  if (!x) return x;
+  const s = String(x).replace(/^claude:/, '');
+  return MODEL_IDS[s] || s;
+}
 
 const sampleLinesCache = new Map();
 function sampleLines(cal) {
@@ -1509,6 +1567,7 @@ function initCompare(initId, truth) {
 
 function cmdInit(a) {
   const sub = a.pos[0] || 'status';
+  if (sub === 'run') return cmdInitRun(a);
   const d = db();
   if (sub === 'start') {
     const models = listFlag(a.f.models || INIT_DEFAULT_MODELS).map(modelId);
@@ -1527,13 +1586,14 @@ function cmdInit(a) {
         VALUES(?,?,?,?,?,?,'running',?,?,?,?)`).run(model, prof.name, commit, sample, total, medium, initId, single, now(), now());
       const cal = d.prepare('SELECT * FROM calibrations WHERE id=?').get(r.lastInsertRowid);
       const round = calRound(cal, medium);
-      runs.push({ calId: cal.id, model: modelAlias(model), label: model, scanId: round.scanId, workers: round.workers });
+      runs.push({ calId: cal.id, model: modelAlias(model), label: model, runner: RN.splitModel(model).runner, scanId: round.scanId, workers: round.workers });
     }
     const dirs = [...new Set(pick.map((t) => t.path.split('/').slice(0, -1).join('/') || '.'))];
     out(`init ${initId}: ${models.length} model(s) [${models.join(', ')}] on one sample of ${pick.length} files, ${kb(total)} from ${dirs.slice(0, 4).join(', ')}${dirs.length > 4 ? ' …' : ''}`);
     out(single ? `sample is under two ${medium}KB chunks: one round per model at ${medium}KB (no size search)` : `each model: ${medium}KB first, then smaller, then larger until quality drops`);
     const o = { cli: CLI, root: repoRoot(), initId, runs };
     if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
+    out(`RUN ${cliPrefix()} init run ${initId} --detach`);
     out('NEXT ' + JSON.stringify(o));
     return;
   }
@@ -1581,6 +1641,7 @@ function cmdInit(a) {
 }
 
 function cmdCalibrate(a) {
+  if (a.pos[0] === 'run') return cmdCalibrateRun(a);
   const sub = a.pos[0] || 'status';
   const d = db();
   if (sub === 'start') {
@@ -1772,14 +1833,61 @@ const PRICES = [
   ['claude-sonnet', [3, 15, 0.1]],
   ['claude-haiku-5-5', [0.10, 0.50, 0.1]],
   ['claude-haiku', [1, 5, 0.1]],
+  // OpenAI (Codex CLI) and Google (Gemini CLI / Antigravity) list prices; [from, price] rows are
+  // announced changes, applied from that UTC date
+  ['gpt-6.2-astra', [8, 40, 0.05]],
+  ['gpt-6.2-sol', [2, 10, 0.05]],
+  ['gpt-6.1-sol', [2, 10, 0.05]],
+  ['gpt-6.1-terra', [1, 5, 0.05]],
+  ['gpt-6-luna', [0.10, 0.50, 0.1]],
+  ['gpt-6-astra', [10, 50, 0.1]],
+  ['gpt-5.6-sol', [4, 20, 0.1]],
+  ['gpt-5.5', [5, 30, 0.1]],
+  ['gpt-5.3-codex', [1.75, 14, 0.1]],
+  ['gemini-4-argon', [2, 10, 0.05], ['2026-12-01', [4, 20, 0.05]]],
+  ['gemini-4-carbon', [2, 10, 0.05], ['2026-12-01', [4, 20, 0.05]]],
+  ['gemini-4-neon', [3, 15, 0.05]],
+  ['gemini-3.1-pro', [2, 12, 0.1]],
+  ['gemini-3.8-flash', [0.75, 3.75, 0.1], ['2027-01-01', [1.5, 7.5, 0.1]]],
+  ['gemini-3-flash', [0.50, 3, 0.1]],
 ];
 const PRICE_MAX = [10, 50, 0.1];
+const VENDOR_OF = [['claude-', 'anthropic'], ['gpt-', 'openai'], ['o3', 'openai'], ['o4', 'openai'], ['codex', 'openai'], ['gemini-', 'google']];
+
+/** Bare model name (no runner, no provider/ prefix) of a stored model id. */
+function bareModel(m) { return String(RN.splitModel(m).model || '').replace(/^.*\//, ''); }
+function rowPrice(row, at = Date.now()) {
+  let p = row[1];
+  for (const ch of row.slice(2)) if (at >= Date.parse(ch[0])) p = ch[1];
+  return p;
+}
+function vendorOf(model, runner) {
+  const m = bareModel(model);
+  const v = VENDOR_OF.find(([k]) => m.startsWith(k));
+  return v ? v[1] : (runner && RN.RUNNERS[runner] ? RN.RUNNERS[runner].vendor : null);
+}
+/** [in, out, cacheMul, estimated] per 1M tokens; unknown models take their vendor's most expensive row. */
+function priceOf(model, runner) {
+  const m = bareModel(model);
+  const row = m && PRICES.find(([k]) => m.startsWith(k));
+  if (row) return [...rowPrice(row), false];
+  const v = vendorOf(model, runner);
+  const rows = PRICES.filter(([k]) => v && vendorOf(k) === v).map((r) => rowPrice(r));
+  const top = rows.length ? rows.sort((x, y) => y[1] - x[1])[0] : PRICE_MAX;
+  return [...top, true];
+}
+/** Dollars for one runner agent from its normalized usage; {usd:null} when the CLI reported none. */
+function usageUsd(model, runner, u) {
+  if (!u) return { usd: null, estimated: true };
+  const [inp, outp, readMul, est] = priceOf(model, runner);
+  return { usd: ((u.input || 0) * inp + (u.cacheWrite || 0) * inp * 1.25 + (u.cacheRead || 0) * inp * readMul + (u.output || 0) * outp) / 1e6, estimated: est };
+}
 const HAIKU_55_LONG = [0.50, 2.50, 0.1]; // Haiku 5.5 with a prompt over 100k tokens
 
 function messageUsd(model, u, entry) {
   const m = String(model || '');
   const row = PRICES.find(([k]) => m.startsWith(k));
-  let [inp, outp, readMul] = row ? row[1] : PRICE_MAX;
+  let [inp, outp, readMul] = row ? rowPrice(row) : PRICE_MAX;
   const cw = u.cache_creation || {};
   const w1 = cw.ephemeral_1h_input_tokens || 0;
   const w5 = cw.ephemeral_5m_input_tokens ?? Math.max(0, (u.cache_creation_input_tokens || 0) - w1);
@@ -1830,6 +1938,11 @@ function recentAgentTranscripts(sinceMs) {
 
 /** Dollars spent so far by the agents of one scan, read incrementally from their transcripts. */
 function scanSpendUsd(scan) {
+  return transcriptSpendUsd(scan) + (db().prepare('SELECT SUM(usd) s FROM agent_runs WHERE scan_id=?').get(scan.id).s || 0);
+}
+
+/** Dollars of the Workflow agents of one scan, read incrementally from their Claude transcripts. */
+function transcriptSpendUsd(scan) {
   const d = db();
   d.exec(`CREATE TABLE IF NOT EXISTS spend_files2 (path TEXT PRIMARY KEY, size INTEGER NOT NULL, scan_key TEXT,
     usd REAL NOT NULL, last_id TEXT)`);
@@ -1900,10 +2013,11 @@ function readRateLimits() {
   try { return JSON.parse(fs.readFileSync(rateLimitsPath(), 'utf8')); } catch (e) { return null; }
 }
 
-/** Reviewer agents running at once (workflow lanes); the harness itself caps a workflow at 16. */
+/** Reviewer agents running at once (lanes). The Workflow harness caps a workflow at 16; `run` allows 32. */
+const MAX_LANES = 32;
 function parseConcurrency(v) {
   const n = Number(v);
-  if (!Number.isInteger(n) || n < 1 || n > 16) die(`--concurrency needs a whole number 1-16, got '${v}'`);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_LANES) die(`--concurrency needs a whole number 1-${MAX_LANES}, got '${v}'`);
   return n;
 }
 
@@ -1983,6 +2097,7 @@ function cmdLimits(a) {
   const scan = scanArg(a.f);
   if (a.f['max-usd'] !== undefined || a.f['max-5h-pct'] !== undefined) {
     const o = applyLimitFlags(JSON.parse(scan.options_json), a.f);
+    checkRunnerLimits(o);
     db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(o), scan.id);
   }
   limitLines(getScan(scan.id)).forEach((l) => out(l));
@@ -2037,6 +2152,7 @@ function cmdStatus(a) {
   }
   const s = scanArg(a.f);
   scanSummary(s).forEach((l) => out(l));
+  runnerLines(s).forEach((l) => out(l));
   limitLines(s).forEach((l) => out(l));
   const g = d.prepare(`SELECT COUNT(*) n, SUM(NOT EXISTS (SELECT 1 FROM filings x WHERE x.finding_id=f.id AND x.kind!='skipped')) un
     FROM findings f WHERE triage IN ('open','confirmed') AND gone_scan IS NULL`).get();
@@ -3075,16 +3191,17 @@ function atNext(run) {
   const o = { cli: CLI, root: repoRoot(), runId: run.id, groups: pending, lanes: Math.min(run.lanes || 10, Math.max(1, pending)) };
   const alias = modelAlias(run.model);
   if (alias) o.model = alias;
+  o.runner = run.runner || null;
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
-  return 'NEXT ' + JSON.stringify(o);
+  return (pending ? `RUN ${cliPrefix()} auto-triage run ${run.id} --detach\n` : '') + 'NEXT ' + JSON.stringify(o);
 }
 
 function cmdAutoTriage(a) {
   const sub = a.pos[0];
   const b = { pos: a.pos.slice(1), f: a.f };
-  const fn = { plan: atPlan, start: atStart, claim: atClaim, submit: atSubmit, status: atStatus, stop: atStop, continue: atContinue, 'set-run': atSetRun }[sub];
-  if (!fn) die('usage: auto-triage plan|start|claim|submit|status|stop|continue|set-run ...');
-  fn(b);
+  const fn = { plan: atPlan, start: atStart, claim: atClaim, submit: atSubmit, status: atStatus, stop: atStop, continue: atContinue, 'set-run': atSetRun, run: atRunCmd }[sub];
+  if (!fn) die('usage: auto-triage plan|start|claim|submit|status|stop|continue|set-run|run ...');
+  return fn(b);
 }
 
 function atPlan(a) {
@@ -3101,15 +3218,17 @@ function atStart(a) {
   const lanes = a.f.concurrency !== undefined ? parseConcurrency(a.f.concurrency) : 10;
   const repo = a.f.repo || null;
   if (repo && !/^[\w.-]+\/[\w.-]+$/.test(repo)) die(`--repo must be owner/name, got '${repo}'`);
-  const model = a.f.model ? modelId(a.f.model) : null;
+  let rr;
+  try { rr = RN.resolve({ flagRunner: a.f.runner, flagModel: a.f.model ? modelId(a.f.model) : null }); } catch (e) { die(e.message); }
+  const model = rr.model ? modelId(rr.model) : null;
   const run = tx((d) => {
-    const r = d.prepare("INSERT INTO triage_runs(created,repo,group_size,model,lanes,status) VALUES(?,?,?,?,?,'active')")
-      .run(now(), repo, n, model, lanes);
+    const r = d.prepare("INSERT INTO triage_runs(created,repo,group_size,model,lanes,status,runner) VALUES(?,?,?,?,?,'active',?)")
+      .run(now(), repo, n, model, lanes, rr.runner);
     const ins = d.prepare("INSERT INTO triage_groups(run_id,gid,ids_json,state) VALUES(?,?,?,'pending')");
     groups.forEach((g, i) => ins.run(r.lastInsertRowid, i + 1, JSON.stringify(g.map((x) => x.id))));
     return d.prepare('SELECT * FROM triage_runs WHERE id=?').get(r.lastInsertRowid);
   });
-  out(`auto-triage run ${run.id}${repo ? ` (issues searched in ${repo})` : ' (no --repo: GitHub issue search skipped)'}`);
+  out(`auto-triage run ${run.id}${repo ? ` (issues searched in ${repo})` : ' (no --repo: GitHub issue search skipped)'}; runner ${rr.runner || 'none'} — ${rr.why}`);
   atListing(groups);
   out(atNext(run));
 }
@@ -3124,6 +3243,11 @@ function atContinue(a) {
 function atStop(a) {
   const run = atRun(a.pos[0]);
   db().prepare("UPDATE triage_runs SET status='stopped' WHERE id=?").run(run.id);
+  if (a.f.now) {
+    db().prepare("UPDATE triage_groups SET state='pending', claimed_at=NULL WHERE run_id=? AND state='claimed'").run(run.id);
+    if (killRunner(run.task_id)) { out(`auto-triage run ${run.id} stopped; runner ${run.task_id} killed, claimed groups released`); return; }
+    if (run.task_id) out(`TASK ${run.task_id}`);
+  }
   out(`auto-triage run ${run.id} stopped; agents already running finish their group (continue resumes)`);
 }
 
@@ -3192,13 +3316,20 @@ function atClaim(a) {
     out('(`gh issue view N --repo ...`) before deciding it describes the same bug. Never create, edit or comment on issues.');
   } else out('No repository given for this run: skip the issue search and submit "issue": null.');
   if (a.f.rules) {
-    const def = path.join(PLUGIN_ROOT, 'agents', 'triager.md');
+    const def = path.join(PLUGIN_ROOT, a.f.reply ? 'prompts' : 'agents', 'triager.md');
     if (fs.existsSync(def)) { out('\n== TRIAGER INSTRUCTIONS =='); out(fs.readFileSync(def, 'utf8').replace(/^---[\s\S]*?---\n/, '').trim()); }
   }
-  out('\n== SUBMIT (once, every finding of the group) ==');
-  out(`${cliPrefix()} auto-triage submit ${runId} ${g.gid} <<'EOF'`);
-  out(JSON.stringify(ids.map((id) => ({ id, verdict: 'real|false_positive|wontfix|unsure', severity: 'critical|high|medium|low', type: '<type>', fix_loc: 0, issue: null, note: '...' }))));
-  out('EOF');
+  const tmpl = JSON.stringify(ids.map((id) => ({ id, verdict: 'real|false_positive|wontfix|unsure', severity: 'critical|high|medium|low', type: '<type>', fix_loc: 0, issue: null, note: '...' })));
+  if (a.f.reply) {
+    out('\n== REPLY (your final answer is the submission; do not run any submit command) ==');
+    out('Reply with exactly one JSON array, nothing before or after it, one object per finding of the group:');
+    out(tmpl);
+  } else {
+    out('\n== SUBMIT (once, every finding of the group) ==');
+    out(`${cliPrefix()} auto-triage submit ${runId} ${g.gid} <<'EOF'`);
+    out(tmpl);
+    out('EOF');
+  }
   out('verdict: real = the bug exists as described (or its core does); false_positive = it does not (a guard, contract or');
   out('misread rules it out); wontfix = real but intended/negligible; unsure = could not decide from the code.');
   out('severity: your corrected severity (repeat the given one if it is right).');
@@ -3300,15 +3431,444 @@ function atStatus(a) {
   }
 }
 
+// -------------------------------------------------------------------- runner
+//
+// `run` drives a scan (and auto-triage, calibration, init) with headless agent processes of any
+// supported CLI (bin/lib/runners.js) instead of Claude's Workflow tool. The runner claims work and
+// stores results itself, through child invocations of this CLI, so the agents only read code and
+// reply with JSON: they need no write access to the repo or to the state database.
+
+let STOPPING = false;
+const INFLIGHT = { chunks: new Map(), groups: new Map() };
+
+/** Run a code-scan subcommand in a child process; claims and submits keep their own transactions. */
+function self(args, input) {
+  const r = spawnSync(process.execPath, [CLI, '-C', repoRoot(), ...args], { encoding: 'utf8', input: input ?? '', maxBuffer: 256 * 1024 * 1024, env: process.env });
+  return { ok: r.status === 0, out: r.stdout || '', err: String(r.stderr || '').replace(/^code-scan: /gm, '').trim() };
+}
+
+function log(s) { out(`[${new Date().toISOString().slice(11, 19)}] ${s}`); }
+function readPrompt(name) { return fs.readFileSync(path.join(PLUGIN_ROOT, 'prompts', name), 'utf8').trim(); }
+
+/** Runner + model for a run from flags, else what is stored; dies if that CLI is not installed. */
+function runnerFor(f, stored = {}) {
+  let r;
+  try {
+    r = RN.resolve({ flagRunner: f.runner, flagModel: f.model ? modelId(f.model) : null, storedModel: stored.model || null, storedRunner: f.runner || f.model ? null : stored.runner });
+  } catch (e) { die(e.message); }
+  if (!r.runner) die(r.why);
+  if (!RN.binOf(r.runner)) {
+    const inst = RN.installed();
+    die(`the ${r.runner} CLI (${RN.RUNNERS[r.runner].bins.join(' or ')}) is not on PATH — chosen because: ${r.why}. ` +
+      (inst.length ? `Installed: ${inst.join(', ')}; pick one with --runner <name> (or --model <runner>:<model>).` : 'No supported agent CLI is installed.'));
+  }
+  return { runner: r.runner, model: r.model ? modelId(r.model) : null, why: r.why };
+}
+
+/** One agent: run it, price it, record it in agent_runs. */
+async function agentCall({ ctx, prompt, kind, unit, full = false }) {
+  const started = now();
+  let pid = null;
+  const r = await RN.runAgent({ runner: ctx.runner, model: ctx.model ? RN.splitModel(ctx.model).model : null, prompt, cwd: repoRoot(), full,
+    tmpDir: path.join(stateDir(), 'prompts'), onSpawn: (p) => { pid = p; } });
+  if (!r.model) r.model = RN.defaultModel(ctx.runner);
+  const priced = typeof r.costUsd === 'number' ? { usd: r.costUsd, estimated: false } : usageUsd(r.model || ctx.model, ctx.runner, r.usage);
+  const u = r.usage || {};
+  db().prepare(`INSERT INTO agent_runs(scan_id,triage_run_id,kind,runner,model,unit,pid,started,ended,exit_code,ok,input_tokens,output_tokens,
+    cache_read,cache_write,usd,usd_estimated,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    ctx.scanId || null, ctx.triageRunId || null, kind, ctx.runner, r.model || ctx.model || null, unit == null ? null : String(unit), pid, started, now(),
+    r.exit ?? null, r.ok ? 1 : 0, r.usage ? u.input || 0 : null, r.usage ? u.output || 0 : null, r.usage ? u.cacheRead || 0 : null,
+    r.usage ? u.cacheWrite || 0 : null, priced.usd, priced.estimated ? 1 : 0, r.error ? String(r.error).slice(0, 1000) : null);
+  return r;
+}
+
+/**
+ * Ask the agent, store its JSON reply with `submitArgs`; on a rejected reply, one cheap follow-up agent
+ * fixes the JSON from the validator's message. Returns {ok, json, error}.
+ */
+async function askAndSubmit({ ctx, prompt, kind, unit, submitArgs, shape, check }) {
+  let r = await agentCall({ ctx, prompt, kind, unit });
+  const reply = prompt.slice(Math.max(0, prompt.lastIndexOf('== REPLY')));
+  for (let attempt = 0; ; attempt++) {
+    if (!r.ok) return { ok: false, error: r.error || 'agent failed' };
+    const j = RN.extractJson(r.text);
+    let err = j === null ? `the reply contains no JSON ${shape}` : check(j);
+    if (!err) {
+      const s = self(submitArgs, JSON.stringify(j));
+      if (s.ok) return { ok: true, json: j, out: s.out };
+      err = s.err;
+    }
+    if (attempt >= 1 || STOPPING) return { ok: false, error: err };
+    r = await agentCall({ ctx, kind: 'fix', unit, prompt: `Your answer to an automated code-review task was rejected by its validator.
+
+Validator message:
+${err}
+
+Your previous answer:
+${String(r.text).slice(0, 60000)}
+
+Fix only what the validator rejected and reply with the corrected JSON ${shape}, nothing else. Do not run any commands. The required format:
+${reply.slice(0, 20000)}` });
+  }
+}
+
+function releaseChunk(scanId, chunkId, attempts) {
+  const n = (attempts.get(chunkId) || 0) + 1;
+  attempts.set(chunkId, n);
+  tx((d) => {
+    const c = d.prepare('SELECT * FROM chunks WHERE id=? AND scan_id=?').get(chunkId, scanId);
+    if (!c || c.state !== 'claimed') return;
+    // twice failed: leave it for `continue` (it repacks) instead of burning more agents on it now
+    d.prepare('UPDATE chunks SET state=?, claimed_at=NULL WHERE id=?').run(n >= 2 ? 'void' : 'pending', chunkId);
+    const st = d.prepare("UPDATE files SET state=CASE WHEN slices_done='[]' THEN 'pending' ELSE 'partial' END WHERE scan_id=? AND path=? AND state='in_progress'");
+    for (const it of JSON.parse(c.items_json)) st.run(scanId, it.path);
+  });
+}
+
+function onStopSignals() {
+  const h = (sig) => {
+    if (STOPPING) return;
+    STOPPING = true;
+    RN.killAll('SIGTERM');
+    try {
+      for (const [chunkId, scanId] of INFLIGHT.chunks) releaseChunk(scanId, chunkId, new Map([[chunkId, 1]]));
+      for (const [gid, runId] of INFLIGHT.groups) db().prepare("UPDATE triage_groups SET state='pending', claimed_at=NULL WHERE run_id=? AND gid=? AND state='claimed'").run(runId, gid);
+    } catch (e) { /* best effort */ }
+    log(`${sig}: agents stopped, unfinished work released`);
+    process.exit(130);
+  };
+  process.on('SIGTERM', () => h('SIGTERM'));
+  process.on('SIGINT', () => h('SIGINT'));
+}
+
+/** Reviewer lanes over one scan until no chunk is left (or 2 failures in a row on a lane). */
+async function reviewLanes(scanId, ctx, lanes) {
+  const res = { chunks: 0, findings: 0, failed: 0 };
+  const attempts = new Map();
+  let started = 0;
+  const c0 = { ...ctx, scanId };
+  await Promise.all(Array.from({ length: Math.max(1, lanes) }, async () => {
+    let failures = 0;
+    while (started < MAX_WORKERS_PER_RUN && !STOPPING) {
+      started++;
+      const c = self(['claim', '--inline', '--rules', '--reply', String(scanId)]);
+      if (!c.ok) { log(`claim failed: ${c.err}`); if (++failures >= 2) break; continue; }
+      if (/^NONE/.test(c.out.trim())) { const why = c.out.trim().match(/^NONE \((.*)\)/); if (why) log(`no more chunks: ${why[1]}`); break; }
+      const chunkId = Number((c.out.match(/^CHUNK (\d+)/m) || [])[1]);
+      INFLIGHT.chunks.set(chunkId, scanId);
+      const keys = Object.keys(RN.extractJson((c.out.match(/^Reply with exactly one JSON object[^\n]*\n(.*)$/m) || [])[1] || '{}') || {});
+      const r = await askAndSubmit({ ctx: c0, prompt: c.out, kind: 'review', unit: chunkId, submitArgs: ['submit', String(scanId), String(chunkId)],
+        shape: 'object {"<path>": [findings], ...}',
+        check: (j) => (typeof j !== 'object' || Array.isArray(j) ? 'expected a JSON object keyed by file path'
+          : keys.filter((k) => !(k in j)).length ? `missing keys: ${keys.filter((k) => !(k in j)).join(', ')} (give [] for a clean file)` : null) });
+      INFLIGHT.chunks.delete(chunkId);
+      if (r.ok) {
+        failures = 0;
+        res.chunks++;
+        const n = Object.values(r.json).reduce((s, v) => s + (Array.isArray(v) ? v.length : 0), 0);
+        res.findings += n;
+        log(`chunk ${chunkId}: ${keys.length} file(s), ${n} finding(s)`);
+      } else {
+        res.failed++;
+        log(`chunk ${chunkId} failed: ${String(r.error).split('\n')[0].slice(0, 300)}`);
+        if (!STOPPING) releaseChunk(scanId, chunkId, attempts);
+        if (++failures >= 2) { log('lane stops after 2 failures in a row'); break; }
+      }
+    }
+  }));
+  if (started >= MAX_WORKERS_PER_RUN) log(`per-run cap of ${MAX_WORKERS_PER_RUN} reviewers reached — run again for the rest`);
+  return res;
+}
+
+async function runPlanner(scan, ctx) {
+  const pc = self(['plan-context', String(scan.id)]);
+  if (!pc.ok) { log(`plan-context failed: ${pc.err}`); return null; }
+  const base = `${pc.out}\n== YOUR TASK ==\n${readPrompt('planner.md')}`;
+  let prompt = base;
+  for (let i = 0; i < 3 && !STOPPING; i++) {
+    const r = await agentCall({ ctx: { ...ctx, scanId: scan.id }, prompt, kind: 'plan' });
+    if (!r.ok) { log(`planner failed: ${r.error}`); return { agentFailed: true }; }
+    const j = RN.extractJson(r.text);
+    const ap = j && typeof j === 'object' && !Array.isArray(j) ? self(['apply-plan', String(scan.id)], JSON.stringify(j)) : { ok: false, err: 'the reply contains no plan JSON object' };
+    if (ap.ok) { log(`planner: ${ap.out.trim().split('\n').join('; ')}`); return j; }
+    log(`plan rejected: ${ap.err.split('\n')[0]}`);
+    prompt = `${base}\n\n== YOUR PREVIOUS PLAN WAS REJECTED ==\n${ap.err}\nPrevious reply:\n${String(r.text).slice(0, 30000)}\nReply with the corrected plan JSON only.`;
+  }
+  return null;
+}
+
+/** Detached copy of this command (own process group), output to `logPath`; returns its pid. */
+function detachSelf(logPath) {
+  let argv = process.argv.slice(2);
+  while (argv[0] === '-C') argv = argv.slice(2);
+  argv = argv.filter((x) => x !== '--detach');
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+  const fd = fs.openSync(logPath, 'a');
+  const child = spawn(process.execPath, [CLI, ...argv], { cwd: process.cwd(), detached: true, stdio: ['ignore', fd, fd], env: process.env });
+  child.unref();
+  return child.pid;
+}
+
+function pidAlive(task) {
+  const m = String(task || '').match(/^pid:(\d+)$/);
+  if (!m) return null;
+  try { process.kill(Number(m[1]), 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+/** Stop a runner process recorded as `pid:<n>`: its SIGTERM handler stops its agents. */
+function killRunner(task) {
+  const m = String(task || '').match(/^pid:(\d+)$/);
+  if (!m) return false;
+  const pid = Number(m[1]);
+  try { process.kill(pid, 'SIGTERM'); return true; } catch (e) { return false; }
+}
+
+async function cmdRun(a) {
+  let scan = a.pos[0] ? getScan(a.pos[0]) : openScan();
+  if (!scan) die('no active scan — `start`, `restart` or `continue` first');
+  if (scan.status !== 'active') die(`scan ${scan.id} is ${scan.status} — \`continue\` it first`);
+  const so = JSON.parse(scan.options_json);
+  const ctx = runnerFor(a.f, so);
+  if (ctx.runner !== so.runner || ctx.model !== (so.model || null)) {
+    so.runner = ctx.runner; so.runnerWhy = ctx.why; so.model = ctx.model;
+    checkRunnerLimits(so);
+    db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(so), scan.id);
+  }
+  const lanesMax = a.f.concurrency !== undefined ? parseConcurrency(a.f.concurrency) : so.lanes || 10;
+  if (scan.workflow_task !== `pid:${process.pid}` && pidAlive(scan.workflow_task)) die(`scan ${scan.id} already has a runner (${scan.workflow_task}); \`stop\` it first`);
+  if (a.f.detach) {
+    const logPath = path.join(scanDir(scan.id), 'run.log');
+    const pid = detachSelf(logPath);
+    db().prepare('UPDATE scans SET workflow_task=?, updated=? WHERE id=?').run(`pid:${pid}`, now(), scan.id);
+    out(`RUNNING scan ${scan.id} on ${ctx.runner}${ctx.model ? ` (${ctx.model})` : ''}, ${lanesMax} lane(s): pid ${pid}, log ${logPath}`);
+    out('progress: `status`; stop: `stop` (finish in-flight chunks) or `stop --now`');
+    return;
+  }
+  db().prepare('UPDATE scans SET workflow_task=?, updated=? WHERE id=?').run(`pid:${process.pid}`, now(), scan.id);
+  onStopSignals();
+  log(`scan ${scan.id}: runner ${ctx.runner}${ctx.model ? ` model ${ctx.model}` : ' (default model)'} — ${ctx.why}`);
+  if (!scan.plan_json && !so.noPlan && scan.kind === 'scan') {
+    log('planning');
+    const plan = await runPlanner(scan, ctx);
+    if (plan && plan.agentFailed) {
+      // the agent CLI itself failed (bad model, auth, missing binary): every reviewer would fail the same way
+      const cur = getScan(scan.id);
+      if (cur.workflow_task === `pid:${process.pid}`) db().prepare('UPDATE scans SET workflow_task=NULL WHERE id=?').run(scan.id);
+      log('stopped: the planner agent failed; fix the runner or model (`continue --model <runner>:<model>`), then `run` again');
+      process.exitCode = 1;
+      return;
+    }
+    if (!plan) log('no plan; reviewing with the heuristic chunking');
+    scan = getScan(scan.id);
+  }
+  const workers = pendingChunks(scan.id);
+  const lanes = Math.min(lanesMax, Math.max(1, workers));
+  log(`reviewing ${workers} chunk(s) in ${lanes} lane(s)`);
+  const r = workers ? await reviewLanes(scan.id, ctx, lanes) : { chunks: 0, findings: 0, failed: 0 };
+  const cur = getScan(scan.id);
+  if (cur.workflow_task === `pid:${process.pid}`) db().prepare('UPDATE scans SET workflow_task=NULL WHERE id=?').run(scan.id);
+  log(`done: ${r.chunks} chunk(s) reviewed, ${r.findings} finding(s), ${r.failed} failed agent(s)`);
+  scanSummary(getScan(scan.id)).forEach((l) => out(l));
+  limitLines(getScan(scan.id)).forEach((l) => out(l));
+  if (pendingChunks(scan.id) && getScan(scan.id).status === 'active') out('chunks remain — `continue` then `run` again');
+}
+
+/** Rounds of one calibration until it decides a size. Returns the DONE line or null. */
+async function calRunLoop(cal, lanesMax, label) {
+  const ctx = { runner: RN.splitModel(cal.model).runner, model: cal.model };
+  if (!RN.binOf(ctx.runner)) { log(`${label}: ${ctx.runner} CLI not on PATH — skipped`); return null; }
+  for (let i = 0; i < 12 && !STOPPING; i++) {
+    const last = db().prepare("SELECT * FROM scans WHERE kind='cal' AND cal_id=? ORDER BY id DESC LIMIT 1").get(cal.id);
+    if (last && last.status === 'active' && pendingChunks(last.id)) {
+      const kbz = JSON.parse(last.options_json).chunkKb;
+      log(`${label}: round at ${kbz}KB, ${pendingChunks(last.id)} chunk(s)`);
+      await reviewLanes(last.id, ctx, Math.min(lanesMax, pendingChunks(last.id)));
+    }
+    const n = self(['calibrate', 'next', String(cal.id)]);
+    if (!n.ok) { log(`${label}: calibrate next failed: ${n.err}`); return null; }
+    const lines = n.out.trim().split('\n');
+    const lastLine = lines[lines.length - 1];
+    if (/^DONE/.test(lastLine)) { log(`${label}: ${lastLine}`); return lastLine; }
+    if (!/^NEXT /.test(lastLine)) { log(`${label}: unexpected: ${lastLine}`); return null; }
+    if (lines.length > 1) log(`${label}: ${lines[0]}`);
+  }
+  return null;
+}
+
+async function cmdCalibrateRun(a) {
+  const id = Number(a.pos[1]) || (db().prepare("SELECT id FROM calibrations WHERE status='running' ORDER BY id DESC LIMIT 1").get() || {}).id;
+  const cal = id && db().prepare('SELECT * FROM calibrations WHERE id=?').get(id);
+  if (!cal) die('no running calibration — `calibrate start --model <m>` first');
+  if (cal.status !== 'running') die(`calibration ${cal.id} is ${cal.status}`);
+  const lanes = a.f.concurrency !== undefined ? parseConcurrency(a.f.concurrency) : 10;
+  if (a.f.detach) {
+    const logPath = path.join(stateDir(), 'runs', `calibrate-${cal.id}.log`);
+    out(`RUNNING calibration ${cal.id} (${cal.model}): pid ${detachSelf(logPath)}, log ${logPath}; \`calibrate status\` when done`);
+    return;
+  }
+  onStopSignals();
+  await calRunLoop(cal, lanes, cal.model);
+}
+
+async function cmdInitRun(a) {
+  const initId = Number(a.pos[1]) || db().prepare('SELECT MAX(init_id) m FROM calibrations').get().m;
+  const cals = initId ? initCals(initId).filter((c) => c.status === 'running') : [];
+  if (!cals.length) die(initId ? `init ${initId} has nothing running — \`init report\`` : 'no init yet — `init start`');
+  const lanes = a.f.concurrency !== undefined ? parseConcurrency(a.f.concurrency) : 6;
+  const missing = [...new Set(cals.map((c) => RN.splitModel(c.model).runner).filter((r) => !RN.binOf(r)))];
+  if (missing.length) die(`not on PATH: ${missing.join(', ')} — install them or start init without those models`);
+  if (a.f.detach) {
+    const logPath = path.join(stateDir(), 'runs', `init-${initId}.log`);
+    out(`RUNNING init ${initId} (${cals.map((c) => c.model).join(', ')}): pid ${detachSelf(logPath)}, log ${logPath}; \`init report\` when done`);
+    return;
+  }
+  onStopSignals();
+  await Promise.all(cals.map((c) => calRunLoop(c, lanes, c.model)));
+  const r = self(['init', 'report', String(initId)]);
+  out(r.ok ? r.out.trimEnd() : r.err);
+}
+
+async function atRunCmd(a) {
+  const run = atRun(a.pos[0]);
+  if (run.status !== 'active') die(`auto-triage run ${run.id} is ${run.status} — \`auto-triage continue\` it first`);
+  const ctx = runnerFor(a.f, { model: run.model, runner: run.runner });
+  if (ctx.runner !== run.runner || ctx.model !== run.model) db().prepare('UPDATE triage_runs SET runner=?, model=? WHERE id=?').run(ctx.runner, ctx.model, run.id);
+  if (run.task_id !== `pid:${process.pid}` && pidAlive(run.task_id)) die(`auto-triage run ${run.id} already has a runner (${run.task_id})`);
+  const pending = db().prepare("SELECT COUNT(*) n FROM triage_groups WHERE run_id=? AND state!='done'").get(run.id).n;
+  const lanes = Math.min(a.f.concurrency !== undefined ? parseConcurrency(a.f.concurrency) : run.lanes || 10, Math.max(1, pending));
+  if (a.f.detach) {
+    const logPath = path.join(stateDir(), 'runs', `auto-triage-${run.id}.log`);
+    const pid = detachSelf(logPath);
+    db().prepare('UPDATE triage_runs SET task_id=? WHERE id=?').run(`pid:${pid}`, run.id);
+    out(`RUNNING auto-triage run ${run.id} on ${ctx.runner}${ctx.model ? ` (${ctx.model})` : ''}, ${lanes} lane(s): pid ${pid}, log ${logPath}`);
+    return;
+  }
+  db().prepare('UPDATE triage_runs SET task_id=? WHERE id=?').run(`pid:${process.pid}`, run.id);
+  onStopSignals();
+  const c0 = { ...ctx, triageRunId: run.id };
+  log(`auto-triage run ${run.id}: ${pending} group(s), runner ${ctx.runner} — ${ctx.why}`);
+  let started = 0;
+  const res = { groups: 0, findings: 0, failed: 0 };
+  await Promise.all(Array.from({ length: lanes }, async () => {
+    let failures = 0;
+    while (started < pending + lanes * 2 && !STOPPING) {
+      started++;
+      const c = self(['auto-triage', 'claim', '--rules', '--reply', String(run.id)]);
+      if (!c.ok) { log(`claim failed: ${c.err}`); if (++failures >= 2) break; continue; }
+      if (/^NONE/.test(c.out.trim())) break;
+      const gid = Number((c.out.match(/^GROUP (\d+)/m) || [])[1]);
+      INFLIGHT.groups.set(gid, run.id);
+      const r = await askAndSubmit({ ctx: c0, prompt: c.out, kind: 'triage', unit: gid, submitArgs: ['auto-triage', 'submit', String(run.id), String(gid)],
+        shape: 'array [{"id": ..., ...}, ...]', check: (j) => (Array.isArray(j) ? null : 'expected a JSON array, one object per finding') });
+      INFLIGHT.groups.delete(gid);
+      if (r.ok) { failures = 0; res.groups++; res.findings += r.json.length; log(r.out.trim()); }
+      else {
+        res.failed++;
+        log(`group ${gid} failed: ${String(r.error).split('\n')[0].slice(0, 300)}`);
+        if (!STOPPING) db().prepare("UPDATE triage_groups SET state='pending', claimed_at=NULL WHERE run_id=? AND gid=? AND state='claimed'").run(run.id, gid);
+        if (++failures >= 2) break;
+      }
+    }
+  }));
+  const cur = atRun(run.id);
+  if (cur.task_id === `pid:${process.pid}`) db().prepare('UPDATE triage_runs SET task_id=NULL WHERE id=?').run(run.id);
+  log(`done: ${res.groups} group(s), ${res.findings} finding(s) triaged, ${res.failed} failed agent(s)`);
+}
+
+/** One isolated agent on a prompt file (used by verify outside Claude Code). Prints its reply. */
+async function cmdRunPrompt(a) {
+  const file = a.pos[0];
+  if (!file) die('usage: run-prompt <file> [--runner r] [--model m] [--full]');
+  const prompt = fs.readFileSync(file, 'utf8');
+  const ctx = runnerFor(a.f, {});
+  onStopSignals();
+  const r = await agentCall({ ctx, prompt, kind: 'prompt', full: !!a.f.full });
+  if (!r.ok) die(`${ctx.runner} agent failed: ${r.error}`);
+  out(r.text);
+}
+
+function cmdRunners(a) {
+  const h = RN.detectHost();
+  out(`host: ${h ? h.why : 'not inside a known agent CLI'}`);
+  for (const n of RN.ORDER) {
+    const bin = RN.binOf(n);
+    out(`${n.padEnd(9)}${bin ? `${bin}  ${RN.version(n) || '(--version failed)'}` : 'not installed'}`);
+  }
+  let r;
+  try { r = RN.resolve({ flagRunner: a.f.runner, flagModel: a.f.model ? modelId(a.f.model) : null, storedModel: cfgGet('default_model') }); } catch (e) { die(e.message); }
+  out(`a new scan would use: ${r.runner || 'none'}${r.model ? ` model ${r.model}` : ''} — ${r.why}`);
+}
+
+/** Agent stats of a scan for `status`. */
+function runnerLines(scan) {
+  const so = JSON.parse(scan.options_json);
+  const lines = [];
+  if (so.runner) lines.push(`runner: ${so.runner}${so.model ? ` model ${so.model}` : ''}${so.runnerWhy ? ` — ${so.runnerWhy}` : ''}`);
+  const alive = pidAlive(scan.workflow_task);
+  if (alive !== null) lines.push(`runner process ${scan.workflow_task.slice(4)}: ${alive ? 'running' : 'not running (exited)'}${alive ? `; log ${path.join(scanDir(scan.id), 'run.log')}` : ''}`);
+  const s = db().prepare(`SELECT COUNT(*) n, SUM(ok) ok, SUM(usd) usd, SUM(usd IS NULL) nousd, MAX(usd_estimated) est FROM agent_runs WHERE scan_id=?`).get(scan.id);
+  if (s.n) lines.push(`agents: ${s.n} started, ${s.ok || 0} ok, ${s.n - (s.ok || 0)} failed; $${(s.usd || 0).toFixed(2)}${s.est ? ' (estimated from list prices)' : ''}${s.nousd ? `, ${s.nousd} without usage data` : ''}`);
+  return lines;
+}
+
+// ------------------------------------------------------------------- install
+//
+// Skills for hosts that do not install this repo as a plugin: rendered into an Agent Skills
+// directory (`~/.agents/skills` is read by Codex, Gemini CLI, Antigravity, Copilot CLI, Cursor and
+// OpenCode) with the plugin root resolved to this checkout and names prefixed `code-scan-`.
+
+const INSTALL_MANIFEST = '.code-scan-installed.json';
+
+/** One skill's SKILL.md for a non-Claude host. */
+function renderSkill(text, name) {
+  return text
+    .replace(/^If the plugin root above was not filled in.*\n/m, '')
+    .replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, PLUGIN_ROOT)
+    .replace(/^name:\s*.*$/m, `name: code-scan-${name}`)
+    .replace(/\/code-scan:([a-z-]+)/g, 'the code-scan-$1 skill');
+}
+
+function cmdInstall(a) {
+  const dir = a.f.dir ? path.resolve(a.f.dir)
+    : a.f.project ? path.join(repoRoot(), '.agents', 'skills')
+    : path.join(os.homedir(), '.agents', 'skills');
+  const man = path.join(dir, INSTALL_MANIFEST);
+  let prev = [];
+  try { prev = JSON.parse(fs.readFileSync(man, 'utf8')).skills || []; } catch (e) { /* first install */ }
+  for (const s of prev) fs.rmSync(path.join(dir, s), { recursive: true, force: true });
+  if (a.f.uninstall) {
+    fs.rmSync(man, { force: true });
+    out(prev.length ? `removed ${prev.length} code-scan skill(s) from ${dir}` : `nothing installed in ${dir}`);
+    return;
+  }
+  const src = path.join(PLUGIN_ROOT, 'skills');
+  const names = fs.readdirSync(src).filter((n) => fs.existsSync(path.join(src, n, 'SKILL.md'))).sort();
+  fs.mkdirSync(dir, { recursive: true });
+  const wrote = [];
+  for (const n of names) {
+    const to = path.join(dir, `code-scan-${n}`);
+    if (fs.existsSync(to) && !prev.includes(`code-scan-${n}`)) die(`${to} exists and was not installed by code-scan; remove it or use --dir`);
+    fs.mkdirSync(to, { recursive: true });
+    fs.writeFileSync(path.join(to, 'SKILL.md'), renderSkill(fs.readFileSync(path.join(src, n, 'SKILL.md'), 'utf8'), n));
+    wrote.push(`code-scan-${n}`);
+  }
+  fs.writeFileSync(man, JSON.stringify({ root: PLUGIN_ROOT, installed: now(), skills: wrote }, null, 2) + '\n');
+  out(`installed ${wrote.length} skills into ${dir}: ${wrote.join(', ')}`);
+  out(`they run ${CLI}; keep this checkout in place (or re-run install after moving it). Agent CLIs found: ${RN.installed().join(', ') || 'none'}`);
+}
+
 // ---------------------------------------------------------------------- main
 
 const HELP = `code-scan.js [-C repo] <command> [...]
-scan:      start [--model m] [--profile p|--prompt-file f] [--only g] [--include g] [--exclude g] [--include-tests] [--chunk-kb N]
+scan:      start [--runner r] [--model m] [--profile p|--prompt-file f] [--only g] [--include g] [--exclude g] [--include-tests] [--chunk-kb N]
                  [--force] [--force-path g] [--no-plan] [--new]
            continue [--scan id] [--model m] | restart [--replan] [--reset-scope] [...start flags] | stop [--now] | set-run <scan> <task>
+runner:    run [scan] [--runner claude|codex|gemini|agy|copilot|cursor|opencode] [--model m|runner:m] [--concurrency N] [--detach]
+           runners  (installed agent CLIs, detected host, what a new scan would use) | run-prompt <file> [--runner r] [--model m] [--full]
+           auto-triage run [run] | calibrate run [id] | init run [id]   (same flags; agents are headless CLI processes)
+install:   install [--user|--project|--dir d] [--uninstall]   (render skills into ~/.agents/skills for non-Claude hosts)
 planner:   plan-context <scan> | apply-plan <scan> --file plan.json
 workers:   claim <scan> | submit <scan> <chunk> --file <path> [--slice k] < findings.json
-limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P]; start/restart/continue [--concurrency 1-16, default 10]  | statusline [-- <wrapped status line cmd>]
+limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P]; start/restart/continue [--concurrency 1-32, default 10; Workflow caps at 16]  | statusline [-- <wrapped status line cmd>]
 progress:  status [--scan id|--all] | files [--state s] [--path p] [--out f]
 findings:  query [--severity critical,high|high+] [--category c] [--type t1,t2] [--path p] [--triage t|all] [--confirmation c|all] [--reported|--unreported]
                  [--tracker t] [--scan id|--latest] [--stale|--no-stale] [--gone|--include-gone] [--min-confidence x] [--max-fix-loc n] [--text s] [--unit u]
@@ -3339,6 +3899,7 @@ const COMMANDS = {
   profile: cmdProfile, dupes: cmdDupes, 'tracker-sync': cmdTrackerSync, 'tracker-import': cmdTrackerImport,
   match: cmdMatch, link: cmdLink, unlink: cmdUnlink, 'issues-sync': cmdIssuesSync, 'report-config': cmdReportConfig, render: cmdRender,
   drafts: cmdDrafts, calibrate: cmdCalibrate, 'verify-prompt': cmdVerifyPrompt, 'auto-triage': cmdAutoTriage, init: cmdInit, statusline: cmdStatusline, limits: cmdLimits, 'statusline-path': () => out(rateLimitsPath()), 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,
+  run: cmdRun, runners: cmdRunners, 'run-prompt': cmdRunPrompt, install: cmdInstall,
 };
 
 function main() {
@@ -3352,11 +3913,12 @@ function main() {
   if (!cmd || cmd === 'help' || cmd === '--help') { out(HELP); return; }
   const fn = COMMANDS[cmd];
   if (!fn) die(`unknown command '${cmd}'\n${HELP}`);
-  fn(parseArgs(argv.slice(1)));
+  return fn(parseArgs(argv.slice(1)));
 }
 
 try {
-  main();
+  const r = main();
+  if (r && typeof r.then === 'function') r.catch((e) => { RN.killAll(); die(e && e.message ? e.message : String(e)); });
 } catch (e) {
   die(e && e.message ? e.message : String(e));
 }

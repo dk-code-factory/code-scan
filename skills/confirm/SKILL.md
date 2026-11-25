@@ -9,6 +9,8 @@ description: Set the confirmation status of code-scan findings — confirmed (ch
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
+If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+
 `$CS confirm <ids, comma or space separated> --set confirmed|not_confirmed|unchecked [--set-severity <sev>] [--note "how it was checked"]`
 or with filters instead of ids (same filters as `query`, e.g. `--severity`, `--path`, `--confirmation`).
 With filters, run `$CS query <same filters>` first and confirm the count with the user when it is more than 10.

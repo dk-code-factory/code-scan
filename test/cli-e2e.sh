@@ -364,7 +364,7 @@ node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.en
 has "$(B init pick weak-model)" 'default reviewer model: weak-model' && ok pick-unfinished-calibration || bad pick-unfinished-calibration
 
 o=$(B start --new --no-plan --force --concurrency 4); has "$o" '"lanes":4' && ok concurrency-flag || bad "concurrency-flag: $o"
-has "$(B start --new --no-plan --force --concurrency 40 2>&1)" 'whole number 1-16' && ok concurrency-validated || bad concurrency-validated
+has "$(B start --new --no-plan --force --concurrency 40 2>&1)" 'whole number 1-32' && ok concurrency-validated || bad concurrency-validated
 
 # --- dismissed findings are shown to reviewers of the same files
 B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')

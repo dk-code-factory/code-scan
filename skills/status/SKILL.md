@@ -9,6 +9,8 @@ description: Show progress of the code-scan repo scan — files reviewed/pending
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
+If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+
 - Progress of the open/latest scan: `$CS status` (`--scan N` for another, `--all` for the list).
 - File-level questions: `$CS files [--state pending|in_progress|partial|reviewed|excluded|unchanged] [--path dir/|glob|file]`.
   The `reason` column explains exclusions (test, generated/vendored, docs, unknown-ext, plan: …).

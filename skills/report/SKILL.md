@@ -9,6 +9,8 @@ description: File code-scan findings as issues in GitHub or Jira, with tunable t
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
+If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+
 Filing issues is outward-facing: always show what will be filed and get an explicit yes first.
 Never add Claude/Anthropic attribution to issue titles or bodies.
 

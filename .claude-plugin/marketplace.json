@@ -3,13 +3,13 @@
   "owner": {
     "name": "dk-code-factory"
   },
-  "description": "Repository-wide bug scanning plugin for Claude Code.",
+  "description": "Repository-wide bug scanning for Claude Code, Codex, Gemini CLI, Antigravity, Copilot CLI, Cursor and OpenCode.",
   "plugins": [
     {
       "name": "code-scan",
       "source": "./",
       "description": "Repository-wide bug scanning: scan, status, findings, triage, auto-triage, dupes, report, profiles.",
-      "version": "1.6.1"
+      "version": "1.7.0"
     }
   ]
 }

@@ -9,6 +9,8 @@ description: Mark code-scan findings as confirmed, false_positive, fixed, wontfi
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
+If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+
 `$CS triage <ids, comma or space separated> --set confirmed|false_positive|fixed|wontfix|open [--note "why"]`
 or with filters instead of ids (same filters as `query`: `--severity`, `--path`, `--category`,
 `--scan`, `--text`, `--group`, ...). With filters, run `$CS query <same filters>` first and confirm

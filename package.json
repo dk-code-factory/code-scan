@@ -1,0 +1,11 @@
+{
+  "name": "code-scan",
+  "version": "1.7.0",
+  "description": "Repository-wide bug scanning with parallel reviewer agents from any agentic coding CLI (Claude Code, Codex, Gemini, Antigravity, Copilot, Cursor, OpenCode).",
+  "license": "MIT",
+  "repository": "github:dk-code-factory/code-scan",
+  "bin": { "code-scan": "bin/code-scan.js" },
+  "engines": { "node": ">=22.5" },
+  "files": ["bin/", "skills/", "agents/", "prompts/", "profiles/", "templates/", "workflows/", "gemini-extension.json"],
+  "scripts": { "test": "bash test/cli-e2e.sh && bash test/runners-e2e.sh" }
+}

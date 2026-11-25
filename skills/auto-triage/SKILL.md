@@ -9,8 +9,10 @@ description: Triage code-scan findings with agents — split the chosen findings
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
+If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+
 Agents only read code and search GitHub; nothing is built, run or filed. Invoking this skill is the user's
-opt-in to the Workflow fan-out it launches. Do not read source files or findings yourself.
+opt-in to the agent fan-out it launches. Do not read source files or findings yourself.
 
 ## 1. Selection
 
@@ -36,28 +38,26 @@ issue search is skipped).
 
 ## 3. Start and launch
 
-`$CS auto-triage start <same selection> [--group-size N] --repo <owner/name> [--concurrency N] [--model m]`
-(`--concurrency` 1–16 agents at once, default 10; `--model` only if the user names one). Its last line is
-`NEXT {...}`.
+`$CS auto-triage start <same selection> [--group-size N] --repo <owner/name> [--concurrency N] [--model m] [--runner r]`
+(`--concurrency` 1–32 agents at once, default 10; `--model`/`--runner` only if the user names one — the runner
+otherwise is the agent CLI you are running in, as for scans). Its last lines are `RUN ...` and `NEXT {...}`.
 
+With the `Workflow` tool and `"runner":"claude"` in NEXT:
 ```
 Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/workflows/auto-triage.js", args: <the NEXT JSON object, verbatim> })
 ```
-
-Then `$CS auto-triage set-run <runId> <task id from the Workflow result>`. Tell the user in one line which
-run is going and that `$CS auto-triage status <runId>` shows progress. Do not poll.
+then `$CS auto-triage set-run <runId> <task id from the Workflow result>`. Otherwise run the printed `RUN`
+command (it detaches and returns at once). Tell the user in one line which run is going and that
+`$CS auto-triage status <runId>` shows progress. Do not poll.
 
 When the completion notification arrives: `$CS auto-triage status <runId>`. If groups are still pending
-(agents failed), `$CS auto-triage continue <runId>` and launch the workflow again with its NEXT (at most 2
-more rounds). Finish with the status output's verdict line plus the per-finding lines for `real` ones, and
+(agents failed), `$CS auto-triage continue <runId>` and launch again the same way (at most 2 more rounds). Finish with the status output's verdict line plus the per-finding lines for `real` ones, and
 point to `$CS query --ids <ids> --triage all --sort fix_loc` / `/code-scan:report` for filing.
-
-If the Workflow tool is unavailable: launch background `Agent` calls (`subagent_type: "code-scan:triager"`),
-one per group, each with the prompt `Run: <cli> auto-triage claim <runId>` then follow your instructions.
 
 ## Stop
 
-`$CS auto-triage stop [run]` — agents stop claiming; groups in progress finish. `continue` resumes.
+`$CS auto-triage stop [run]` — agents stop claiming; groups in progress finish. `--now` also kills a `RUN`
+runner and releases its groups. `continue` resumes.
 
 ## What gets recorded per finding
 
