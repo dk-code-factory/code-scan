@@ -88,7 +88,10 @@ const RUNNERS = {
   },
   gemini: {
     bins: ['gemini'], vendor: 'google', stdin: true,
-    argv: (o) => ['-p', 'Follow the instructions given on standard input.', '-o', 'json', '--approval-mode=yolo',
+    argv: (o) => ['-p', 'Follow the instructions given on standard input.', '-o', 'json',
+      ...(o.full ? ['--approval-mode=yolo']
+        : ['--approval-mode=default', '--allowed-tools', ['read_file', 'read_many_files', 'glob', 'search_file_content', 'list_directory',
+          ...RO_CMDS.map((c) => `run_shell_command(${c})`)].join(',')]),
       ...(o.model ? ['-m', o.model] : []), ...extraArgs('gemini')],
     parse(stdout) {
       const j = firstJson(stdout);
@@ -108,7 +111,7 @@ const RUNNERS = {
   },
   agy: {
     bins: ['agy'], vendor: 'google', stdin: false,
-    argv: (o) => ['-p', o.prompt, '--output-format', 'json', '--dangerously-skip-permissions',
+    argv: (o) => ['-p', o.prompt, '--output-format', 'json', ...(o.full ? ['--dangerously-skip-permissions'] : []),
       ...(o.model ? ['--model', o.model] : []), ...extraArgs('agy')],
     parse(stdout) {
       const j = firstJson(stdout);
@@ -149,7 +152,7 @@ const RUNNERS = {
   },
   cursor: {
     bins: ['cursor-agent', 'agent'], vendor: null, stdin: false,
-    argv: (o) => ['-p', o.prompt, '--output-format', 'json', '--workspace', o.cwd, '--trust', '-f',
+    argv: (o) => ['-p', o.prompt, '--output-format', 'json', '--workspace', o.cwd, '--trust', ...(o.full ? ['-f'] : []),
       ...(o.model ? ['--model', o.model] : []), ...extraArgs('cursor')],
     parse(stdout) {
       const j = firstJson(stdout);
@@ -362,13 +365,14 @@ function runAgent({ runner, model, prompt, cwd, full = false, timeoutMs = 45 * 6
   const r = RUNNERS[runner];
   const bin = binOf(runner);
   if (!r || !bin) return Promise.resolve({ ok: false, error: `${runner} CLI not found`, exit: null, ms: 0 });
-  let p = prompt;
+  let p = prompt, promptFile = null;
   if (!r.stdin && Buffer.byteLength(p) > ARG_PROMPT_MAX) {
     // too long for one argv string: hand it over as a file the agent reads first
     const dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), 'code-scan-'));
     fs.mkdirSync(dir, { recursive: true });
     const f = path.join(dir, `prompt-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`);
     fs.writeFileSync(f, prompt);
+    promptFile = f;
     p = `Read the file ${f} completely (it is long; read all of it) and follow the instructions in it exactly. Your final reply is what that file asks for.`;
   }
   const o = { prompt: p, model, cwd, full };
@@ -389,9 +393,17 @@ function runAgent({ runner, model, prompt, cwd, full = false, timeoutMs = 45 * 6
     child.stdout.on('data', (b) => so.push(b));
     child.stderr.on('data', (b) => { se.push(b); if (se.length > 200) se.splice(0, se.length - 200); });
     if (r.stdin) { child.stdin.on('error', () => {}); child.stdin.end(prompt); }
-    const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGTERM'); } catch (e) { child.kill('SIGTERM'); } }, timeoutMs);
+    const kill = (sig) => { try { process.kill(-child.pid, sig); } catch (e) { try { child.kill(sig); } catch (e2) { /* gone */ } } };
+    let killTimer = null;
+    // SIGTERM, then SIGKILL if the group (or a child holding our pipes) ignores it
+    const timer = setTimeout(() => { kill('SIGTERM'); killTimer = setTimeout(() => kill('SIGKILL'), 10000); }, timeoutMs);
+    let finished = false;
     const done = (code, errMsg) => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
+      clearTimeout(killTimer);
+      if (promptFile) { try { fs.unlinkSync(promptFile); } catch (e) { /* already gone */ } }
       live.delete(child);
       const stdout = Buffer.concat(so).toString('utf8');
       const stderr = Buffer.concat(se).toString('utf8');
