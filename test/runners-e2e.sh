@@ -13,6 +13,8 @@ ok()   { echo "PASS $1"; }
 bad()  { echo "FAIL $1"; FAILS=$((FAILS+1)); }
 has()  { grep -q -- "$2" <<<"$1"; }
 Q()    { B sql "$1" | tail -1 | tr '\t' ','; }
+M()    { [ "$1" = claude ] && echo opus || echo "$1:m1"; }   # a model id per runner
+P()    { B profile register "$@" >/dev/null || echo "REGFAIL $*"; }
 for r in claude codex gemini agy copilot cursor-agent opencode; do
   n=$r; [ "$r" = cursor-agent ] && n=cursor
   printf '#!/bin/sh\nexec node %s %s "$@"\n' "$HERE/test/fake-runners/fake-agent.js" "$n" > "$W/bin/$r"; chmod +x "$W/bin/$r"
@@ -38,7 +40,8 @@ o=$(B runners --runner codex --model gemini:x 2>&1); has "$o" 'conflicts' && ok 
 # --- a full scan per runner (planner + reviewers), usage and dollars recorded
 for r in claude codex gemini agy copilot cursor opencode; do
   rm -rf "$W/state-$r"; export CODESCAN_HOME=$W/state-$r
-  o=$(B start --runner "$r" --chunk-kb 8)
+  P "p-$r" --prompt default --model "$(M "$r")" --chunk-kb 8
+  o=$(B start --profile "p-$r")
   has "$o" "runner: $r" && has "$o" "^RUN .* run 1 --detach" && has "$o" "\"runner\":\"$r\"" || bad "start-$r: $o"
   o=$(B run 1 --concurrency 2 2>&1)
   st=$(B status)
@@ -56,29 +59,30 @@ has "$(grep '^copilot ' "$FAKE_LOG" | head -1)" '--deny-tool write' && ok copilo
 
 # --- invalid reply → one fix-up agent, then stored
 export CODESCAN_HOME=$W/state-fix; mkdir -p "$W/badonce"
-B start --runner codex --no-plan --chunk-kb 8 >/dev/null
+P fix --prompt default --model codex:m1 --no-plan --chunk-kb 8; B start --profile fix >/dev/null
 o=$(FAKE_BAD_ONCE=$W/badonce B run 2>&1)
 k=$(Q "SELECT COUNT(*) FROM agent_runs WHERE kind='fix'")
 [ "$k" = 1 ] && has "$(B status)" '\[done\]' && ok reply-fixup || bad "reply-fixup: $k $o"
 
 # --- the agent CLI itself fails: stop after the planner instead of failing every chunk
 export CODESCAN_HOME=$W/state-cli-fail
-B start --runner codex --chunk-kb 8 >/dev/null
+P cf --prompt default --model codex:m1 --chunk-kb 8; B start --profile cf >/dev/null
 o=$(FAKE_FAIL='model not supported' B run 2>&1); n=$(Q "SELECT COUNT(*) FROM agent_runs")
 has "$o" 'stopped: the planner agent failed' && has "$o" 'model not supported' && [ "$n" = 1 ] && ok cli-fail-stops-early || bad "cli-fail-stops-early: $n $o"
 o=$(B run 2>&1); has "$o" 'planner: plan applied' && has "$(B status)" '\[done\]' && ok cli-fail-rerun || bad "cli-fail-rerun: $o"
 
 # --- limits
 export CODESCAN_HOME=$W/state-lim
-o=$(B start --runner copilot --max-usd 5 2>&1); has "$o" 'cannot be enforced with the copilot runner' && ok copilot-max-usd-refused || bad "copilot-max-usd: $o"
-o=$(B start --runner codex --max-5h-pct 50 2>&1); has "$o" 'needs the claude runner' && ok 5h-needs-claude || bad "5h-needs-claude: $o"
-B start --runner opencode --no-plan --chunk-kb 8 --max-usd 0.01 >/dev/null
+P cp --prompt default --model copilot:m1; P cx --prompt default --model codex:m1
+o=$(B start --profile cp --max-usd 5 2>&1); has "$o" 'cannot be enforced with the copilot runner' && ok copilot-max-usd-refused || bad "copilot-max-usd: $o"
+o=$(B start --profile cx --max-5h-pct 50 2>&1); has "$o" 'needs the claude runner' && ok 5h-needs-claude || bad "5h-needs-claude: $o"
+P oc --prompt default --model opencode:m1 --no-plan --chunk-kb 8; B start --profile oc --max-usd 0.01 >/dev/null
 o=$(B run --concurrency 1 2>&1); st=$(B status)
 has "$st" 'stopped by limit: spend' && has "$st" 'pending' && ok max-usd-stops || bad "max-usd-stops: $o // $st"
 
 # --- detach + stop --now
 export CODESCAN_HOME=$W/state-det
-B start --runner gemini --no-plan --chunk-kb 8 >/dev/null
+P gm --prompt default --model gemini:m1 --no-plan --chunk-kb 8; B start --profile gm >/dev/null
 o=$(FAKE_SLEEP_MS=20000 B run --detach); has "$o" 'RUNNING scan 1 on gemini' || bad "detach: $o"
 for i in $(seq 1 50); do [ "$(Q "SELECT COUNT(*) FROM chunks WHERE state='claimed'")" != 0 ] && break; sleep 0.2; done
 has "$(B status)" 'runner process [0-9]*: running' && ok detach-running || bad "detach-running: $(B status)"
@@ -87,6 +91,21 @@ sleep 1
 st=$(B status); c=$(Q "SELECT COUNT(*) FROM chunks WHERE state='claimed'")
 [ "$c" = 0 ] && has "$st" 'not running' && ! pgrep -f "fake-agent.js gemini" >/dev/null && ok stop-now-kills || bad "stop-now-kills: claimed=$c $st"
 o=$(B run 2>&1); has "$o" 'stopped' && ok run-needs-continue || bad "run-needs-continue: $o"
+
+# --- two review profiles on different runners side by side; frozen runner args; run record
+export CODESCAN_HOME=$W/state-par
+CODESCAN_CODEX_ARGS=--frozen-arg P par-cx --prompt security --model codex:m1 --chunk-kb 8
+P par-gm --prompt security --model gemini:m1 --chunk-kb 8
+o=$(B start --profile par-cx,par-gm); has "$o" 'plans for the batch' && has "$o" 'waits for the plan of scan' && ok parallel-batch || bad "parallel-batch: $o"
+: > "$FAKE_LOG"
+o1=$(B run 1 --detach); o2=$(B run 2 --detach)
+for i in $(seq 1 150); do [ "$(Q "SELECT COUNT(*) FROM scans WHERE status='done'")" = 2 ] && break; sleep 0.2; done
+st=$(B status --scan 1; B status --scan 2)
+[ "$(Q "SELECT COUNT(*) FROM scans WHERE status='done'")" = 2 ] && [ "$(Q "SELECT COUNT(*) FROM agent_runs WHERE kind='plan'")" = 1 ] && ok parallel-runners || bad "parallel-runners: $st"
+[ "$(Q "SELECT COUNT(DISTINCT ps) FROM (SELECT group_concat(path) ps FROM (SELECT scan_id, path FROM files WHERE state='reviewed' ORDER BY path) GROUP BY scan_id)")" = 1 ] && ok parallel-same-code-set || bad parallel-same-code-set
+grep '^codex ' "$FAKE_LOG" | grep -q -- '--frozen-arg' && ok runner-args-frozen || bad "runner-args-frozen: $(grep '^codex ' "$FAKE_LOG" | head -1)"
+has "$(B scans show 2)" 'runner: gemini fake-gemini 1.0.0' && ok run-record || bad "run-record: $(B scans show 2)"
+has "$(B compare 1 2)" 'compare 2 scans' && ok compare-runners || bad compare-runners
 
 # --- auto-triage through a runner
 export CODESCAN_HOME=$W/state-codex
@@ -108,12 +127,12 @@ echo 'PING' > "$W/p.md"
 o=$(B run-prompt "$W/p.md" --runner opencode); [ "$o" = PONG ] && ok run-prompt || bad "run-prompt: $o"
 
 # --- install skills for other hosts
-o=$(B install --dir "$W/skills"); has "$o" 'installed 11 skills' || bad "install: $o"
+o=$(B install --dir "$W/skills"); has "$o" 'installed 12 skills' || bad "install: $o"
 [ -f "$W/skills/code-scan-scan/SKILL.md" ] && ! grep -rq 'CLAUDE_PLUGIN_ROOT' "$W/skills" && grep -q '^name: code-scan-scan$' "$W/skills/code-scan-scan/SKILL.md" \
   && grep -q "$HERE/bin/code-scan.js" "$W/skills/code-scan-scan/SKILL.md" && ok install-render || bad install-render
 mkdir -p "$W/skills2/code-scan-scan"; o=$(B install --dir "$W/skills2" 2>&1); has "$o" 'was not installed by code-scan' && ok install-no-clobber || bad "install-no-clobber: $o"
-o=$(B install --dir "$W/skills"); has "$o" 'installed 11' && ok install-idempotent || bad install-idempotent
-o=$(B install --dir "$W/skills" --uninstall); [ ! -e "$W/skills/code-scan-scan" ] && has "$o" 'removed 11' && ok uninstall || bad "uninstall: $o"
+o=$(B install --dir "$W/skills"); has "$o" 'installed 12' && ok install-idempotent || bad install-idempotent
+o=$(B install --dir "$W/skills" --uninstall); [ ! -e "$W/skills/code-scan-scan" ] && has "$o" 'removed 12' && ok uninstall || bad "uninstall: $o"
 
 echo ---
 [ $FAILS -eq 0 ] && echo "ALL PASS" || { echo "$FAILS FAILED"; exit 1; }

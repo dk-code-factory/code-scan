@@ -20,7 +20,7 @@ If apply-plan rejects it, fix the plan and rerun until it succeeds. Return the c
 
 // The reviewer's standing instructions live in agents/reviewer.md (a minimal-tool agent, so each
 // turn re-reads a small preamble); the per-run prompt only carries the command.
-const WORKER_PROMPT = `Run: ${CLI} claim --inline ${args.scanId}
+const workerPrompt = (scanId) => `Run: ${CLI} claim --inline ${scanId}
 Then follow your instructions. Final reply: {"chunk": <id or null>, "files": <files submitted>, "findings": <findings submitted>}.`
 
 const WORKER_SCHEMA = {
@@ -68,26 +68,33 @@ if (args.plan) {
 // Reviewers run in lanes rather than one queued agent per chunk: each lane keeps starting
 // reviewers until one gets NONE (no chunk left, scan stopped, or a spending limit crossed), so a
 // crossed limit costs at most one short agent per lane instead of one per remaining chunk.
-if (!workers) return { chunks_reviewed: 0, files: 0, findings: 0, failed_agents: 0 }
-const LANES = Math.max(1, Math.min(workers, args.lanes || 10, 900))
+// `follow`: further scans of the same batch (other review profiles, possibly other models) that
+// adopted this scan's plan; their lanes run alongside, each with its own model.
+const scans = [{ scanId: args.scanId, workers, model: args.model, lanes: args.lanes }, ...(args.follow || [])]
+  .filter((x) => x.workers > 0)
+if (!scans.length) return { chunks_reviewed: 0, files: 0, findings: 0, failed_agents: 0 }
 phase('Review')
-log(`reviewing ${workers} chunk(s) in ${LANES} lane(s)`)
 let started = 0
 const results = []
-await parallel(Array.from({ length: LANES }, (_, lane) => async () => {
-  let failures = 0
-  while (started < 900) {
-    const n = ++started
-    const r = await run(WORKER_PROMPT, { label: `review ${n}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: args.agentType || 'code-scan:reviewer', ...(args.model ? { model: args.model } : {}) })
-    results.push(r)
-    if (!r) { if (++failures >= 2) break; continue }
-    failures = 0
-    if (r.chunk === null) break
-  }
+await parallel(scans.flatMap((sc) => {
+  const lanes = Math.max(1, Math.min(sc.workers, sc.lanes || 10, 900))
+  log(`scan ${sc.scanId}: ${sc.workers} chunk(s) in ${lanes} lane(s)${sc.model ? ` on ${sc.model}` : ''}`)
+  return Array.from({ length: lanes }, () => async () => {
+    let failures = 0
+    while (started < 900) {
+      const n = ++started
+      const r = await run(workerPrompt(sc.scanId), { label: `scan ${sc.scanId} review ${n}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: args.agentType || 'code-scan:reviewer', ...(sc.model ? { model: sc.model } : {}) })
+      results.push(r)
+      if (!r) { if (++failures >= 2) break; continue }
+      failures = 0
+      if (r.chunk === null) break
+    }
+  })
 }))
 if (started >= 900) log('per-run cap of 900 reviewers reached — run continue for the rest')
 const ok = results.filter((r) => r && r.chunk !== null)
 return {
+  scans: scans.map((x) => x.scanId),
   chunks_reviewed: ok.length,
   files: ok.reduce((s, r) => s + (r.files || 0), 0),
   findings: ok.reduce((s, r) => s + (r.findings || 0), 0),

@@ -31,6 +31,9 @@ Do not read source files or the database; the CLI does the work.
    size, quality (share of all distinct issues found by any model), all-in $/100KB and $/1kLOC, and
    the recommendation (cheapest model within 10% of the best quality).
 5. Ask the user which model to use (recommended first, each option showing quality and $/100KB; use your
-   question/choice tool if you have one). Then `$CS init pick <model>` and report the model and its chunk size in one line.
+   question/choice tool if you have one). Then `$CS init pick <model>` and report the model, its chunk size
+   and the registered profile (`default@N`) in one line.
 
-Scans then default to that model and chunk size; `--model` on a scan still overrides.
+`init pick` registers that model and chunk size with the default prompt as (a new version of) the
+`default` review profile and makes it the default for `start`. Other models stay usable: register a
+profile for them (`/code-scan:profiles`) and run several side by side.

@@ -259,7 +259,7 @@ function pathMatcher(spec) {
 
 // ------------------------------------------------------------------ arg parse
 
-const BOOL_FLAGS = new Set(['include-tests', 'force', 'no-plan', 'replan', 'now', 'all',
+const BOOL_FLAGS = new Set(['close', 'no-dismissed', 'all-versions', 'retired', 'include-tests', 'force', 'no-plan', 'replan', 'now', 'all',
   'latest', 'stale', 'no-stale', 'reported', 'unreported', 'primary-only', 'new',
   'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules', 'recheck',
   'detach', 'reply', 'full', 'uninstall', 'user', 'project']);
@@ -419,6 +419,25 @@ function db() {
   if (!DB.prepare('PRAGMA table_info(triage_runs)').all().some((c) => c.name === 'runner')) {
     try { DB.exec('ALTER TABLE triage_runs ADD COLUMN runner TEXT'); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
   }
+  // registered review profiles: immutable, versioned specs of everything that shapes a review
+  DB.exec(`CREATE TABLE IF NOT EXISTS review_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+    version INTEGER NOT NULL, hash TEXT NOT NULL, spec_json TEXT NOT NULL, prompt_source TEXT, note TEXT,
+    retired INTEGER NOT NULL DEFAULT 0, legacy INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL,
+    UNIQUE(name, version), UNIQUE(name, hash));`);
+  const addCols = (table, cols) => {
+    const have = DB.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    for (const [col, def] of cols) {
+      if (have.includes(col)) continue;
+      try { DB.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+    }
+  };
+  addCols('scans', [['profile_id', 'INTEGER'], ['label', 'TEXT'], ['run_json', 'TEXT']]);
+  addCols('chunks', [['context_json', 'TEXT'], ['prompt_sha', 'TEXT']]);
+  // what each scan itself reported for a finding (the findings row is the merged, triaged record)
+  addCols('seen', [['profile_id', 'INTEGER'], ['severity', 'TEXT'], ['type', 'TEXT'], ['category', 'TEXT'], ['line', 'INTEGER'],
+    ['end_line', 'INTEGER'], ['title', 'TEXT'], ['confidence', 'REAL']]);
+  DB.exec('CREATE INDEX IF NOT EXISTS seen_scan ON seen(scan_id); CREATE INDEX IF NOT EXISTS scans_profile ON scans(profile_id);');
+  if (DB.prepare("SELECT 1 FROM scans WHERE kind='scan' AND profile_id IS NULL LIMIT 1").get()) migrateLegacyScans(DB);
   const untyped = DB.prepare('SELECT id, category, title FROM findings WHERE type IS NULL').all();
   if (untyped.length) {
     const st = DB.prepare('UPDATE findings SET type=? WHERE id=? AND type IS NULL');
@@ -460,48 +479,279 @@ function latestScan(required = true) {
   if (!s && required) die('no scans yet — run `start`');
   return s;
 }
-function openScan() {
-  return db().prepare("SELECT * FROM scans WHERE kind='scan' AND status IN ('active','stopped') ORDER BY id DESC LIMIT 1").get();
-}
-function scanArg(f) {
-  if (f.scan) return getScan(f.scan);
-  return openScan() || latestScan();
-}
+function scanArg(f) { return pickScan(f, { fallbackLatest: true }); }
 function setScanStatus(id, status) {
   db().prepare('UPDATE scans SET status=?, updated=? WHERE id=?').run(status, now(), id);
 }
 
-// ------------------------------------------------------------------ profiles
+// ------------------------------------------------------------ prompt library
+//
+// Review-focus texts: builtins in profiles/*.md plus the user's own. The library is an input to
+// `profile register` and to init/calibration benchmarks only. A scan never reads it: it reads the
+// frozen copy inside its registered review profile.
 
-function builtinProfile(name) {
+function builtinPrompt(name) {
+  if (!/^[\w.-]+$/.test(String(name))) return null;
   const p = path.join(PLUGIN_ROOT, 'profiles', `${name}.md`);
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
 }
-function builtinProfileNames() {
+function builtinPromptNames() {
   const d = path.join(PLUGIN_ROOT, 'profiles');
   return fs.existsSync(d) ? fs.readdirSync(d).filter((n) => n.endsWith('.md')).map((n) => n.slice(0, -3)) : [];
 }
-function upsertProfile(name, text) {
+function upsertPrompt(name, text) {
   const hash = sha1(text.trim(), 12);
   db().prepare(`INSERT INTO profiles(name,hash,text,created) VALUES(?,?,?,?)
     ON CONFLICT(name) DO UPDATE SET hash=excluded.hash, text=excluded.text`).run(name, hash, text, now());
   return { name, hash, text };
 }
-function resolveProfile(name) {
+function resolvePrompt(name) {
   const row = db().prepare('SELECT * FROM profiles WHERE name=?').get(name);
   if (row) return row;
-  const text = builtinProfile(name);
-  if (text === null) die(`unknown profile '${name}' (see \`profile list\`)`);
-  return upsertProfile(name, text);
+  const text = builtinPrompt(name);
+  if (text === null) die(`unknown prompt '${name}' (see \`prompt list\`)`);
+  return upsertPrompt(name, text);
 }
-function profileFromFlags(f, fallbackName = 'default') {
+/** Prompt from --prompt-file (saved to the library) or --prompt <name> (--profile kept as an alias for init/calibrate). */
+function promptFromFlags(f, fallbackName = 'default') {
   if (f['prompt-file']) {
     const text = fs.readFileSync(f['prompt-file'], 'utf8');
     if (!text.trim()) die('prompt file is empty');
-    const name = f.profile || `adhoc-${sha1(text.trim(), 8)}`;
-    return upsertProfile(name, text);
+    const name = f.prompt || `adhoc-${sha1(text.trim(), 8)}`;
+    return upsertPrompt(name, text);
   }
-  return resolveProfile(f.profile || fallbackName);
+  return resolvePrompt(f.prompt || f.profile || fallbackName);
+}
+
+// ------------------------------------------------ registered review profiles
+//
+// A scan runs a registered review profile: an immutable, versioned spec of everything that shapes
+// what reviewers see and do (prompt text, reviewer instructions, runner, model, extra CLI args,
+// chunk size, scope, planner, dismissed-findings context). Its hash keys the "already reviewed"
+// ledger and every result row points back to it, so any scan can be traced to exactly how it ran
+// and repeated. Re-registering an unchanged spec returns the existing version; a changed one is the
+// next version of that name. Run-time knobs (lanes, spending limits, commit) stay on the scan.
+
+const PROFILE_SPEC_FLAGS = ['model', 'runner', 'runner-args', 'prompt', 'prompt-file', 'chunk-kb', 'only', 'include', 'exclude',
+  'include-tests', 'no-plan', 'no-dismissed', 'reset-scope'];
+
+function canon(v) {
+  if (Array.isArray(v)) return v.map(canon);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => [k, canon(v[k])]));
+  return v;
+}
+function specHash(spec) { return sha1(JSON.stringify(canon(spec)), 12); }
+function pluginText(rel) {
+  const f = path.join(PLUGIN_ROOT, rel);
+  return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').replace(/^---[\s\S]*?---\n/, '').trim() : null;
+}
+/** Reviewer instructions as the plugin ships them now (agent definition and the reply-variant for runners). */
+function reviewerSnapshot() { return { agent: pluginText('agents/reviewer.md'), reply: pluginText('prompts/reviewer.md') }; }
+function profileRow(r) { return r ? { ...r, spec: JSON.parse(r.spec_json) } : null; }
+function profileLabel(p) { return `${p.name}@${p.version}`; }
+function profileById(id) { return id ? profileRow(db().prepare('SELECT * FROM review_profiles WHERE id=?').get(Number(id))) : null; }
+function scopeList(v) { return v ? [...new Set([].concat(v).flatMap(splitSpecs).map((s) => s.trim()).filter(Boolean))].sort() : []; }
+
+/** Registered profile by ref: name (latest non-retired version), name@N, #id, or a hash prefix (6+ hex). */
+function findProfile(ref) {
+  const d = db();
+  const s = String(ref || '').trim();
+  if (!s) return null;
+  let m;
+  if ((m = s.match(/^#(\d+)$/))) return profileById(Number(m[1]));
+  if ((m = s.match(/^(.+)@(\d+)$/))) return profileRow(d.prepare('SELECT * FROM review_profiles WHERE name=? AND version=?').get(m[1], Number(m[2])));
+  const byName = d.prepare('SELECT * FROM review_profiles WHERE name=? ORDER BY retired, version DESC LIMIT 1').get(s);
+  if (byName) return profileRow(byName);
+  if (/^[0-9a-f]{6,12}$/.test(s)) {
+    const hs = d.prepare('SELECT * FROM review_profiles WHERE hash LIKE ?').all(`${s}%`);
+    if (hs.length > 1) die(`hash prefix ${s} is ambiguous: ${hs.map(profileLabel).join(', ')}`);
+    if (hs.length) return profileRow(hs[0]);
+  }
+  return null;
+}
+function getProfile(ref) {
+  const p = findProfile(ref);
+  if (!p) die(`no registered review profile '${ref}' — see \`profile list\`; register one with \`profile register <name> --prompt <prompt> --model <runner:model>\``);
+  return p;
+}
+/** A profile a new scan can run: its prompt must be known (legacy profiles may have lost theirs). */
+function runnableProfile(ref) {
+  const p = getProfile(ref);
+  if (!p.spec.prompt) die(`${profileLabel(p)} was registered from an old scan whose prompt text is no longer known — register a new profile`);
+  return p;
+}
+
+/** Store a spec under a name: the existing version when unchanged, else the next version. */
+function registerSpec(name, spec, { promptSource = null, note = null, legacy = 0 } = {}) {
+  const d = db();
+  const hash = specHash(spec);
+  const ex = d.prepare('SELECT * FROM review_profiles WHERE name=? AND hash=?').get(name, hash);
+  if (ex) return { p: profileRow(ex), created: false };
+  const v = (d.prepare('SELECT MAX(version) m FROM review_profiles WHERE name=?').get(name).m || 0) + 1;
+  const r = d.prepare('INSERT INTO review_profiles(name,version,hash,spec_json,prompt_source,note,legacy,created) VALUES(?,?,?,?,?,?,?,?)')
+    .run(name, v, hash, JSON.stringify(canon(spec)), promptSource, note, legacy, now());
+  return { p: profileById(r.lastInsertRowid), created: true };
+}
+
+/** Spec from `profile register` flags. */
+function specFromFlags(f) {
+  if (!f.prompt && !f['prompt-file']) die('profile register needs --prompt <name> (see `prompt list`) or --prompt-file <file>');
+  if (!f.model) die('profile register needs --model <model> (opus, sonnet, codex:gpt-6.2-sol, gemini:gemini-3.1-pro-preview, …; `default` = the model picked at init)');
+  const pr = promptFromFlags(f);
+  const model = f.model === 'default' ? cfgGet('default_model') : modelId(f.model);
+  if (!model) die('--model default: no model was picked at init (`init start`, then `init pick <model>`)');
+  let r;
+  try { r = RN.resolve({ flagRunner: f.runner, flagModel: model }); } catch (e) { die(e.message); }
+  if (!r.model || !RN.splitModel(r.model).model) die(`--model ${f.model}: name the model, not just the runner (e.g. ${r.runner}:<model>)`);
+  const cal = cfgGet(`chunk_kb:${modelId(r.model)}`);
+  if (f['chunk-kb'] !== undefined && !(Number(f['chunk-kb']) > 0)) die('--chunk-kb must be a positive number (KB)');
+  const spec = {
+    v: 1,
+    prompt: pr.text.trim(),
+    reviewer: reviewerSnapshot(),
+    runner: r.runner,
+    model: modelId(r.model),
+    runnerArgs: f['runner-args'] !== undefined ? String(f['runner-args']).split(/\s+/).filter(Boolean) : RN.extraArgs(r.runner),
+    chunkKb: f['chunk-kb'] !== undefined ? Number(f['chunk-kb']) : cal ? Number(cal) : DEFAULT_CHUNK_KB,
+    scope: { only: scopeList(f.only), include: scopeList(f.include), exclude: scopeList(f.exclude), includeTests: !!f['include-tests'] },
+    planner: !f['no-plan'],
+    dismissedContext: !f['no-dismissed'],
+  };
+  const chunkSource = f['chunk-kb'] !== undefined ? '--chunk-kb' : cal ? 'calibrated' : 'default (not calibrated)';
+  return { spec, chunkSource, promptSource: f['prompt-file'] ? `file ${path.basename(f['prompt-file'])} → prompt ${pr.name} (${pr.hash})` : `prompt ${pr.name} (${pr.hash})` };
+}
+
+/** Scan options from a profile spec plus run-time flags (lanes, limits, force); `base` = run-time knobs to carry over. */
+function optsFromProfile(p, f, base = {}) {
+  const s = p.spec;
+  const sc = s.scope || {};
+  const o = {};
+  for (const k of ['lanes', 'maxUsd', 'max5hPct']) if (base[k] !== undefined) o[k] = base[k];
+  o.model = s.model || null;
+  o.runner = s.runner || null;
+  o.runnerWhy = `review profile ${profileLabel(p)}`;
+  o.chunkKb = s.chunkKb || DEFAULT_CHUNK_KB;
+  o.chunkSource = `review profile ${profileLabel(p)}`;
+  if (sc.only && sc.only.length) o.only = sc.only;
+  if (sc.include && sc.include.length) o.include = sc.include;
+  if (sc.exclude && sc.exclude.length) o.exclude = sc.exclude;
+  o.includeTests = !!sc.includeTests;
+  o.noPlan = s.planner === false;
+  applyLimitFlags(o, f);
+  if (f.concurrency !== undefined) o.lanes = parseConcurrency(f.concurrency);
+  checkRunnerLimits(o);
+  o.force = !!f.force;
+  o.forcePath = f['force-path'] || null;
+  return o;
+}
+
+/** Flags that belong to a review profile are refused on scan verbs: register a profile instead. */
+function rejectSpecFlags(f, verb) {
+  const bad = PROFILE_SPEC_FLAGS.filter((k) => f[k] !== undefined);
+  if (!bad.length) return;
+  die(`${bad.map((k) => `--${k}`).join(' ')}: part of a review profile, not of \`${verb}\`. Register one — \`profile register <name> --prompt <prompt> --model <runner:model> [--chunk-kb N] [--only g] …\` — and pass \`--profile <name>\``);
+}
+
+function pluginInfo() {
+  let version = null;
+  try { version = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'package.json'), 'utf8')).version; } catch (e) { /* not packaged */ }
+  const top = spawnSync('git', ['-C', PLUGIN_ROOT, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
+  let sha = null, dirty = null;
+  if (top.status === 0 && path.resolve(top.stdout.trim()) === PLUGIN_ROOT) {
+    sha = (spawnSync('git', ['-C', PLUGIN_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout || '').trim() || null;
+    dirty = (spawnSync('git', ['-C', PLUGIN_ROOT, 'status', '--porcelain', '--', 'bin', 'agents', 'prompts', 'workflows'], { encoding: 'utf8' }).stdout || '').trim() !== '';
+  }
+  return { version, sha, dirty };
+}
+
+/** How a scan is being run, beyond its profile: plugin, node, runner binary/version/argv, host, drift from the profile's snapshot. */
+function runRecord(p, extra = {}) {
+  const s = p.spec;
+  const runner = s.runner && RN.RUNNERS[s.runner] ? s.runner : null;
+  const bin = runner ? RN.binOf(runner) : null;
+  const argv = runner ? RN.RUNNERS[runner].argv({ prompt: '<prompt>', model: s.model ? RN.splitModel(s.model).model : null, cwd: '<repo>', full: false,
+    extra: Array.isArray(s.runnerArgs) ? s.runnerArgs : undefined }) : null;
+  const host = RN.detectHost();
+  const cur = reviewerSnapshot();
+  const drift = [];
+  if (s.reviewer) {
+    if ((cur.agent || '') !== (s.reviewer.agent || '')) drift.push('agents/reviewer.md (Workflow reviewers use the installed agent definition; runner and --rules reviewers get the profile\'s copy)');
+    if ((cur.reply || '') !== (s.reviewer.reply || '')) drift.push('prompts/reviewer.md (runner reviewers get the profile\'s copy)');
+  }
+  return { at: now(), profile: { id: p.id, ref: profileLabel(p), hash: p.hash }, plugin: pluginInfo(), node: process.version,
+    runner: runner ? { name: runner, bin, version: bin ? RN.version(runner) : null, argv } : null,
+    host: host ? host.why : null, reviewerDrift: drift, ...extra };
+}
+
+/** The registered spec of a scan (null for calibration rounds). */
+function scanSpec(scan) { const p = profileById(scan.profile_id); return p ? p.spec : null; }
+/** Review-focus text a scan's reviewers get: the profile's frozen copy; calibration rounds use the prompt library. */
+function scanPromptText(scan) {
+  const s = scanSpec(scan);
+  if (s && s.prompt) return s.prompt;
+  const r = db().prepare('SELECT text FROM profiles WHERE name=?').get(String(scan.profile_name).replace(/^legacy-/, ''));
+  return r ? r.text.trim() : '';
+}
+
+/**
+ * Scans made before profiles were registered: each distinct (prompt, model, runner, chunk size,
+ * scope) becomes `legacy-<prompt name>@N`, and the scan, its ledger rows and its seen rows are linked.
+ */
+function migrateLegacyScans(d) {
+  d.exec('BEGIN IMMEDIATE');
+  try {
+    for (const s of d.prepare("SELECT * FROM scans WHERE kind='scan' AND profile_id IS NULL ORDER BY id").all()) {
+      const o = JSON.parse(s.options_json);
+      const row = d.prepare('SELECT text FROM profiles WHERE name=?').get(s.profile_name);
+      const text = row ? row.text : builtinPrompt(s.profile_name);
+      const known = !!text && sha1(text.trim(), 12) === s.profile_hash;
+      const spec = {
+        v: 1, legacy: true, prompt: known ? text.trim() : null, promptHash: s.profile_hash, reviewer: null,
+        runner: o.runner || null, model: o.model || null, runnerArgs: null, chunkKb: o.chunkKb || DEFAULT_CHUNK_KB,
+        scope: { only: scopeList(o.only), include: scopeList(o.include), exclude: scopeList(o.exclude), includeTests: !!o.includeTests },
+        planner: !o.noPlan, dismissedContext: true,
+      };
+      const name = `legacy-${s.profile_name}`;
+      const { p } = registerSpec(name, spec, { promptSource: `prompt ${s.profile_name} (${s.profile_hash})`, legacy: 1,
+        note: 'registered automatically from a scan made before review profiles were registered' });
+      d.prepare('UPDATE reviewed SET profile_hash=? WHERE scan_id=? AND profile_hash=?').run(p.hash, s.id, s.profile_hash);
+      d.prepare('UPDATE scans SET profile_id=?, profile_name=?, profile_hash=? WHERE id=?').run(p.id, name, p.hash, s.id);
+      d.prepare('UPDATE seen SET profile_id=? WHERE scan_id=?').run(p.id, s.id);
+      d.prepare('UPDATE findings SET profile_name=? WHERE first_scan=?').run(name, s.id);
+    }
+    d.exec('COMMIT');
+  } catch (e) { try { d.exec('ROLLBACK'); } catch (ignored) { /* none open */ } throw e; }
+}
+
+// ------------------------------------------------------------ scan selection
+
+function openScans() { return db().prepare("SELECT * FROM scans WHERE kind='scan' AND status IN ('active','stopped') ORDER BY id").all(); }
+function scanBrief(s) { return `${s.id}${s.label ? ` (${s.label})` : ''} ${s.profile_name} @ ${s.commit_sha.slice(0, 12)} [${s.status}]`; }
+
+/** A scan by id, label, or profile (bare name = that lineage, name@N/#id/hash = that version); latest match. */
+function scanByRef(ref, { open = false, done = false } = {}) {
+  const d = db();
+  const s = String(ref).trim();
+  const st = open ? " AND status IN ('active','stopped')" : '';
+  const order = done ? "ORDER BY (status='done') DESC, id DESC" : 'ORDER BY id DESC';
+  if (/^\d+$/.test(s)) return getScan(s);
+  let r = d.prepare(`SELECT * FROM scans WHERE kind='scan' AND label=?${st} ${order} LIMIT 1`).get(s);
+  if (!r && !/[@#]/.test(s)) r = d.prepare(`SELECT * FROM scans WHERE kind='scan' AND profile_name=?${st} ${order} LIMIT 1`).get(s);
+  if (!r) {
+    const p = findProfile(s);
+    if (p) r = d.prepare(`SELECT * FROM scans WHERE kind='scan' AND profile_id=?${st} ${order} LIMIT 1`).get(p.id);
+  }
+  if (!r) die(`no ${open ? 'open ' : ''}scan matches '${s}' (scan id, label or profile)`);
+  return r;
+}
+
+/** The scan a command acts on: --scan, else the only open scan; dies when several are open. */
+function pickScan(f, { fallbackLatest = false } = {}) {
+  if (f.scan) return scanByRef(f.scan);
+  const o = openScans();
+  if (o.length === 1) return o[0];
+  if (o.length > 1) die(`${o.length} scans are open — pass --scan <id|label|profile>:\n  ${o.map(scanBrief).join('\n  ')}`);
+  return fallbackLatest ? latestScan() : null;
 }
 
 // ----------------------------------------------------------------- inventory
@@ -731,7 +981,8 @@ function modelAlias(id) {
   return hit ? hit[0] : String(id);
 }
 
-function nextLine(scan, plan) {
+/** Workflow args for one scan (the `NEXT` object), without the follow list. */
+function nextObj(scan, plan) {
   const workers = Math.min(pendingChunks(scan.id), MAX_WORKERS_PER_RUN);
   const o = { cli: CLI, root: repoRoot(), scanId: scan.id, plan: !!plan, workers };
   const so = JSON.parse(getScan(scan.id).options_json);
@@ -740,21 +991,13 @@ function nextLine(scan, plan) {
   if (so.lanes) o.lanes = so.lanes;
   o.runner = so.runner || null;
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
-  const run = workers || plan ? `RUN ${cliPrefix()} run ${scan.id} --detach\n` : '';
-  return run + 'NEXT ' + JSON.stringify(o);
-}
-
-/** Resolve and record which agent CLI runs this scan's agents (see bin/lib/runners.js). */
-function applyRunner(o, f) {
-  const explicit = f.runner || f.model;
-  let r;
-  try {
-    r = RN.resolve({ flagRunner: f.runner, flagModel: f.model ? modelId(f.model) : null, storedModel: o.model || null, storedRunner: explicit ? null : o.runner });
-  } catch (e) { die(e.message); }
-  if (explicit) o.model = r.model ? modelId(r.model) : null;
-  o.runner = r.runner;
-  o.runnerWhy = r.why;
   return o;
+}
+function runLine(scan) { return `RUN ${cliPrefix()} run ${scan.id} --detach`; }
+function nextLine(scan, plan) {
+  const o = nextObj(scan, plan);
+  const run = o.workers || plan ? `${runLine(scan)}\n` : '';
+  return run + 'NEXT ' + JSON.stringify(o);
 }
 
 /** Limits a runner can enforce: dollars need token usage, the 5-hour window needs Claude's status line. */
@@ -765,45 +1008,27 @@ function checkRunnerLimits(o) {
 
 // ------------------------------------------------------------- scan commands
 
-function buildOpts(f, base = {}) {
-  const o = { ...base };
-  if (f['include-tests'] !== undefined) o.includeTests = !!f['include-tests'];
-  if (f.include) o.include = f.include;
-  if (f.exclude) o.exclude = f.exclude;
-  if (f.only) o.only = f.only;
-  applyLimitFlags(o, f);
-  if (f.concurrency !== undefined) o.lanes = parseConcurrency(f.concurrency);
-  if (f['chunk-kb']) { o.chunkKb = Number(f['chunk-kb']); o.chunkSource = 'flag'; }
-  if (f.model) o.model = modelId(f.model);
-  else if (!o.model && !f.runner && cfgGet('default_model')) o.model = cfgGet('default_model');
-  applyRunner(o, f);
-  checkRunnerLimits(o);
-  if (!f['chunk-kb'] && (o.chunkSource !== 'flag' || f.model || f.runner)) {
-    const cal = o.model ? cfgGet(`chunk_kb:${o.model}`) : null;
-    o.chunkKb = cal ? Number(cal) : DEFAULT_CHUNK_KB;
-    o.chunkSource = cal ? `calibrated for ${o.model}` : 'default';
-  }
-  if (f['no-plan'] !== undefined) o.noPlan = !!f['no-plan'];
-  o.force = !!f.force;
-  o.forcePath = f['force-path'] || null;
-  return o;
-}
-
 function planSource(f) {
   if (f.replan) return null;
   return db().prepare("SELECT * FROM scans WHERE kind='scan' AND plan_json IS NOT NULL ORDER BY id DESC LIMIT 1").get() || null;
 }
 
-function createScan(f, base, profile) {
-  const prev = planSource(f);
-  const commit = git(['rev-parse', f.commit || 'HEAD']).trim();
-  const opts = buildOpts(f, base);
+/**
+ * New scan of a registered profile: inventory, plan (reused, adopted from a batch leader, or left to
+ * the planner), packing. `planFrom`: a batch leader whose planner has not run yet — this scan gets no
+ * chunks until it adopts the leader's plan (see adoptPlan). Returns {scan, needPlan, lines}.
+ */
+function createScan(f, opts, prof, { commit, label = null, planFrom = null, planJson = null, planJsonFrom = 'the repeated scan', runExtra = {} } = {}) {
+  if (planFrom) runExtra = { ...runExtra, planFrom };
+  const prev = planFrom || planJson ? null : planSource(f);
+  if (planFrom) opts.planFrom = planFrom;
   const d = db();
   const scan = tx(() => {
-    const r = d.prepare(`INSERT INTO scans(commit_sha,profile_name,profile_hash,options_json,status,created,updated)
-      VALUES(?,?,?,?,'active',?,?)`).run(commit, profile.name, profile.hash, JSON.stringify(opts), now(), now());
+    const r = d.prepare(`INSERT INTO scans(commit_sha,profile_name,profile_hash,profile_id,label,options_json,run_json,status,created,updated)
+      VALUES(?,?,?,?,?,?,?,'active',?,?)`).run(commit, prof.name, prof.hash, prof.id, label, JSON.stringify(opts),
+      JSON.stringify(runRecord(prof, runExtra)), now(), now());
     const s = getScan(r.lastInsertRowid);
-    const stats = inventory(s, opts, profile.hash);
+    const stats = inventory(s, opts, prof.hash);
     const dh = dirsetHash(s.id);
     d.prepare('UPDATE scans SET dirset_hash=? WHERE id=?').run(dh, s.id);
     s.dirset_hash = dh;
@@ -811,68 +1036,181 @@ function createScan(f, base, profile) {
     return s;
   });
   writeTree(scan);
-  let needPlan = !opts.noPlan;
-  let reused = false;
-  if (prev && prev.dirset_hash === scan.dirset_hash) {
-    try {
-      tx(() => applyPlan(scan, JSON.parse(prev.plan_json)));
-      needPlan = false;
-      reused = true;
-    } catch (e) {
-      if (!(e instanceof PlanError)) throw e;
-    }
-  }
+  let needPlan = !opts.noPlan && !planFrom;
+  let reused = null;
+  const tryPlan = (pj, from) => {
+    try { tx(() => applyPlan(scan, JSON.parse(pj))); needPlan = false; reused = from; } catch (e) { if (!(e instanceof PlanError)) throw e; }
+  };
+  if (!opts.noPlan && planJson) tryPlan(planJson, planJsonFrom);
+  else if (!opts.noPlan && prev && prev.dirset_hash === scan.dirset_hash) tryPlan(prev.plan_json, `scan ${prev.id} (directory layout unchanged; --replan to redo)`);
   const s2 = getScan(scan.id);
-  const pk = tx(() => pack(s2));
-  if (pk.chunks === 0) setScanStatus(scan.id, 'done');
+  const pk = planFrom ? { chunks: 0, files: 0, bytes: 0 } : tx(() => pack(s2));
+  if (!planFrom && pk.chunks === 0) setScanStatus(scan.id, 'done');
   const st = scan.stats;
   const excl = Object.entries(st.excluded).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, v]) => `${k}:${v}`).join(' ');
   const unk = Object.entries(st.unknownExt).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, v]) => `${k}(${v})`).join(' ');
-  out(`scan ${scan.id} @ ${commit.slice(0, 12)} profile=${profile.name}`);
-  const pre = needPlan && pk.files > 0 ? ' (before planner; it may include/exclude files and regroup)' : '';
-  out(`to review: ${pk.files} files, ${kb(pk.bytes)} in ${pk.chunks} chunks${pre}; unchanged (skipped): ${st.unchanged}`);
-  out(`excluded: ${excl || 'none'}`);
-  out(`chunk size: ${opts.chunkKb}KB (${opts.chunkSource || 'default'})`);
-  out(opts.runner ? `runner: ${opts.runner}${opts.model ? ` model ${opts.model}` : ' (its default model)'} — ${opts.runnerWhy}` : `runner: none — ${opts.runnerWhy}`);
-  if (!opts.model && opts.chunkSource !== 'flag') {
-    out('INIT this repo has no reviewer model chosen — run `init start` to compare models and pick one (reviewers inherit the session model meanwhile)');
-  } else if (opts.model && !cfgGet(`chunk_kb:${opts.model}`) && opts.chunkSource !== 'flag') {
-    out(`CALIBRATE model ${opts.model} has no chunk-size calibration for this repo — run \`calibrate start --model ${opts.model}\` first`);
+  const lines = [];
+  lines.push(`scan ${scan.id}${label ? ` (${label})` : ''} @ ${commit.slice(0, 12)} profile=${profileLabel(prof)} #${prof.id} ${prof.hash}`);
+  if (planFrom) lines.push(`to review: ${st.code} files, ${kb(st.codeBytes)} before planning; unchanged (skipped): ${st.unchanged} — waits for the plan of scan ${planFrom}`);
+  else {
+    const pre = needPlan && pk.files > 0 ? ' (before planner; it may include/exclude files and regroup)' : '';
+    lines.push(`to review: ${pk.files} files, ${kb(pk.bytes)} in ${pk.chunks} chunks${pre}; unchanged (skipped): ${st.unchanged}`);
   }
-  if (unk) out(`unknown extensions (excluded; widen with --include): ${unk}`);
-  if (reused) out(`planner: reused plan from scan ${prev.id} (directory layout unchanged; --replan to redo)`);
-  out(nextLine(scan, needPlan && pk.files > 0));
+  lines.push(`excluded: ${excl || 'none'}`);
+  lines.push(`chunk size: ${opts.chunkKb}KB; runner: ${opts.runner || 'none'}${opts.model ? ` model ${opts.model}` : ''}`);
+  const rr = JSON.parse(getScan(scan.id).run_json);
+  if (rr.runner && !rr.runner.bin) lines.push(`warning: the ${rr.runner.name} CLI is not on PATH here`);
+  for (const x of rr.reviewerDrift || []) lines.push(`note: plugin changed since the profile was registered: ${x}`);
+  if (unk) lines.push(`unknown extensions (excluded; widen with a profile --include): ${unk}`);
+  if (reused) lines.push(`planner: reused plan from ${reused}`);
+  return { scan: getScan(scan.id), needPlan: needPlan && pk.files > 0, lines };
+}
+
+/** Whether a batch leader's planning is over (plan applied, failed, or skipped). */
+function planSettled(lead) {
+  if (lead.plan_json || lead.status !== 'active') return true;
+  if (JSON.parse(lead.options_json).noPlan) return true;
+  if (/^pid:/.test(lead.workflow_task || '') && pidAlive(lead.workflow_task) === false) return true; // its runner exited without a plan
+  return !!db().prepare("SELECT 1 FROM chunks WHERE scan_id=? AND state IN ('claimed','done') LIMIT 1").get(lead.id);
+}
+
+/** A batch follower takes its leader's plan (or none, if the leader has none) and gets its chunks. */
+function adoptPlan(scanId) {
+  return tx((d) => {
+    const cur = getScan(scanId);
+    const o = JSON.parse(cur.options_json);
+    if (!o.planFrom || o.planAdopted) return false;
+    const lead = getScan(o.planFrom);
+    if (lead.plan_json) { try { applyPlan(cur, JSON.parse(lead.plan_json)); } catch (e) { if (!(e instanceof PlanError)) throw e; } }
+    o.planAdopted = lead.plan_json ? lead.id : 'none';
+    d.prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(o), scanId);
+    const pk = pack(getScan(scanId));
+    if (!pk.chunks && !d.prepare("SELECT 1 FROM files WHERE scan_id=? AND state IN ('pending','in_progress','partial') LIMIT 1").get(scanId)) setScanStatus(scanId, 'done');
+    return true;
+  });
+}
+function adoptFollowers(leaderId) {
+  for (const s of db().prepare("SELECT id, options_json FROM scans WHERE kind='scan' AND status IN ('active','stopped')").all()) {
+    const o = JSON.parse(s.options_json);
+    if (o.planFrom === leaderId && !o.planAdopted) adoptPlan(s.id);
+  }
+}
+
+/**
+ * Create one scan per item. Scans that use the planner share one planner run: the leader (a claude
+ * scan if any, so it can plan inside the Workflow) plans, the others adopt its plan, so every scan of
+ * the batch reviews the same code set. Prints each scan, a RUN line per scan, and one NEXT for the
+ * Workflow covering the claude scans (`follow` = further scans its reviewer lanes serve).
+ */
+function createBatch(items, f) {
+  const labels = listFlag(f.label) || [];
+  const labelFor = (i, it) => (labels.length === items.length ? labels[i] : labels.length === 1 ? (items.length > 1 ? `${labels[0]}-${it.prof.name}` : labels[0]) : null);
+  if (labels.length > 1 && labels.length !== items.length) die(`--label: give one label, or one per profile (${items.length})`);
+  if (labels.some((l) => /^\d+$/.test(l))) die('--label: a label cannot be a number (numbers are scan ids)');
+  const isClaude = (it) => !it.opts.runner || it.opts.runner === 'claude';
+  const planned = items.filter((it) => !it.opts.noPlan);
+  const leadIt = planned.find(isClaude) || planned[0] || null;
+  const order = leadIt ? [leadIt, ...items.filter((it) => it !== leadIt)] : items;
+  const res = [];
+  let lead = null;
+  for (const it of order) {
+    const i = items.indexOf(it);
+    let planFrom = null;
+    if (lead && it !== leadIt && !it.opts.noPlan && it.commit === leadIt.commit) {
+      planFrom = lead.needPlan ? lead.scan.id : null;
+    }
+    // a leader that reused a plan already has it: followers adopt it right away
+    const planJson = lead && it !== leadIt && !planFrom && !it.opts.noPlan && lead.scan.plan_json ? lead.scan.plan_json : null;
+    const r = createScan(f, it.opts, it.prof, { commit: it.commit, label: labelFor(i, it), planFrom, planJson, planJsonFrom: lead ? `scan ${lead.scan.id} (batch leader)` : null });
+    r.it = it;
+    if (it === leadIt) lead = r;
+    res.push(r);
+  }
+  for (const r of res) r.lines.forEach((l) => out(l));
+  if (!res.length) return;
+  const live = res.filter((r) => r.scan.status === 'active');
+  for (const r of live) out(runLine(r.scan) + (r.scan.id === (lead && lead.scan.id) && res.length > 1 && lead.needPlan ? '   (plans for the batch)' : ''));
+  const claude = live.filter((r) => isClaude(r.it));
+  const main = (lead && claude.includes(lead) ? lead : claude[0]) || live[0] || res[0];
+  const o = nextObj(main.scan, main.needPlan);
+  const follow = claude.filter((r) => r !== main).map((r) => {
+    const x = nextObj(r.scan, false);
+    if (JSON.parse(r.scan.options_json).planFrom) x.workers = Math.max(x.workers, o.workers, 1);
+    return { scanId: x.scanId, workers: x.workers, ...(x.model ? { model: x.model } : {}), ...(x.lanes ? { lanes: x.lanes } : {}) };
+  });
+  if (follow.length) o.follow = follow;
+  out('NEXT ' + JSON.stringify(o));
+}
+
+/** Profiles a start names, else the repo default; prints INIT and exits when there is none. */
+function startProfiles(f) {
+  const refs = listFlag(f.profile);
+  if (refs && refs.length) {
+    const ps = refs.map(runnableProfile);
+    const names = ps.map((p) => p.name);
+    const dup = names.find((n, i) => names.indexOf(n) !== i);
+    if (dup) die(`profile ${dup} given twice — one scan per profile name at a time`);
+    return ps;
+  }
+  const def = cfgGet('default_profile');
+  if (def && findProfile(def)) return [runnableProfile(def)];
+  out(cfgGet('default_model')
+    ? `INIT no default review profile — register one: \`profile register default --prompt default --model default\` (or \`init pick <model>\`), or pass --profile <name>`
+    : 'INIT this repo has no review profile — run `init start` to compare models and pick one (`init pick` registers the default profile), or `profile register <name> --prompt <prompt> --model <runner:model>` and pass --profile <name>');
+  process.exit(2);
 }
 
 function cmdStart(a) {
-  const ex = openScan();
-  if (ex && !a.f.new) {
-    die(`scan ${ex.id} is ${ex.status} at ${ex.commit_sha.slice(0, 12)} — use \`continue\`, \`restart\`, or \`start --new\``);
+  rejectSpecFlags(a.f, 'start');
+  const profs = startProfiles(a.f);
+  const commit = git(['rev-parse', a.f.commit || 'HEAD']).trim();
+  const exQ = db().prepare("SELECT * FROM scans WHERE kind='scan' AND profile_name=? AND status IN ('active','stopped') ORDER BY id DESC LIMIT 1");
+  for (const p of profs) {
+    const ex = exQ.get(p.name);
+    if (ex && !a.f.new) die(`scan ${ex.id} of profile ${p.name} is ${ex.status} at ${ex.commit_sha.slice(0, 12)} — \`continue --scan ${ex.id}\`, \`restart --profile ${p.name}\`, or \`start --new\``);
   }
-  if (ex) setScanStatus(ex.id, 'superseded');
-  const profile = profileFromFlags(a.f);
-  createScan(a.f, {}, profile);
+  const items = profs.map((p) => ({ prof: p, commit, opts: optsFromProfile(p, a.f) })); // validates flags first
+  for (const p of profs) { const ex = exQ.get(p.name); if (ex) setScanStatus(ex.id, 'superseded'); }
+  createBatch(items, a.f);
 }
 
 function cmdRestart(a) {
-  const prev = openScan() || latestScan(false);
-  if (prev && ['active', 'stopped'].includes(prev.status)) setScanStatus(prev.id, 'superseded');
-  const base = prev ? JSON.parse(prev.options_json) : {};
-  delete base.force; delete base.forcePath;
-  if (!a.f.model && cfgGet('default_model') && base.model !== cfgGet('default_model')) {
-    base.model = cfgGet('default_model'); // picked at init after the previous scan ran
-    delete base.runner; // the new model decides the runner
-    if (base.chunkSource !== 'flag') delete base.chunkKb;
+  rejectSpecFlags(a.f, 'restart');
+  const d = db();
+  const latestOf = (name) => d.prepare("SELECT * FROM scans WHERE kind='scan' AND profile_name=? ORDER BY id DESC LIMIT 1").get(name);
+  let pairs;
+  if (a.f.all) {
+    const names = [...new Set(openScans().map((s) => s.profile_name))];
+    if (!names.length) die('no open scans to restart');
+    pairs = names.map((n) => ({ prev: latestOf(n), prof: runnableProfile(n) }));
+  } else if (a.f.profile) {
+    pairs = listFlag(a.f.profile).map((ref) => { const prof = runnableProfile(ref); return { prev: latestOf(prof.name), prof }; });
+  } else {
+    const prev = pickScan(a.f) || latestScan(false);
+    if (!prev) die('no scan to restart — `start --profile <name>`');
+    pairs = [{ prev, prof: runnableProfile(prev.profile_name) }];
   }
-  // a new scope replaces the old one as a whole; --reset-scope clears it
-  if (a.f.only || a.f.include || a.f.exclude || a.f['reset-scope']) { delete base.only; delete base.include; delete base.exclude; }
-  const profile = (a.f.profile || a.f['prompt-file']) ? profileFromFlags(a.f)
-    : prev ? resolveProfile(prev.profile_name) : resolveProfile('default');
-  createScan(a.f, base, profile);
+  const commit = git(['rev-parse', 'HEAD']).trim();
+  const items = pairs.map(({ prev, prof }) => ({ prof, commit, opts: optsFromProfile(prof, a.f, prev ? JSON.parse(prev.options_json) : {}) }));
+  for (const { prev } of pairs) if (prev && ['active', 'stopped'].includes(prev.status)) setScanStatus(prev.id, 'superseded');
+  createBatch(items, a.f);
+}
+
+/** Put a repeated scan's own chunks back in the queue (it is never repacked: chunks stay as copied). */
+function reviveReplay(scanId) {
+  tx((d) => {
+    d.prepare("UPDATE chunks SET state='pending', claimed_at=NULL WHERE scan_id=? AND state IN ('claimed','void')").run(scanId);
+    d.prepare("UPDATE files SET state='pending', slices_done='[]' WHERE scan_id=? AND state IN ('in_progress','partial')").run(scanId);
+  });
+  const d = db();
+  const r = d.prepare("SELECT COUNT(*) n, COALESCE(SUM(bytes),0) b FROM chunks WHERE scan_id=? AND state='pending'").get(scanId);
+  const files = d.prepare("SELECT COUNT(*) n FROM files WHERE scan_id=? AND state='pending'").get(scanId).n;
+  return { chunks: r.n, bytes: r.b, files };
 }
 
 function cmdContinue(a) {
-  const scan = a.f.scan ? getScan(a.f.scan) : openScan();
+  rejectSpecFlags(a.f, 'continue');
+  const scan = pickScan(a.f);
   if (!scan) die('no active or stopped scan — use `start` or `restart`');
   if (!['active', 'stopped'].includes(scan.status)) die(`scan ${scan.id} is ${scan.status}`);
   const head = git(['rev-parse', 'HEAD']).trim();
@@ -894,44 +1232,109 @@ function cmdContinue(a) {
     out('NEXT ' + JSON.stringify({ cli: CLI, root: repoRoot(), scanId: scan.id, plan: false, workers: 0 }));
     return;
   }
-  if (a.f.model || a.f['chunk-kb'] || a.f.runner) {
-    // pick up a calibration finished after the scan was created (or an explicit size)
-    const opts = buildOpts(a.f, JSON.parse(scan.options_json));
-    opts.force = JSON.parse(scan.options_json).force;
-    opts.forcePath = JSON.parse(scan.options_json).forcePath;
-    db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(opts), scan.id);
-    out(`chunk size: ${opts.chunkKb}KB (${opts.chunkSource})`);
-    out(`runner: ${opts.runner || 'none'}${opts.model ? ` model ${opts.model}` : ''} — ${opts.runnerWhy}`);
-  }
-  const pk = tx(() => pack(getScan(scan.id)));
-  const unplanned = !scan.plan_json && !JSON.parse(scan.options_json).noPlan;
-  out(`scan ${scan.id} @ ${scan.commit_sha.slice(0, 12)}: ${pk.files} files (${kb(pk.bytes)}) left in ${pk.chunks} chunks`);
+  const so = JSON.parse(scan.options_json);
+  if (so.planFrom && !so.planAdopted) adoptPlan(scan.id);
+  const s1 = getScan(scan.id);
+  const pk = JSON.parse(s1.options_json).replay ? reviveReplay(scan.id) : tx(() => pack(s1));
+  const unplanned = !s1.plan_json && !so.noPlan && !so.planFrom && !so.replay;
+  out(`scan ${scan.id} @ ${scan.commit_sha.slice(0, 12)} profile=${scan.profile_name}: ${pk.files} files (${kb(pk.bytes)}) left in ${pk.chunks} chunks`);
   if (head !== scan.commit_sha) out(`note: HEAD is ${head.slice(0, 12)}; this scan reviews ${scan.commit_sha.slice(0, 12)} (use \`restart\` for HEAD)`);
-  if (pk.chunks === 0) { setScanStatus(scan.id, 'done'); out('nothing left — scan marked done'); }
-  out(nextLine(scan, unplanned && pk.files > 0));
+  if (pk.chunks === 0 && !unplanned) { setScanStatus(scan.id, 'done'); out('nothing left — scan marked done'); }
+  out(nextLine(getScan(scan.id), unplanned && pk.files > 0));
 }
 
 function cmdStop(a) {
-  const scan = a.f.scan ? getScan(a.f.scan) : openScan();
-  if (!scan) die('no active scan');
-  tx((d) => {
-    setScanStatus(scan.id, 'stopped');
-    if (a.f.now) {
-      d.prepare("UPDATE chunks SET state='void' WHERE scan_id=? AND state='claimed'").run(scan.id);
-      d.prepare("UPDATE files SET state=CASE WHEN slices_done='[]' THEN 'pending' ELSE 'partial' END WHERE scan_id=? AND state='in_progress'").run(scan.id);
+  const scans = a.f.all ? openScans() : [pickScan(a.f)].filter(Boolean);
+  if (!scans.length) die('no active scan');
+  // --close ends a scan for good (it is no longer open: `continue` and the scan pickers skip it)
+  const now_ = a.f.now || a.f.close;
+  for (const scan of scans) {
+    tx((d) => {
+      setScanStatus(scan.id, a.f.close ? 'closed' : 'stopped');
+      if (now_) {
+        d.prepare("UPDATE chunks SET state='void' WHERE scan_id=? AND state='claimed'").run(scan.id);
+        d.prepare("UPDATE files SET state=CASE WHEN slices_done='[]' THEN 'pending' ELSE 'partial' END WHERE scan_id=? AND state='in_progress'").run(scan.id);
+      }
+    });
+    out(`scan ${scan.id} ${a.f.close ? 'closed' : 'stopped'}; workers stop claiming new chunks${now_ ? ', claimed chunks released' : ' and in-flight chunks finish'}`);
+    if (now_ && scan.workflow_task) {
+      if (/^pid:/.test(scan.workflow_task)) out(killRunner(scan.workflow_task) ? `runner ${scan.workflow_task} killed` : `runner ${scan.workflow_task} was not running`);
+      else out(`TASK ${scan.workflow_task}`);
     }
-  });
-  out(`scan ${scan.id} stopped; workers stop claiming new chunks${a.f.now ? ', claimed chunks released' : ' and in-flight chunks finish'}`);
-  if (a.f.now && scan.workflow_task) {
-    if (/^pid:/.test(scan.workflow_task)) out(killRunner(scan.workflow_task) ? `runner ${scan.workflow_task} killed` : `runner ${scan.workflow_task} was not running`);
-    else out(`TASK ${scan.workflow_task}`);
   }
+}
+
+/**
+ * Repeat a scan exactly: same registered profile, same commit, same plan, the same chunks in the
+ * same order with the same "already dismissed" context, ledger ignored. At another commit
+ * (`--commit <rev>`), the plan is reused and files are re-chunked (blobs differ).
+ */
+function cmdRepeat(a) {
+  rejectSpecFlags(a.f, 'repeat');
+  if (!a.pos[0]) die('usage: repeat <scan id|label|profile> [--commit same|<rev>] [--label l] [--max-usd N] [--concurrency N]');
+  const src = scanByRef(a.pos[0], { done: true });
+  if (src.kind !== 'scan') die(`scan ${src.id} is a calibration round`);
+  const prof = runnableProfile(`#${src.profile_id}`);
+  const so = JSON.parse(src.options_json);
+  const opts = optsFromProfile(prof, a.f, so);
+  opts.force = true;
+  opts.repeatOf = src.id;
+  const commit = !a.f.commit || a.f.commit === 'same' ? src.commit_sha : git(['rev-parse', a.f.commit]).trim();
+  const label = (listFlag(a.f.label) || [])[0] || null;
+  const srcRun = src.run_json ? JSON.parse(src.run_json) : null;
+  const d = db();
+  let scan;
+  if (commit === src.commit_sha) {
+    opts.replay = true;
+    scan = tx(() => {
+      const r = d.prepare(`INSERT INTO scans(commit_sha,profile_name,profile_hash,profile_id,label,options_json,run_json,plan_json,dirset_hash,status,created,updated)
+        VALUES(?,?,?,?,?,?,?,?,?,'active',?,?)`).run(commit, prof.name, prof.hash, prof.id, label, JSON.stringify(opts),
+        JSON.stringify(runRecord(prof, { repeatOf: src.id })), src.plan_json, src.dirset_hash, now(), now());
+      const id = Number(r.lastInsertRowid);
+      const chunks = d.prepare("SELECT * FROM chunks WHERE scan_id=? AND state!='void' ORDER BY ord, id").all(src.id);
+      const inChunk = new Set(chunks.flatMap((c) => JSON.parse(c.items_json).map((it) => it.path)));
+      for (const f of d.prepare('SELECT * FROM files WHERE scan_id=?').all(src.id)) {
+        const state = inChunk.has(f.path) ? 'pending' : f.state === 'unchanged' || f.state === 'excluded' ? f.state : 'excluded';
+        const reason = inChunk.has(f.path) ? null : state === 'excluded' && f.state !== 'excluded' ? `repeat: not reviewed in scan ${src.id}` : f.reason;
+        d.prepare('INSERT INTO files(scan_id,path,blob_sha,mode,bytes,lang,unit,state,reason) VALUES(?,?,?,?,?,?,?,?,?)')
+          .run(id, f.path, f.blob_sha, f.mode, f.bytes, f.lang, f.unit, state, reason);
+      }
+      const ins = d.prepare("INSERT INTO chunks(scan_id,ord,unit,items_json,bytes,state,context_json) VALUES(?,?,?,?,?,'pending',?)");
+      chunks.forEach((c, i) => ins.run(id, i, c.unit, c.items_json, c.bytes, c.context_json));
+      if (!chunks.length) setScanStatus(id, 'done');
+      return getScan(id);
+    });
+    writeTree(scan);
+    const n = pendingChunks(scan.id);
+    out(`scan ${scan.id}${label ? ` (${label})` : ''} repeats scan ${src.id} @ ${commit.slice(0, 12)} profile=${profileLabel(prof)} #${prof.id} ${prof.hash}`);
+    out(`to review: the same ${n} chunk(s) in the same order, with the same plan and dismissed-findings context`);
+  } else {
+    const r = createScan(a.f, opts, prof, { commit, label, planJson: src.plan_json, runExtra: { repeatOf: src.id } });
+    r.lines.forEach((l) => out(l));
+    scan = r.scan;
+    out(`repeats scan ${src.id} at another commit: same profile and plan, chunks re-packed for the changed files`);
+  }
+  const cur = JSON.parse(scan.run_json);
+  const drift = [];
+  if (srcRun) {
+    const pick = (x, p) => p.split('.').reduce((v, k) => (v == null ? v : v[k]), x);
+    for (const [k, what] of [['runner.version', 'runner CLI version'], ['runner.bin', 'runner binary'], ['plugin.version', 'plugin version'],
+      ['plugin.sha', 'plugin commit'], ['node', 'node version']]) {
+      const x = pick(srcRun, k), y = pick(cur, k);
+      if (x != null && JSON.stringify(x) !== JSON.stringify(y)) drift.push(`${what}: ${x} → ${y ?? 'none'}`);
+    }
+    if (JSON.stringify(srcRun.runner && srcRun.runner.argv) !== JSON.stringify(cur.runner && cur.runner.argv)) drift.push('runner command line differs');
+  } else drift.push(`scan ${src.id} has no run record (made before review profiles were registered)`);
+  for (const x of drift) out(`drift: ${x}`);
+  out('note: model sampling is not deterministic — identical runs can still report different findings');
+  out(nextLine(getScan(scan.id), false));
 }
 
 function cmdSetRun(a) {
   const [id, task] = a.pos;
   if (!id || !task) die('usage: set-run <scanId> <taskId>');
-  db().prepare('UPDATE scans SET workflow_task=?, updated=? WHERE id=?').run(task, now(), Number(id));
+  // one Workflow can serve several scans of a batch (its NEXT `follow` list): `set-run 7,8,9 <task>`
+  for (const x of String(id).split(',').filter(Boolean)) db().prepare('UPDATE scans SET workflow_task=?, updated=? WHERE id=?').run(task, now(), Number(x));
   out('ok');
 }
 
@@ -964,12 +1367,11 @@ Every glob must match at least one tracked file; apply-plan rejects the plan oth
 `;
 
 function cmdPlanContext(a) {
-  const scan = getScan(a.pos[0] || (openScan() || latestScan()).id);
+  const scan = a.pos[0] ? getScan(a.pos[0]) : scanArg(a.f);
   const tree = fs.readFileSync(path.join(scanDir(scan.id), 'tree.txt'), 'utf8');
-  const prof = db().prepare('SELECT text FROM profiles WHERE name=?').get(scan.profile_name);
   out(`== SCAN ${scan.id} @ ${scan.commit_sha} (repo ${repoRoot()}) ==`);
   out('== REVIEW PROFILE (what reviewers will look for) ==');
-  out((prof ? prof.text : '').trim().split('\n').slice(0, 25).join('\n'));
+  out(scanPromptText(scan).split('\n').slice(0, 25).join('\n'));
   out('== DIRECTORY DIGEST (code = files currently classified as code) ==');
   out(tree);
   out('== INSTRUCTIONS ==');
@@ -1015,7 +1417,7 @@ function applyPlan(scan, plan) {
 class PlanError extends Error {}
 
 function cmdApplyPlan(a) {
-  const scan = getScan(a.pos[0] || (openScan() || latestScan()).id);
+  const scan = a.pos[0] ? getScan(a.pos[0]) : scanArg(a.f);
   const src = a.f.file ? fs.readFileSync(a.f.file, 'utf8') : fs.readFileSync(0, 'utf8');
   let plan;
   try { plan = JSON.parse(src); } catch (e) { die(`plan is not valid JSON: ${e.message}`); }
@@ -1035,6 +1437,8 @@ function cmdApplyPlan(a) {
   }
   out(`plan applied: +${res.added} included, -${res.removed} excluded, ${(plan.units || []).length} units`);
   out(`chunks=${res.chunks} files=${res.files} bytes=${kb(res.bytes)}`);
+  // scans started in the same batch wait for this plan
+  if (scan.kind === 'scan') adoptFollowers(scan.id);
 }
 
 // -------------------------------------------------------------- claim/submit
@@ -1047,7 +1451,7 @@ function worktreeMatches(p, blob) {
 }
 
 function cmdClaim(a) {
-  const scanId = Number(a.pos[0] || (openScan() || {}).id);
+  const scanId = Number(a.pos[0] || (pickScan(a.f) || {}).id);
   if (!scanId) { out('NONE'); return; }
   const pre = db().prepare('SELECT * FROM scans WHERE id=?').get(scanId);
   if (pre && pre.status === 'active') {
@@ -1058,6 +1462,9 @@ function cmdClaim(a) {
       out(`NONE (${why})`);
       return;
     }
+    // a batch follower whose leader has planned (or given up planning) takes that plan now
+    const po = JSON.parse(pre.options_json);
+    if (po.planFrom && !po.planAdopted) adoptPlan(scanId);
   }
   const got = tx((d) => {
     const scan = d.prepare('SELECT * FROM scans WHERE id=?').get(scanId);
@@ -1072,56 +1479,77 @@ function cmdClaim(a) {
   });
   if (!got) { out('NONE'); return; }
   const { scan, c, items } = got;
-  const prof = db().prepare('SELECT text FROM profiles WHERE name=?').get(scan.profile_name);
+  const spec = scanSpec(scan);
+  const so = JSON.parse(scan.options_json);
+  // the whole prompt is assembled first: its hash and its non-code context are recorded with the chunk
+  const buf = [];
+  const emitL = (s) => buf.push(s);
   const plan = scan.plan_json ? JSON.parse(scan.plan_json) : null;
   const unit = plan && (plan.units || []).find((u) => u.name === c.unit);
   const blobs = new Map(db().prepare(`SELECT path,blob_sha FROM files WHERE scan_id=? AND path IN (${items.map(() => '?').join(',')})`)
     .all(scanId, ...items.map((i) => i.path)).map((r) => [r.path, r.blob_sha]));
-  out(`CHUNK ${c.id} (scan ${scanId}, unit ${c.unit}, ${kb(c.bytes)}) commit ${scan.commit_sha}`);
-  out('== REVIEW PROFILE ==');
-  out(prof ? prof.text.trim() : '(default)');
-  if (unit && unit.hint) { out('== SUBSYSTEM FOCUS =='); out(unit.hint); }
+  emitL(`CHUNK ${c.id} (scan ${scanId}, unit ${c.unit}, ${kb(c.bytes)}) commit ${scan.commit_sha}`);
+  emitL('== REVIEW PROFILE ==');
+  emitL(scanPromptText(scan) || '(default)');
+  if (unit && unit.hint) { emitL('== SUBSYSTEM FOCUS =='); emitL(unit.hint); }
   // findings already judged not to be bugs (or not worth fixing) for these files: tell the reviewer, so a
-  // rescan does not report them again under new wording unless the code has really changed
-  const paths = [...new Set(items.map((i) => i.path))];
-  const dismissed = db().prepare(`SELECT path, line, title, triage, note FROM findings WHERE triage IN ('false_positive','wontfix')
-    AND gone_scan IS NULL AND path IN (${paths.map(() => '?').join(',')}) ORDER BY path, updated DESC`).all(...paths);
-  // the human reason, not the bookkeeping lines added by sync/rescans
-  const reasonOf = (note) => String(note || '').split('\n').filter((l) => l && !/ closed as | reopened$|^reappeared in scan /.test(l)).pop() || '';
-  const perFile = new Map();
-  const dl = [];
-  for (const x of dismissed) {
-    const n = (perFile.get(x.path) || 0) + 1;
-    perFile.set(x.path, n);
-    if (n > DISMISSED_PER_FILE) continue;
-    const why = reasonOf(x.note);
-    dl.push(`- ${x.path}:${x.line || '?'} [${x.triage}] ${x.title.slice(0, 160)}${why ? ` — ${why.slice(0, 200)}` : ''}`);
-  }
+  // rescan does not report them again under new wording unless the code has really changed. A repeated
+  // scan replays exactly the list its original chunk had.
   let dismissedText = '';
-  if (dl.length) {
-    const hidden = dismissed.length - dl.length;
-    dismissedText = ['== ALREADY DISMISSED FOR THESE FILES (do not report again unless the code changed so the reason no longer holds) ==',
-      ...dl, ...(hidden ? [`(${hidden} older dismissed finding(s) not shown)`] : [])].join('\n');
-    out(dismissedText);
+  const prevCtx = c.context_json ? JSON.parse(c.context_json) : null;
+  if (so.replay && prevCtx) dismissedText = prevCtx.dismissed || '';
+  else if (!spec || spec.dismissedContext !== false) {
+    const paths = [...new Set(items.map((i) => i.path))];
+    const dismissed = db().prepare(`SELECT path, line, title, triage, note FROM findings WHERE triage IN ('false_positive','wontfix')
+      AND gone_scan IS NULL AND path IN (${paths.map(() => '?').join(',')}) ORDER BY path, updated DESC`).all(...paths);
+    // the human reason, not the bookkeeping lines added by sync/rescans
+    const reasonOf = (note) => String(note || '').split('\n').filter((l) => l && !/ closed as | reopened$|^reappeared in scan /.test(l)).pop() || '';
+    const perFile = new Map();
+    const dl = [];
+    for (const x of dismissed) {
+      const n = (perFile.get(x.path) || 0) + 1;
+      perFile.set(x.path, n);
+      if (n > DISMISSED_PER_FILE) continue;
+      const why = reasonOf(x.note);
+      dl.push(`- ${x.path}:${x.line || '?'} [${x.triage}] ${x.title.slice(0, 160)}${why ? ` — ${why.slice(0, 200)}` : ''}`);
+    }
+    if (dl.length) {
+      const hidden = dismissed.length - dl.length;
+      dismissedText = ['== ALREADY DISMISSED FOR THESE FILES (do not report again unless the code changed so the reason no longer holds) ==',
+        ...dl, ...(hidden ? [`(${hidden} older dismissed finding(s) not shown)`] : [])].join('\n');
+    }
   }
+  if (dismissedText) emitL(dismissedText);
   if (a.f.rules) {
     // the default agent (fallback when the plugin agent type is not loaded) has no reviewer instructions;
-    // a headless runner agent (--reply) gets the variant that answers instead of submitting
-    const def = path.join(PLUGIN_ROOT, a.f.reply ? 'prompts' : 'agents', 'reviewer.md');
-    if (fs.existsSync(def)) { out('== REVIEWER INSTRUCTIONS =='); out(fs.readFileSync(def, 'utf8').replace(/^---[\s\S]*?---\n/, '').trim()); }
+    // a headless runner agent (--reply) gets the variant that answers instead of submitting. A registered
+    // profile carries its own copy, so a plugin upgrade does not change a profile's review.
+    const frozen = spec && spec.reviewer ? (a.f.reply ? spec.reviewer.reply : spec.reviewer.agent) : null;
+    const text = frozen || pluginText(a.f.reply ? 'prompts/reviewer.md' : 'agents/reviewer.md');
+    if (text) { emitL('== REVIEWER INSTRUCTIONS =='); emitL(text); }
   }
+  renderClaimBody(a, { scan, scanId, c, items, blobs, dismissedText, emitL });
+  const text = buf.join('\n');
+  db().prepare('UPDATE chunks SET context_json=COALESCE(?,context_json), prompt_sha=? WHERE id=?').run(
+    so.replay && prevCtx ? null : JSON.stringify({ unitHint: unit && unit.hint ? unit.hint : null, dismissed: dismissedText || null }),
+    sha1(text, 16), c.id);
+  out(text);
+}
+
+/** Code (inline or as files to read) and the submit/reply instructions of a claimed chunk. */
+function renderClaimBody(a, { scan, scanId, c, items, blobs, dismissedText, emitL }) {
   if (a.f.inline) {
     const keys = `{${items.map((it) => JSON.stringify(it.slice !== undefined ? `${it.path}#${it.slice}` : it.path) + ': [ ]').join(', ')}}`;
     const submitHelp = () => {
       if (a.f.reply) {
-        out('== REPLY (your final answer is the submission; do not run any submit command) ==');
-        out(`Reply with exactly one JSON object, nothing before or after it, every key present:\n${keys}`);
+        emitL('== REPLY (your final answer is the submission; do not run any submit command) ==');
+        emitL(`Reply with exactly one JSON object, nothing before or after it, every key present:\n${keys}`);
       } else {
-        out('== SUBMIT (once, after reviewing everything) ==');
-        out(`${cliPrefix()} submit ${scanId} ${c.id} <<'EOF'\n${keys}\nEOF`);
+        emitL('== SUBMIT (once, after reviewing everything) ==');
+        emitL(`${cliPrefix()} submit ${scanId} ${c.id} <<'EOF'\n${keys}\nEOF`);
       }
-      out('Each key maps to that file\'s confirmed findings: [] if none, else objects {"line":N,"end_line":N,"severity":"critical|high|medium|low","type":"<type>","category":"...","title":"...","detail":"...","evidence":"...","confidence":0.0-1.0}.');
-      out(`type: exactly one of\n${typeList()}\ncategory: your own short free-form tag (e.g. "nil-deref", "fd-leak").`);
+      emitL('Each key maps to that file\'s confirmed findings: [] if none, else objects {"line":N,"end_line":N,"severity":"critical|high|medium|low","type":"<type>","category":"...","title":"...","detail":"...","evidence":"...","confidence":0.0-1.0}.');
+      emitL(`type: exactly one of\n${typeList()}\ncategory: your own short free-form tag (e.g. "nil-deref", "fd-leak").`);
     };
     const texts = items.map((it) => {
       const lines = catBlob(blobs.get(it.path)).split('\n');
@@ -1133,10 +1561,10 @@ function cmdClaim(a) {
     // Bash results over ~30KB are cut off and saved to a file the agent must page through, which
     // costs turns; inline only what fits, otherwise hand over paths for parallel Read calls.
     if (numbered.length + dismissedText.length <= INLINE_MAX_CHARS) {
-      out('== CODE TO REVIEW (scanned commit; numbers are real file lines) ==');
-      out(numbered);
+      emitL('== CODE TO REVIEW (scanned commit; numbers are real file lines) ==');
+      emitL(numbered);
     } else {
-      out('== FILES TO REVIEW — issue ALL these Read calls in ONE turn (parallel); use the offset/limit shown ==');
+      emitL('== FILES TO REVIEW — issue ALL these Read calls in ONE turn (parallel); use the offset/limit shown ==');
       for (const { it, lines } of texts) {
         let p = path.join(repoRoot(), it.path);
         if (!worktreeMatches(it.path, blobs.get(it.path))) {
@@ -1145,24 +1573,24 @@ function cmdClaim(a) {
           fs.writeFileSync(p, catBlob(blobs.get(it.path)));
         }
         // one Read returns at most ~2000 lines / ~25k tokens: page long files
-        if (lines.length <= READ_PAGE_LINES) out(`Read ${p}`);
-        else for (let o = 1; o <= lines.length; o += READ_PAGE_LINES) out(`Read ${p} offset=${o} limit=${READ_PAGE_LINES}`);
+        if (lines.length <= READ_PAGE_LINES) emitL(`Read ${p}`);
+        else for (let o = 1; o <= lines.length; o += READ_PAGE_LINES) emitL(`Read ${p} offset=${o} limit=${READ_PAGE_LINES}`);
       }
     }
     submitHelp();
     return;
   }
-  out('== FILES TO REVIEW ==');
+  emitL('== FILES TO REVIEW ==');
   for (const it of items) {
     const abs = path.join(repoRoot(), it.path);
     const rng = it.slice !== undefined ? ` lines ${it.start}-${it.end} (slice ${it.slice}; overlap with neighbours is intentional)` : '';
     const how = worktreeMatches(it.path, blobs.get(it.path)) ? abs : `git -C ${shq(repoRoot())} show ${shq(`${scan.commit_sha}:${it.path}`)} | cat -n  (working tree differs from scanned commit)`;
-    out(`- ${it.path}${rng}\n    read: ${how}`);
+    emitL(`- ${it.path}${rng}\n    read: ${how}`);
   }
-  out('== SUBMIT (once per file/slice above, as soon as you finish it) ==');
-  out(`${cliPrefix()} submit ${scanId} ${c.id} --file <path> [--slice <k>] <<'EOF'\n[ {"path":"...","line":N,"end_line":N,"severity":"critical|high|medium|low","type":"<type>","category":"...","title":"...","detail":"...","evidence":"...","confidence":0.0-1.0} ]\nEOF`);
-  out('Submit [] for a file with no confirmed issues.');
-  out(`type: exactly one of\n${typeList()}\ncategory: your own short free-form tag (e.g. "nil-deref", "fd-leak").`);
+  emitL('== SUBMIT (once per file/slice above, as soon as you finish it) ==');
+  emitL(`${cliPrefix()} submit ${scanId} ${c.id} --file <path> [--slice <k>] <<'EOF'\n[ {"path":"...","line":N,"end_line":N,"severity":"critical|high|medium|low","type":"<type>","category":"...","title":"...","detail":"...","evidence":"...","confidence":0.0-1.0} ]\nEOF`);
+  emitL('Submit [] for a file with no confirmed issues.');
+  emitL(`type: exactly one of\n${typeList()}\ncategory: your own short free-form tag (e.g. "nil-deref", "fd-leak").`);
 }
 
 function normTitle(t) { return String(t).toLowerCase().replace(/[`'"]/g, '').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim(); }
@@ -1197,7 +1625,7 @@ function linesNear(a, b, pad = 3) {
 }
 
 function similarFinding(d, f, snippet, scanId) {
-  const cands = d.prepare(`SELECT id, triage, note, title, line, end_line, snippet, category FROM findings
+  const cands = d.prepare(`SELECT id, triage, note, title, line, end_line, snippet, category, profile_name FROM findings
     WHERE path=? AND id NOT IN (SELECT finding_id FROM seen WHERE scan_id=?)`).all(f.path, scanId);
   const tk = tokens(f.title);
   let best = null, bestScore = 0;
@@ -1278,6 +1706,9 @@ function cmdSubmit(a) {
   if (errs.length) die(`invalid findings:\n  ${errs.join('\n  ')}`);
   const res = tx(() => {
     const blobQ = d.prepare('SELECT blob_sha, unit FROM files WHERE scan_id=? AND path=?');
+    // what this scan itself reported; the findings row is the merged record across scans
+    const seenIns = d.prepare(`INSERT INTO seen(finding_id,scan_id,profile_id,severity,type,category,line,end_line,title,confidence)
+      VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(finding_id,scan_id) DO NOTHING`);
     let added = 0, updated = 0;
     for (const f of clean) {
       if (scan.kind === 'cal') {
@@ -1292,9 +1723,17 @@ function cmdSubmit(a) {
       if (!fr) throw new Error(`finding path ${f.path} is not a tracked file at the scanned commit`);
       const snippet = lineText(fr.blob_sha, f.line);
       const fp = sha1([f.path, f.category, normTitle(f.title), snippet || String(f.line)].join('\n'), 20);
-      const ex = d.prepare('SELECT id, triage, note FROM findings WHERE fingerprint=?').get(fp) ||
+      const ex = d.prepare('SELECT id, triage, note, profile_name FROM findings WHERE fingerprint=?').get(fp) ||
         similarFinding(d, f, snippet, scanId);
-      if (ex) {
+      if (ex && ex.profile_name !== scan.profile_name) {
+        // another review profile found the same bug: its report is kept in `seen`; the row stays as its
+        // own lineage last reported it (a fixed bug that reappears is reopened all the same)
+        const reopen = ex.triage === 'fixed';
+        d.prepare(`UPDATE findings SET last_scan=MAX(last_scan,?), gone_scan=NULL, updated=?, triage=?, note=? WHERE id=?`).run(scanId, now(),
+          reopen ? 'open' : ex.triage, reopen ? `${ex.note ? ex.note + '\n' : ''}reappeared in scan ${scanId}` : ex.note, ex.id);
+        seenIns.run(ex.id, scanId, scan.profile_id, f.severity, f.type, f.category, f.line, f.end_line, f.title, f.confidence);
+        updated++;
+      } else if (ex) {
         const reopen = ex.triage === 'fixed';
         d.prepare(`UPDATE findings SET last_scan=?, commit_sha=?, line=?, end_line=?, severity=CASE WHEN severity_locked THEN severity ELSE ? END,
           type=CASE WHEN type_locked THEN type ELSE ? END, detail=COALESCE(?,detail),
@@ -1303,14 +1742,14 @@ function cmdSubmit(a) {
           .run(scanId, scan.commit_sha, f.line, f.end_line, f.severity, f.type, f.detail, f.evidence, f.confidence, fr.blob_sha, now(),
             reopen ? 'open' : ex.triage, reopen ? `${ex.note ? ex.note + '\n' : ''}reappeared in scan ${scanId}` : ex.note,
             snippet, ex.id);
-        d.prepare('INSERT OR IGNORE INTO seen VALUES(?,?)').run(ex.id, scanId);
+        seenIns.run(ex.id, scanId, scan.profile_id, f.severity, f.type, f.category, f.line, f.end_line, f.title, f.confidence);
         updated++;
       } else {
         const r = d.prepare(`INSERT INTO findings(fingerprint,first_scan,last_scan,commit_sha,path,line,end_line,severity,category,
           title,detail,evidence,snippet,confidence,blob_sha,unit,profile_name,created,updated,type)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(fp, scanId, scanId, scan.commit_sha, f.path, f.line, f.end_line,
           f.severity, f.category, f.title, f.detail, f.evidence, snippet, f.confidence, fr.blob_sha, fr.unit, scan.profile_name, now(), now(), f.type);
-        d.prepare('INSERT OR IGNORE INTO seen VALUES(?,?)').run(r.lastInsertRowid, scanId);
+        seenIns.run(r.lastInsertRowid, scanId, scan.profile_id, f.severity, f.type, f.category, f.line, f.end_line, f.title, f.confidence);
         added++;
       }
     }
@@ -1329,9 +1768,11 @@ function cmdSubmit(a) {
     d.prepare('UPDATE files SET state=?, slices_done=?, findings_n=findings_n+?, reviewed_at=? WHERE scan_id=? AND path=?')
       .run(state, JSON.stringify(done), clean.length, now(), scanId, file);
     if (state === 'reviewed' && scan.kind !== 'cal') {
-      // re-reviewed file: earlier findings on it that this review did not report again are likely gone
+      // re-reviewed file: earlier findings on it that this review did not report again are likely gone —
+      // only those found by this profile's lineage: another review profile looks for other things
       d.prepare(`UPDATE findings SET gone_scan=? WHERE path=? AND gone_scan IS NULL AND blob_sha!=?
-        AND id NOT IN (SELECT finding_id FROM seen WHERE scan_id=?)`).run(scanId, file, fr.blob_sha, scanId);
+        AND id NOT IN (SELECT finding_id FROM seen WHERE scan_id=?)
+        AND id IN (SELECT x.finding_id FROM seen x JOIN scans s ON s.id=x.scan_id WHERE s.profile_name=?)`).run(scanId, file, fr.blob_sha, scanId, scan.profile_name);
       d.prepare('INSERT OR REPLACE INTO reviewed VALUES(?,?,?,?,?)').run(fr.blob_sha, scan.profile_hash, file, scanId, now());
     }
     // chunk done when each of its items is covered
@@ -1388,7 +1829,7 @@ function calSample(commit, opts, sampleKb) {
 function calRound(cal, sizeKb) {
   const d = db();
   const opts = { chunkKb: sizeKb, noPlan: true, model: cal.model, chunkSource: 'calibration' };
-  const prof = resolveProfile(cal.profile_name);
+  const prof = resolvePrompt(cal.profile_name);
   return tx(() => {
     const r = d.prepare(`INSERT INTO scans(commit_sha,profile_name,profile_hash,options_json,status,kind,cal_id,created,updated)
       VALUES(?,?,?,?,'active','cal',?,?,?)`).run(cal.commit_sha, prof.name, prof.hash, JSON.stringify(opts), cal.id, now(), now());
@@ -1407,18 +1848,10 @@ function calScores(cal) {
   const done = rounds.filter((r) => r.status === 'done');
   const sizeOf = new Map(done.map((r) => [r.id, r.size]));
   const fs_ = done.length ? d.prepare(`SELECT * FROM cal_findings WHERE scan_id IN (${done.map(() => '?').join(',')})`).all(...done.map((r) => r.id)) : [];
-  const parent = fs_.map((_, i) => i);
-  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
-  const tk = fs_.map((f) => tokens(f.title));
-  for (let i = 0; i < fs_.length; i++) for (let j = i + 1; j < fs_.length; j++) {
-    const a = fs_[i], b = fs_[j];
-    if (a.path !== b.path) continue;
-    const sameLine = a.snippet && a.snippet === b.snippet;
-    if (sameBug(a, b) || (sameLine && a.category === b.category)) parent[find(j)] = find(i);
-  }
+  const cid = clusterFindings(fs_);
   const clusters = new Map();
   fs_.forEach((f, i) => {
-    const c = find(i);
+    const c = cid[i];
     if (!clusters.has(c)) clusters.set(c, { w: 0, sizes: new Set() });
     const e = clusters.get(c);
     e.w = Math.max(e.w, SEV_RANK[f.severity] || 1);
@@ -1521,11 +1954,8 @@ function initCompare(initId, truth) {
   const all = [];
   for (const r of rounds) for (const f of d.prepare('SELECT * FROM cal_findings WHERE scan_id=?').all(r.scanId)) all.push({ ...f, round: r });
   // distinct issues across every model and size
-  const parent = all.map((_, i) => i);
-  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
-  for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
-    if (sameBug(all[i], all[j]) || (all[i].snippet && all[i].snippet === all[j].snippet && all[i].path === all[j].path && all[i].category === all[j].category)) parent[find(j)] = find(i);
-  }
+  const cid = clusterFindings(all);
+  const find = (i) => cid[i];
   const weight = new Map();
   all.forEach((f, i) => { const c = find(i); weight.set(c, Math.max(weight.get(c) || 0, SEV_RANK[f.severity] || 1)); });
   const totalW = [...weight.values()].reduce((x, y) => x + y, 0) || 1;
@@ -1571,7 +2001,7 @@ function cmdInit(a) {
   const d = db();
   if (sub === 'start') {
     const models = listFlag(a.f.models || INIT_DEFAULT_MODELS).map(modelId);
-    const prof = profileFromFlags(a.f);
+    const prof = promptFromFlags(a.f);
     const commit = git(['rev-parse', 'HEAD']).trim();
     const sampleKb = Number(a.f['sample-kb'] || CAL_SAMPLE_KB);
     const medium = Number(a.f.medium || DEFAULT_CHUNK_KB);
@@ -1629,6 +2059,12 @@ function cmdInit(a) {
     cfgSet('default_model', model);
     cfgSet(`chunk_kb:${model}`, size || DEFAULT_CHUNK_KB);
     out(`default reviewer model: ${model}, chunk size ${size || DEFAULT_CHUNK_KB}KB`);
+    // scans run registered profiles: the pick becomes (a new version of) the `default` profile
+    const name = a.f.name || 'default';
+    const { spec, promptSource } = specFromFlags({ prompt: a.f.prompt || 'default', model, 'chunk-kb': size || DEFAULT_CHUNK_KB });
+    const { p, created } = registerSpec(validProfileName(name), spec, { promptSource, note: `init pick ${model}` });
+    cfgSet('default_profile', name);
+    out(`review profile ${profileLabel(p)} #${p.id} ${p.hash} ${created ? 'registered' : 'already registered'} — the default for \`start\``);
     return;
   }
   if (sub === 'status') {
@@ -1647,7 +2083,7 @@ function cmdCalibrate(a) {
   if (sub === 'start') {
     const model = a.f.model ? modelId(a.f.model) : null;
     if (!model) die('calibrate start needs --model <model id> (calibration is per model)');
-    const prof = profileFromFlags(a.f);
+    const prof = promptFromFlags(a.f);
     const commit = git(['rev-parse', 'HEAD']).trim();
     const sampleKb = Number(a.f['sample-kb'] || CAL_SAMPLE_KB);
     const medium = Number(a.f.medium || DEFAULT_CHUNK_KB);
@@ -2137,7 +2573,7 @@ function scanSummary(s) {
   const sev = d.prepare(`SELECT f.severity, COUNT(*) n FROM findings f JOIN seen x ON x.finding_id=f.id WHERE x.scan_id=? GROUP BY f.severity`).all(s.id);
   const sevStr = SEVERITIES.map((k) => { const r = sev.find((x) => x.severity === k); return r ? `${k} ${r.n}` : null; }).filter(Boolean).join(', ') || 'none';
   const lines = [
-    `scan ${s.id} @ ${s.commit_sha.slice(0, 12)} [${s.status}] profile=${s.profile_name} started ${s.created.slice(0, 16).replace('T', ' ')}`,
+    `scan ${s.id}${s.label ? ` (${s.label})` : ''} @ ${s.commit_sha.slice(0, 12)} [${s.status}] profile=${scanProfileRef(s)} started ${s.created.slice(0, 16).replace('T', ' ')}`,
     `files: ${n('reviewed')}/${total} reviewed (${kb(b('reviewed'))}/${kb(b('reviewed') + b('pending') + b('in_progress') + b('partial'))}), ` +
       `${n('in_progress')} in progress, ${n('partial')} partial, ${n('pending')} pending; ${n('unchanged')} unchanged skipped, ${n('excluded')} non-code`,
     `chunks: ${cc.done || 0} done, ${cc.claimed || 0} claimed, ${cc.pending || 0} pending; planned: ${s.plan_json ? 'yes' : 'no'}`,
@@ -2148,17 +2584,26 @@ function scanSummary(s) {
 
 function cmdStatus(a) {
   const d = db();
-  if (a.f.all) {
-    for (const s of d.prepare("SELECT * FROM scans WHERE kind='scan' ORDER BY id DESC LIMIT 30").all()) {
-      const r = d.prepare("SELECT SUM(state='reviewed') rv, SUM(state IN ('pending','in_progress','partial','reviewed')) t FROM files WHERE scan_id=?").get(s.id);
-      out(`${s.id}\t${s.status}\t${s.commit_sha.slice(0, 12)}\t${s.profile_name}\t${r.rv || 0}/${r.t || 0} files\t${s.created.slice(0, 16)}`);
-    }
-    return;
+  if (a.f.all) return cmdScans({ pos: [], f: { limit: 30 } });
+  if (!a.f.scan && openScans().length > 1) {
+    // several scans run side by side: one block each
+    openScans().forEach((s, i) => {
+      if (i) out('');
+      scanSummary(s).forEach((l) => out(l));
+      runnerLines(s).forEach((l) => out(l));
+      limitLines(s).forEach((l) => out(l));
+    });
+    out('');
+    return statusTotals(d);
   }
   const s = scanArg(a.f);
   scanSummary(s).forEach((l) => out(l));
   runnerLines(s).forEach((l) => out(l));
   limitLines(s).forEach((l) => out(l));
+  statusTotals(d);
+}
+
+function statusTotals(d) {
   const g = d.prepare(`SELECT COUNT(*) n, SUM(NOT EXISTS (SELECT 1 FROM filings x WHERE x.finding_id=f.id AND x.kind!='skipped')) un
     FROM findings f WHERE triage IN ('open','confirmed') AND gone_scan IS NULL`).get();
   out(`all findings (open+confirmed): ${g.n}, unreported: ${g.un || 0}`);
@@ -2245,8 +2690,23 @@ function loadFindings(f, { defaultTriage = ['open', 'confirmed'] } = {}) {
     const ids = listFlag(f.ids).map(Number);
     where.push(`id IN (${ids.map(() => '?').join(',')})`); params.push(...ids);
   }
-  if (f.scan) { where.push('id IN (SELECT finding_id FROM seen WHERE scan_id=?)'); params.push(Number(f.scan)); }
-  else if (f.latest) { where.push('id IN (SELECT finding_id FROM seen WHERE scan_id=(SELECT MAX(id) FROM scans WHERE kind=\'scan\'))'); }
+  const scanIds = (v) => listFlag(v).map((r) => scanByRef(r).id);
+  if (f.scan) {
+    const ids = scanIds(f.scan);
+    where.push(`id IN (SELECT finding_id FROM seen WHERE scan_id IN (${ids.map(() => '?').join(',')}))`); params.push(...ids);
+  }
+  if (f.profile) {
+    // bare name = every version of it; name@N, #id or a hash = that version
+    const ors = [];
+    for (const ref of listFlag(f.profile)) {
+      if (!/[@#]/.test(ref) && db().prepare('SELECT 1 FROM review_profiles WHERE name=?').get(ref)) { ors.push('profile_id IN (SELECT id FROM review_profiles WHERE name=?)'); params.push(ref); }
+      else { ors.push('profile_id=?'); params.push(getProfile(ref).id); }
+    }
+    where.push(`id IN (SELECT finding_id FROM seen WHERE ${ors.join(' OR ')})`);
+  }
+  if (f['seen-by-all']) for (const id of scanIds(f['seen-by-all'])) { where.push('id IN (SELECT finding_id FROM seen WHERE scan_id=?)'); params.push(id); }
+  if (f['not-seen-by']) for (const id of scanIds(f['not-seen-by'])) { where.push('id NOT IN (SELECT finding_id FROM seen WHERE scan_id=?)'); params.push(id); }
+  if (f.scan) { /* handled above */ } else if (f.latest) { where.push('id IN (SELECT finding_id FROM seen WHERE scan_id=(SELECT MAX(id) FROM scans WHERE kind=\'scan\'))'); }
   if (f.gone) where.push('gone_scan IS NOT NULL');
   else if (!f['include-gone'] && !f.ids) where.push('gone_scan IS NULL');
   if (f['min-confidence']) { where.push('COALESCE(confidence,1) >= ?'); params.push(Number(f['min-confidence'])); }
@@ -2348,6 +2808,16 @@ function cmdShow(a) {
   out(`${loc(r)}  type=${r.type || 'other'}${r.type_locked ? ' (set by triage)' : ''} category=${r.category} triage=${r.triage} confirmation=${r.confirmation || 'unchecked'} confidence=${r.confidence ?? '-'} unit=${r.unit || '-'}${r.fix_loc !== null && r.fix_loc !== undefined ? ` fix_loc=${r.fix_loc}` : ''}` +
     (r.gone_scan ? `  GONE (not reported when the changed file was re-reviewed in scan ${r.gone_scan})` : ''));
   out(`commit ${r.commit_sha} (first scan ${r.first_scan}, last scan ${r.last_scan}) profile=${r.profile_name}`);
+  const obs = db().prepare(`SELECT x.*, s.label, s.commit_sha c, p.name pn, p.version pv, p.hash ph, p.spec_json FROM seen x JOIN scans s ON s.id=x.scan_id
+    LEFT JOIN review_profiles p ON p.id=COALESCE(x.profile_id, s.profile_id) WHERE x.finding_id=? ORDER BY x.scan_id`).all(id);
+  if (obs.length) {
+    out('reported by:');
+    for (const o of obs) {
+      const model = o.spec_json ? JSON.parse(o.spec_json).model : null;
+      const what = o.severity ? ` [${o.severity}${o.type ? ` ${o.type}` : ''}] line ${o.line || '?'}${o.end_line && o.end_line !== o.line ? `-${o.end_line}` : ''}${o.title && o.title !== r.title ? ` — ${o.title}` : ''}` : '';
+      out(`  scan ${o.scan_id}${o.label ? ` (${o.label})` : ''} @ ${o.c.slice(0, 12)} ${o.pn ? `${o.pn}@${o.pv} ${o.ph}` : '?'}${model ? ` ${model}` : ''}${what}`);
+    }
+  }
   if (r.snippet) out(`line: ${r.snippet}`);
   if (r.detail) out(`\n${r.detail}`);
   if (r.evidence) out(`\nEvidence: ${r.evidence}`);
@@ -2375,7 +2845,7 @@ function cmdSql(a) {
   emit(a.f.format === 'json' ? JSON.stringify(rows, null, 1) : text, a.f, rows.length, a.f.format === 'json' ? 1e9 : STDOUT_ROWS + 1);
 }
 
-const FINDING_FILTERS = ['severity', 'category', 'type', 'path', 'triage', 'confirmation', 'scan', 'latest', 'text', 'unit', 'group', 'dupe-of', 'ids', 'reported', 'unreported', 'max-fix-loc', 'min-confidence'];
+const FINDING_FILTERS = ['severity', 'category', 'type', 'path', 'triage', 'confirmation', 'scan', 'profile', 'seen-by-all', 'not-seen-by', 'latest', 'text', 'unit', 'group', 'dupe-of', 'ids', 'reported', 'unreported', 'max-fix-loc', 'min-confidence'];
 function hasFindingFilter(f) { return FINDING_FILTERS.some((k) => f[k] !== undefined); }
 
 function selectIds(a) {
@@ -2494,23 +2964,142 @@ function cmdConfirm(a) {
     (changed.length ? `\nseverity: ${changed.join(', ')}` : '') + (retyped.length ? `\ntype: ${retyped.join(', ')}` : ''));
 }
 
+// ------------------------------------------------------- profiles / prompts
+
+function scanProfileRef(s) {
+  const p = profileById(s.profile_id);
+  return p ? `${profileLabel(p)} ${p.hash}` : s.profile_name;
+}
+function specModel(spec) { return spec.model || (spec.runner ? `${spec.runner}:(its default)` : '(session model)'); }
+function scopeText(sc) {
+  if (!sc) return 'whole repo';
+  const parts = [];
+  if (sc.only && sc.only.length) parts.push(`only ${sc.only.join(',')}`);
+  if (sc.include && sc.include.length) parts.push(`+include ${sc.include.join(',')}`);
+  if (sc.exclude && sc.exclude.length) parts.push(`-exclude ${sc.exclude.join(',')}`);
+  if (sc.includeTests) parts.push('with tests');
+  return parts.join(' ') || 'whole repo';
+}
+const SPEC_FIELDS = [['prompt', 'prompt text'], ['reviewer', 'reviewer instructions'], ['runner', 'runner'], ['model', 'model'],
+  ['runnerArgs', 'runner CLI args'], ['chunkKb', 'chunk size'], ['scope', 'scope'], ['planner', 'planner'], ['dismissedContext', 'dismissed-findings context']];
+/** Fields that differ between two specs, as labels. */
+function specDiff(a, b) {
+  return SPEC_FIELDS.filter(([k]) => JSON.stringify(canon(a[k] ?? null)) !== JSON.stringify(canon(b[k] ?? null))).map(([k, l]) => ({ key: k, label: l }));
+}
+/** Lines only in a (-) / only in b (+), keeping order; enough to see what changed in a prompt. */
+function lineDiff(a, b) {
+  const A = String(a || '').split('\n'), B = String(b || '').split('\n');
+  const sa = new Set(A), sb = new Set(B);
+  return [...A.filter((l) => !sb.has(l)).map((l) => `- ${l}`), ...B.filter((l) => !sa.has(l)).map((l) => `+ ${l}`)];
+}
+function validProfileName(n) {
+  if (!n || !/^[A-Za-z][\w.-]*$/.test(n)) die('profile name: letters, digits, _ . - (starting with a letter)');
+  return n;
+}
+
 function cmdProfile(a) {
+  const [sub, ref] = a.pos;
+  const d = db();
+  if (!sub || sub === 'list') {
+    const def = cfgGet('default_profile');
+    const defP = def ? findProfile(def) : null;
+    let rows = d.prepare('SELECT * FROM review_profiles ORDER BY name, version').all().map(profileRow);
+    if (!a.f.retired) rows = rows.filter((r) => !r.retired);
+    if (!a.f['all-versions']) {
+      const last = new Map();
+      for (const r of rows) last.set(r.name, r);
+      rows = [...last.values()];
+    }
+    if (!rows.length) { out('no review profiles registered — `profile register <name> --prompt <prompt> --model <runner:model>` (prompts: `prompt list`)'); return; }
+    const n = d.prepare('SELECT profile_id, COUNT(*) n FROM scans WHERE kind=\'scan\' GROUP BY profile_id').all();
+    const scansOf = new Map(n.map((x) => [x.profile_id, x.n]));
+    if (a.f.json) { out(JSON.stringify(rows.map((r) => ({ id: r.id, ref: profileLabel(r), hash: r.hash, spec: r.spec, scans: scansOf.get(r.id) || 0, retired: !!r.retired, legacy: !!r.legacy, created: r.created })), null, 1)); return; }
+    out(['profile', 'id', 'hash', 'model', 'chunk', 'scope', 'scans', ''].join('\t'));
+    for (const r of rows) {
+      const flags = [defP && defP.id === r.id ? 'default' : '', r.retired ? 'retired' : '', r.legacy ? 'legacy' : ''].filter(Boolean).join(',');
+      out([profileLabel(r), `#${r.id}`, r.hash, specModel(r.spec), `${r.spec.chunkKb}KB`, scopeText(r.spec.scope), scansOf.get(r.id) || 0, flags].join('\t'));
+    }
+    return;
+  }
+  if (sub === 'register') {
+    const name = validProfileName(ref);
+    const { spec, chunkSource, promptSource } = specFromFlags(a.f);
+    const { p, created } = registerSpec(name, spec, { promptSource, note: a.f.note || null });
+    out(`${created ? 'registered' : 'unchanged, already registered as'} ${profileLabel(p)} #${p.id} ${p.hash}`);
+    out(`  ${specModel(p.spec)} via ${p.spec.runner}${p.spec.runnerArgs && p.spec.runnerArgs.length ? ` (args: ${p.spec.runnerArgs.join(' ')})` : ''}; chunk ${p.spec.chunkKb}KB (${chunkSource}); ${scopeText(p.spec.scope)}; planner ${p.spec.planner ? 'on' : 'off'}; dismissed context ${p.spec.dismissedContext ? 'on' : 'off'}`);
+    out(`  prompt: ${promptSource}`);
+    if (created && p.version > 1) {
+      const prev = findProfile(`${name}@${p.version - 1}`);
+      if (prev) out(`  changed from ${profileLabel(prev)}: ${specDiff(prev.spec, p.spec).map((x) => x.label).join(', ')}`);
+    }
+    if (!RN.binOf(p.spec.runner || 'claude')) out(`  warning: the ${p.spec.runner} CLI is not on PATH here`);
+    if (chunkSource.startsWith('default')) out(`  note: ${p.spec.model} has no chunk-size calibration in this repo (\`calibrate start --model ${p.spec.model}\`, then register again)`);
+    if (!cfgGet('default_profile')) { cfgSet('default_profile', name); out(`  default profile for \`start\`: ${name}`); }
+    return;
+  }
+  if (sub === 'show') {
+    const p = getProfile(ref || cfgGet('default_profile') || die('usage: profile show <ref>'));
+    if (a.f.json) { out(JSON.stringify({ id: p.id, ref: profileLabel(p), hash: p.hash, created: p.created, prompt_source: p.prompt_source, note: p.note, spec: p.spec }, null, 1)); return; }
+    const s = p.spec;
+    out(`${profileLabel(p)} #${p.id} ${p.hash}${p.retired ? ' (retired)' : ''}${p.legacy ? ' (legacy)' : ''} registered ${p.created.slice(0, 16).replace('T', ' ')}`);
+    if (p.note) out(`note: ${p.note}`);
+    out(`model: ${specModel(s)} via ${s.runner || '-'}${s.runnerArgs && s.runnerArgs.length ? `; runner args: ${s.runnerArgs.join(' ')}` : ''}`);
+    out(`chunk: ${s.chunkKb}KB; scope: ${scopeText(s.scope)}; planner: ${s.planner ? 'on' : 'off'}; dismissed context: ${s.dismissedContext ? 'on' : 'off'}`);
+    out(`reviewer instructions: ${s.reviewer ? `frozen copy (${sha1(s.reviewer.agent || '', 8)}/${sha1(s.reviewer.reply || '', 8)})` : 'not recorded (legacy)'}`);
+    out(`prompt (${p.prompt_source || 'inline'}):`);
+    const pl = String(s.prompt || '(unknown)').split('\n');
+    out((a.f.full ? pl : pl.slice(0, 20)).map((l) => `  ${l}`).join('\n') + (!a.f.full && pl.length > 20 ? `\n  … ${pl.length - 20} more lines (--full for all)` : ''));
+    const used = d.prepare("SELECT * FROM scans WHERE kind='scan' AND profile_id=? ORDER BY id DESC LIMIT 10").all(p.id);
+    out(used.length ? `scans: ${used.map((x) => `${x.id}${x.label ? `(${x.label})` : ''} [${x.status}]`).join(', ')}` : 'scans: none yet');
+    return;
+  }
+  if (sub === 'diff') {
+    if (!a.pos[2]) die('usage: profile diff <ref> <ref>');
+    const x = getProfile(ref), y = getProfile(a.pos[2]);
+    const diff = specDiff(x.spec, y.spec);
+    out(`${profileLabel(x)} ${x.hash} vs ${profileLabel(y)} ${y.hash}: ${diff.length ? diff.map((z) => z.label).join(', ') : 'identical specs'}`);
+    for (const { key } of diff) {
+      if (key === 'prompt') { out('prompt:'); lineDiff(x.spec.prompt, y.spec.prompt).slice(0, 60).forEach((l) => out(`  ${l}`)); continue; }
+      if (key === 'reviewer') { out('reviewer instructions differ (plugin version at registration)'); continue; }
+      const v = (s) => (key === 'scope' ? scopeText(s.scope) : JSON.stringify(s[key] ?? null));
+      out(`${key}: ${v(x.spec)} → ${v(y.spec)}`);
+    }
+    return;
+  }
+  if (sub === 'default') {
+    if (ref) { const p = getProfile(ref); cfgSet('default_profile', ref); out(`default profile for \`start\`: ${ref} (now ${profileLabel(p)} ${p.hash})`); return; }
+    const def = cfgGet('default_profile');
+    const p = def ? findProfile(def) : null;
+    out(p ? `default profile: ${def} (${profileLabel(p)} ${p.hash})` : 'no default profile (`profile default <ref>`)');
+    return;
+  }
+  if (sub === 'retire' || sub === 'unretire') {
+    const p = getProfile(ref || die(`usage: profile ${sub} <ref>`));
+    d.prepare('UPDATE review_profiles SET retired=? WHERE id=?').run(sub === 'retire' ? 1 : 0, p.id);
+    out(`${profileLabel(p)} ${sub === 'retire' ? 'retired (hidden from list; its scans and results stay)' : 'back in use'}`);
+    return;
+  }
+  if (['add', 'rm'].includes(sub)) die(`review-focus texts are prompts now: \`prompt ${sub} …\`; a review profile is registered with \`profile register\``);
+  die('usage: profile list [--all-versions] [--retired] | register <name> --prompt p|--prompt-file f --model m [--runner-args "…"] [--chunk-kb N] [--only g] [--include g] [--exclude g] [--include-tests] [--no-plan] [--no-dismissed] [--note s] | show <ref> [--full] [--json] | diff <ref> <ref> | default [<ref>] | retire|unretire <ref>');
+}
+
+function cmdPrompt(a) {
   const [sub, name] = a.pos;
   const d = db();
   if (!sub || sub === 'list') {
     const rows = d.prepare('SELECT name, hash, created, length(text) len FROM profiles ORDER BY name').all();
     const names = new Set(rows.map((r) => r.name));
     rows.forEach((r) => out(`${r.name}\t${r.hash}\t${r.len} chars`));
-    builtinProfileNames().filter((n) => !names.has(n)).forEach((n) => out(`${n}\t(builtin)`));
+    builtinPromptNames().filter((n) => !names.has(n)).forEach((n) => out(`${n}\t(builtin)`));
     return;
   }
-  if (sub === 'show') { out(resolveProfile(name || 'default').text); return; }
+  if (sub === 'show') { out(resolvePrompt(name || 'default').text); return; }
   if (sub === 'add') {
-    if (!name) die('usage: profile add <name> --file f');
+    if (!name) die('usage: prompt add <name> --file f');
     const text = a.f.file ? fs.readFileSync(a.f.file, 'utf8') : fs.readFileSync(0, 'utf8');
-    if (!text.trim()) die('empty profile');
-    const p = upsertProfile(name, text);
-    out(`profile ${p.name} saved (${p.hash})`);
+    if (!text.trim()) die('empty prompt');
+    const p = upsertPrompt(name, text);
+    out(`prompt ${p.name} saved (${p.hash}); registered profiles keep their own copy — \`profile register <name> --prompt ${p.name} …\` to use it`);
     return;
   }
   if (sub === 'rm') {
@@ -2518,7 +3107,329 @@ function cmdProfile(a) {
     out(`removed ${name}`);
     return;
   }
-  die('usage: profile list|show <name>|add <name> --file f|rm <name>');
+  die('usage: prompt list | show <name> | add <name> --file f | rm <name>');
+}
+
+// --------------------------------------------------------------- scan store
+
+function scanFileStats(id) {
+  return db().prepare(`SELECT SUM(state='reviewed') rv, SUM(state IN ('pending','in_progress','partial','reviewed')) t,
+    SUM(CASE WHEN state='reviewed' THEN bytes ELSE 0 END) rb FROM files WHERE scan_id=?`).get(id);
+}
+
+function cmdScans(a) {
+  const sub = a.pos[0] && !/^\d+$/.test(a.pos[0]) ? a.pos[0] : 'list';
+  const d = db();
+  if (sub === 'list') {
+    const where = ["kind='scan'", "status!='deleted'"], params = [];
+    if (a.f.profile) {
+      const ors = [];
+      for (const ref of listFlag(a.f.profile)) {
+        if (!/[@#]/.test(ref) && d.prepare('SELECT 1 FROM scans WHERE profile_name=?').get(ref)) { ors.push('profile_name=?'); params.push(ref); }
+        else { ors.push('profile_id=?'); params.push(getProfile(ref).id); }
+      }
+      where.push(`(${ors.join(' OR ')})`);
+    }
+    if (a.f.status) { const st = listFlag(a.f.status); where.push(`status IN (${st.map(() => '?').join(',')})`); params.push(...st); }
+    if (a.f.commit) { where.push('commit_sha LIKE ?'); params.push(`${git(['rev-parse', a.f.commit], { allowFail: true })?.trim() || a.f.commit}%`); }
+    if (a.f.label) { where.push('label LIKE ?'); params.push(`%${[].concat(a.f.label).pop()}%`); }
+    let rows = d.prepare(`SELECT * FROM scans WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...params, Number(a.f.limit || 50));
+    if (a.f.model) rows = rows.filter((s) => { const sp = scanSpec(s); const m = (sp && sp.model) || JSON.parse(s.options_json).model || ''; return m.includes(a.f.model); });
+    if (!rows.length) { out('no scans match'); return; }
+    const data = rows.map((s) => {
+      const fs_ = scanFileStats(s.id);
+      const n = d.prepare('SELECT COUNT(*) n FROM seen WHERE scan_id=?').get(s.id).n;
+      const sp = scanSpec(s);
+      return { id: s.id, label: s.label, profile: scanProfileRef(s), model: (sp && sp.model) || JSON.parse(s.options_json).model || null, commit: s.commit_sha,
+        status: s.status, reviewed: fs_.rv || 0, total: fs_.t || 0, findings: n, usd: scanSpendUsd(s), created: s.created };
+    });
+    if (a.f.json) { out(JSON.stringify(data, null, 1)); return; }
+    out(['scan', 'label', 'profile', 'model', 'commit', 'status', 'files', 'findings', '$', 'created'].join('\t'));
+    for (const r of data) out([r.id, r.label || '-', r.profile, r.model || '-', r.commit.slice(0, 12), r.status, `${r.reviewed}/${r.total}`, r.findings, r.usd.toFixed(2), r.created.slice(0, 16).replace('T', ' ')].join('\t'));
+    return;
+  }
+  const ref = a.pos[1];
+  if (!ref) die(`usage: scans ${sub} <scan id|label|profile>`);
+  const s = scanByRef(ref);
+  if (sub === 'show') {
+    const p = profileById(s.profile_id);
+    const o = JSON.parse(s.options_json);
+    const rr = s.run_json ? JSON.parse(s.run_json) : null;
+    if (a.f.json) { out(JSON.stringify({ scan: { ...s, options_json: undefined, run_json: undefined, plan_json: undefined }, options: o, profile: p && { id: p.id, ref: profileLabel(p), hash: p.hash, spec: p.spec }, run: rr, plan: s.plan_json ? JSON.parse(s.plan_json) : null }, null, 1)); return; }
+    scanSummary(s).forEach((l) => out(l));
+    if (p) out(`profile: ${profileLabel(p)} #${p.id} ${p.hash} — ${specModel(p.spec)} via ${p.spec.runner || '-'}, chunk ${p.spec.chunkKb}KB, ${scopeText(p.spec.scope)}, planner ${p.spec.planner ? 'on' : 'off'}`);
+    out(`commit: ${s.commit_sha}`);
+    const rt = [o.lanes ? `lanes ${o.lanes}` : null, o.maxUsd ? `max $${o.maxUsd}` : null, o.max5hPct ? `max 5h ${o.max5hPct}%` : null, o.force ? 'forced (ledger ignored)' : null,
+      o.forcePath ? `forced paths ${[].concat(o.forcePath).join(',')}` : null, o.repeatOf ? `repeat of scan ${o.repeatOf}` : null,
+      o.planFrom ? `plan from scan ${o.planFrom}${o.planAdopted ? '' : ' (not adopted yet)'}` : null].filter(Boolean);
+    if (rt.length) out(`run-time: ${rt.join('; ')}`);
+    if (rr) {
+      out(`plugin: ${rr.plugin.version || '?'}${rr.plugin.sha ? ` @ ${rr.plugin.sha.slice(0, 12)}${rr.plugin.dirty ? ' (modified)' : ''}` : ''}; node ${rr.node}${rr.host ? `; host: ${rr.host}` : ''}`);
+      if (rr.runner) out(`runner: ${rr.runner.name} ${rr.runner.version || '(version unknown)'} at ${rr.runner.bin || '(not on PATH)'}\n  argv: ${(rr.runner.argv || []).join(' ')}`);
+      for (const x of rr.reviewerDrift || []) out(`drift at start: ${x}`);
+    } else out('run record: none (scan made before review profiles were registered)');
+    const ch = d.prepare("SELECT COUNT(*) n, COUNT(prompt_sha) h FROM chunks WHERE scan_id=? AND state!='void'").get(s.id);
+    out(`chunks: ${ch.n}, ${ch.h} with a recorded prompt hash`);
+    out(`repeat exactly: ${cliPrefix()} repeat ${s.id}`);
+    return;
+  }
+  if (sub === 'label') {
+    const label = a.pos[2];
+    if (!label) die('usage: scans label <scan> <label>');
+    if (/^\d+$/.test(label)) die('a label cannot be a number');
+    const clash = d.prepare("SELECT id FROM scans WHERE label=? AND id!=? AND status!='deleted'").get(label, s.id);
+    if (clash) die(`label ${label} is already scan ${clash.id}`);
+    d.prepare('UPDATE scans SET label=?, updated=? WHERE id=?').run(label, now(), s.id);
+    out(`scan ${s.id} labelled ${label}`);
+    return;
+  }
+  if (sub === 'rm') {
+    if (s.kind !== 'scan') die(`scan ${s.id} is a calibration round`);
+    if (s.status === 'active' || pidAlive(s.workflow_task)) die(`scan ${s.id} is ${s.status}${pidAlive(s.workflow_task) ? ' with a running runner' : ''} — \`stop --scan ${s.id} --now\` first`);
+    const only = d.prepare(`SELECT f.* FROM findings f WHERE f.id IN (SELECT finding_id FROM seen WHERE scan_id=?)
+      AND NOT EXISTS (SELECT 1 FROM seen x WHERE x.finding_id=f.id AND x.scan_id!=?)`).all(s.id, s.id);
+    const worked = (f) => f.triage !== 'open' || f.confirmation || f.note || f.fix_loc !== null || f.type_locked || f.severity_locked || f.dupe_lock ||
+      d.prepare('SELECT 1 FROM filings WHERE finding_id=?').get(f.id) || d.prepare('SELECT 1 FROM dupe_groups WHERE finding_id=? AND manual=1').get(f.id);
+    const keep = only.filter(worked), drop = only.filter((f) => !worked(f));
+    if (a.f['dry-run']) {
+      out(`would remove scan ${s.id}: ${drop.length} finding(s) only it reported${keep.length ? `; keep ${keep.length} triaged/filed: ${keep.slice(0, 20).map((f) => `#${f.id}`).join(' ')}` : ''}`);
+      return;
+    }
+    tx(() => {
+      const del = (sql, ...p) => d.prepare(sql).run(...p);
+      for (const f of drop) {
+        for (const t of ['seen', 'dupe_groups', 'match_candidates', 'filings']) del(`DELETE FROM ${t} WHERE finding_id=?`, f.id);
+        del('DELETE FROM findings WHERE id=?', f.id);
+      }
+      // findings other scans also reported keep their rows; this scan's own reports of them go
+      if (keep.length) del(`DELETE FROM seen WHERE scan_id=? AND finding_id NOT IN (${keep.map(() => '?').join(',')})`, s.id, ...keep.map((f) => f.id));
+      else del('DELETE FROM seen WHERE scan_id=?', s.id);
+      del('UPDATE findings SET gone_scan=NULL WHERE gone_scan=?', s.id);
+      for (const t of ['files', 'chunks', 'reviewed']) del(`DELETE FROM ${t} WHERE scan_id=?`, s.id);
+      del('DELETE FROM config WHERE key=?', `stop_reason:${s.id}`);
+      // a scan whose triaged findings stay is kept as a 'deleted' stub so those findings still point to it
+      if (keep.length) del("UPDATE scans SET status='deleted', updated=? WHERE id=?", now(), s.id);
+      else { del('DELETE FROM agent_runs WHERE scan_id=?', s.id); del('DELETE FROM scans WHERE id=?', s.id); }
+    });
+    try { fs.rmSync(path.join(stateDir(), 'scans', String(s.id)), { recursive: true, force: true }); } catch (e) { /* best effort */ }
+    out(`scan ${s.id} removed: ${drop.length} finding(s) only it reported deleted${keep.length ? `; kept ${keep.length} triaged/filed finding(s) (scan kept as a deleted stub)` : ''}; its files will be reviewed again by the next scan of ${s.profile_name}`);
+    return;
+  }
+  die('usage: scans [list] [--profile p] [--model m] [--commit c] [--status s] [--label l] [--limit n] [--json] | scans show|label|rm <scan> …');
+}
+
+// ------------------------------------------------------------------ compare
+//
+// Scans are compared on the code they all reviewed (same path, same blob). The same bug reported by
+// two scans is usually one findings row already (submit merges re-reports); near-duplicates the merge
+// missed are joined here with the same location/title rule calibration uses.
+
+/** Cluster ids for finding-like rows {path,line,end_line,title,category,snippet}: same bug → same id. */
+function clusterFindings(rows) {
+  const parent = rows.map((_, i) => i);
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const byPath = new Map();
+  rows.forEach((r, i) => { if (!byPath.has(r.path)) byPath.set(r.path, []); byPath.get(r.path).push(i); });
+  for (const idx of byPath.values()) {
+    for (let x = 0; x < idx.length; x++) for (let y = x + 1; y < idx.length; y++) {
+      const a = rows[idx[x]], b = rows[idx[y]];
+      if (sameBug(a, b) || (a.snippet && a.snippet === b.snippet && a.category === b.category)) parent[find(idx[y])] = find(idx[x]);
+    }
+  }
+  return rows.map((_, i) => find(i));
+}
+
+function sevCounts(list) {
+  const c = {};
+  for (const x of list) c[x.severity] = (c[x.severity] || 0) + 1;
+  return SEVERITIES.filter((k) => c[k]).map((k) => `${k} ${c[k]}`).join(', ') || 'none';
+}
+
+/** Observations (what each scan reported) on `paths`, clustered across scans. */
+function compareClusters(scans, paths, f) {
+  const d = db();
+  const ids = scans.map((s) => s.id);
+  let obs = d.prepare(`SELECT x.scan_id, x.severity osev, x.type otype, x.line oline, x.end_line oend, x.title otitle,
+    f.id, f.path, f.line, f.end_line, f.title, f.category, f.snippet, f.severity, f.type, f.triage, f.confirmation
+    FROM seen x JOIN findings f ON f.id=x.finding_id WHERE x.scan_id IN (${ids.map(() => '?').join(',')})`).all(...ids)
+    .filter((o) => !paths || paths.has(o.path));
+  const sevF = f.severity ? severityFilter(f.severity) : null;
+  const typF = listFlag(f.type);
+  const pm = pathMatcher(f.path);
+  obs = obs.map((o) => ({ ...o, sev: o.osev || o.severity, typ: o.otype || o.type || 'other' }))
+    .filter((o) => (!sevF || sevF.includes(o.sev)) && (!typF || typF.includes(o.typ)) && (!pm || pm(o.path)));
+  const rows = [...new Map(obs.map((o) => [o.id, o])).values()];
+  const cid = clusterFindings(rows);
+  const byId = new Map(rows.map((r, i) => [r.id, cid[i]]));
+  const clusters = new Map();
+  for (const o of obs) {
+    const k = byId.get(o.id);
+    if (!clusters.has(k)) clusters.set(k, { ids: new Set(), by: new Map(), w: 0, confirmed: false, fp: false });
+    const c = clusters.get(k);
+    c.ids.add(o.id);
+    c.w = Math.max(c.w, SEV_RANK[o.sev] || 1);
+    if (o.triage === 'confirmed' || o.confirmation === 'confirmed') c.confirmed = true;
+    if (o.triage === 'false_positive' || o.confirmation === 'not_confirmed') c.fp = true;
+    const prev = c.by.get(o.scan_id);
+    if (!prev || (SEV_RANK[o.sev] || 0) > (SEV_RANK[prev.sev] || 0)) c.by.set(o.scan_id, o);
+    if (!c.head || (SEV_RANK[o.sev] || 0) > (SEV_RANK[c.head.sev] || 0)) c.head = o;
+  }
+  for (const c of clusters.values()) { if (c.confirmed) c.fp = false; c.severity = c.head.sev; }
+  return [...clusters.values()].sort((x, y) => y.w - x.w || x.head.path.localeCompare(y.head.path) || (x.head.line || 0) - (y.head.line || 0));
+}
+function severityFilter(v) {
+  const out_ = new Set();
+  for (const s of listFlag(v)) {
+    if (s.endsWith('+')) { const r = SEV_RANK[s.slice(0, -1)]; if (!r) die(`unknown severity ${s}`); SEVERITIES.filter((k) => SEV_RANK[k] >= r).forEach((k) => out_.add(k)); }
+    else if (SEVERITIES.includes(s)) out_.add(s); else die(`unknown severity ${s}`);
+  }
+  return [...out_];
+}
+function clusterLine(c, scans) {
+  const h = c.head;
+  return `#${[...c.ids].join(',#')}\t${c.severity}\t${loc(h)}\t${h.title}${c.confirmed ? ' [confirmed]' : c.fp ? ' [false positive]' : ''}` +
+    (scans ? `\t${scans.map((s) => (c.by.has(s.id) ? `${s.id}:${c.by.get(s.id).sev}` : `${s.id}:-`)).join(' ')}` : '');
+}
+function scanTag(s) {
+  const p = profileById(s.profile_id);
+  const sp = p && p.spec;
+  return `scan ${s.id}${s.label ? ` (${s.label})` : ''} ${p ? `${profileLabel(p)} ${p.hash}` : s.profile_name}${sp && sp.model ? ` ${sp.model}` : ''} @ ${s.commit_sha.slice(0, 12)} [${s.status}]`;
+}
+
+function cmdCompare(a) {
+  if (a.pos.length < 2) die('usage: compare <scan|label|profile> <scan|label|profile> [...] [--severity s] [--type t] [--path p] [--list none|diff|all] [--limit n] [--json]');
+  const seenIds = new Set();
+  const scans = a.pos.map((r) => scanByRef(r, { done: true })).filter((s) => !seenIds.has(s.id) && seenIds.add(s.id));
+  if (scans.length < 2) die('compare needs two different scans');
+  for (const s of scans) if (s.kind !== 'scan') die(`scan ${s.id} is a calibration round`);
+  const sameCommit = scans.every((s) => s.commit_sha === scans[0].commit_sha);
+  const sameLineage = scans.every((s) => s.profile_name === scans[0].profile_name);
+  if (!sameCommit && sameLineage) return compareAcrossCommits(scans.sort((x, y) => x.id - y.id), a.f);
+  return compareOverlap(scans, a.f);
+}
+
+function compareOverlap(scans, f) {
+  const d = db();
+  const reviewed = scans.map((s) => new Map(d.prepare("SELECT path, blob_sha, bytes FROM files WHERE scan_id=? AND state='reviewed'").all(s.id).map((r) => [r.path, r])));
+  const basis = new Set([...reviewed[0].keys()].filter((p) => reviewed.every((m) => m.has(p) && m.get(p).blob_sha === reviewed[0].get(p).blob_sha)));
+  const basisBytes = [...basis].reduce((x, p) => x + reviewed[0].get(p).bytes, 0);
+  const clusters = compareClusters(scans, basis, f);
+  const totalW = clusters.reduce((x, c) => x + c.w, 0) || 1;
+  const stats = scans.map((s, i) => {
+    const mine = clusters.filter((c) => c.by.has(s.id));
+    const conf = mine.filter((c) => c.confirmed).length, fp = mine.filter((c) => c.fp).length;
+    const usd = scanSpendUsd(s);
+    const rb = scanFileStats(s.id).rb || 0;
+    const p = profileById(s.profile_id);
+    return { id: s.id, label: s.label, profile: p ? profileLabel(p) : s.profile_name, hash: p ? p.hash : s.profile_hash, model: p && p.spec.model,
+      commit: s.commit_sha, status: s.status, reviewedFiles: reviewed[i].size, notInBasis: reviewed[i].size - basis.size,
+      findings: mine.length, unique: mine.filter((c) => c.by.size === 1).length, share: mine.reduce((x, c) => x + c.w, 0) / totalW,
+      confirmed: conf, falsePositive: fp, precision: conf + fp ? conf / (conf + fp) : null, usd, usdPer100Kb: rb ? usd / (rb / 1024) * 100 : null };
+  });
+  const shared = clusters.filter((c) => c.by.size === scans.length);
+  const disagree = clusters.filter((c) => c.by.size > 1 && (() => {
+    const v = [...c.by.values()];
+    return new Set(v.map((o) => o.sev)).size > 1 || new Set(v.map((o) => o.typ)).size > 1 ||
+      Math.max(...v.map((o) => o.oline || o.line || 0)) - Math.min(...v.map((o) => o.oline || o.line || 0)) > 3;
+  })());
+  if (f.json) {
+    out(JSON.stringify({ basis: { files: basis.size, bytes: basisBytes }, scans: stats,
+      profileDiff: scans.length === 2 && scans[0].profile_id && scans[1].profile_id ? specDiff(profileById(scans[0].profile_id).spec, profileById(scans[1].profile_id).spec).map((x) => x.key) : null,
+      clusters: clusters.map((c) => ({ findings: [...c.ids], path: c.head.path, line: c.head.line, title: c.head.title, severity: c.severity, confirmed: c.confirmed, falsePositive: c.fp,
+        seenBy: Object.fromEntries([...c.by].map(([sid, o]) => [sid, { severity: o.sev, type: o.typ, line: o.oline || o.line, title: o.otitle || o.title }])) })) }, null, 1));
+    return;
+  }
+  out(`compare ${scans.length} scans on ${basis.size} files (${kb(basisBytes)}) every one of them reviewed${scans.some((s) => s.commit_sha !== scans[0].commit_sha) ? ' with identical content' : ''}:`);
+  for (const s of scans) out(`  ${scanTag(s)}`);
+  if (scans.length === 2 && scans[0].profile_id && scans[1].profile_id) {
+    const diff = specDiff(profileById(scans[0].profile_id).spec, profileById(scans[1].profile_id).spec);
+    out(`profiles differ in: ${diff.length ? diff.map((x) => x.label).join(', ') : 'nothing (same spec)'}`);
+  }
+  const outside = stats.filter((x) => x.notInBasis > 0);
+  if (outside.length) out(`not compared: ${outside.map((x) => `scan ${x.id} reviewed ${x.notInBasis} more file(s)`).join('; ')}`);
+  out('');
+  out(['scan', 'profile', 'model', 'findings', 'unique', 'share', 'confirmed', 'false pos', 'precision', '$', '$/100KB'].join('\t'));
+  for (const x of stats) {
+    out([x.id, x.profile, x.model || '-', x.findings, x.unique, x.share.toFixed(2), x.confirmed, x.falsePositive, x.precision === null ? '-' : x.precision.toFixed(2),
+      x.usd.toFixed(2), x.usdPer100Kb === null ? '-' : x.usdPer100Kb.toFixed(2)].join('\t'));
+  }
+  out('share = severity-weighted share of all distinct issues found by any of these scans; precision = confirmed / (confirmed + false positive) among triaged; $ = the whole scan');
+  out('');
+  out(`found by all: ${shared.length} (${sevCounts(shared)})`);
+  for (const s of scans) {
+    const only = clusters.filter((c) => c.by.size === 1 && c.by.has(s.id));
+    out(`only scan ${s.id}: ${only.length} (${sevCounts(only)})`);
+  }
+  if (scans.length > 2) out(`found by some: ${clusters.filter((c) => c.by.size > 1 && c.by.size < scans.length).length}`);
+  out(`disagreements (severity, type or line among scans that found it): ${disagree.length}`);
+  const list = f.list || 'diff';
+  if (list === 'none') return;
+  const lim = Number(f.limit || 20);
+  const section = (title, cs, withScans) => {
+    if (!cs.length) return;
+    out(`\n${title}${cs.length > lim ? ` (first ${lim} of ${cs.length})` : ''}:`);
+    cs.slice(0, lim).forEach((c) => out(clusterLine(c, withScans ? scans : null)));
+  };
+  for (const s of scans) section(`only scan ${s.id}`, clusters.filter((c) => c.by.size === 1 && c.by.has(s.id)), false);
+  section('disagreements', disagree, true);
+  if (list === 'all') section('found by all', shared, true);
+}
+
+/** Same profile lineage at two commits: what is new, gone and still there. */
+function compareAcrossCommits(scans, f) {
+  const d = db();
+  const res = [];
+  for (let i = 0; i + 1 < scans.length; i++) {
+    const A = scans[i], B = scans[i + 1];
+    const aFiles = new Map(d.prepare('SELECT path, blob_sha, state FROM files WHERE scan_id=?').all(A.id).map((r) => [r.path, r]));
+    const bFiles = new Map(d.prepare('SELECT path, blob_sha, state FROM files WHERE scan_id=?').all(B.id).map((r) => [r.path, r]));
+    const inB = (p) => { const r = bFiles.get(p); return r && ['reviewed', 'unchanged'].includes(r.state) ? r.state : null; };
+    const clusters = compareClusters([A, B], null, f);
+    const cat = { new: [], gone: [], refound: [], carried: [], outOfScope: [] };
+    for (const c of clusters) {
+      const p = c.head.path;
+      const inA = c.by.has(A.id), seenB = c.by.has(B.id);
+      if (seenB && !inA) {
+        const af = aFiles.get(p);
+        // B reports it on a file A also reviewed unchanged: a finding A missed, not new code
+        cat.new.push(c);
+        c.newCode = !(af && af.state === 'reviewed' && af.blob_sha === bFiles.get(p)?.blob_sha);
+      } else if (inA && seenB) cat.refound.push(c);
+      else if (inA) {
+        const st = inB(p);
+        if (st === 'unchanged') cat.carried.push(c);
+        else if (st === 'reviewed') cat.gone.push(c);
+        else cat.outOfScope.push(c);
+      }
+    }
+    const changed = [...bFiles.values()].filter((r) => r.state === 'reviewed' && aFiles.has(r.path)).length;
+    const added = [...bFiles.values()].filter((r) => r.state === 'reviewed' && !aFiles.has(r.path)).length;
+    const unchanged = [...bFiles.values()].filter((r) => r.state === 'unchanged').length;
+    res.push({ A, B, cat, files: { reviewedAgain: changed, newFiles: added, unchanged } });
+  }
+  if (f.json) {
+    out(JSON.stringify(res.map((r) => ({ from: r.A.id, to: r.B.id, files: r.files,
+      ...Object.fromEntries(Object.entries(r.cat).map(([k, cs]) => [k, cs.map((c) => ({ findings: [...c.ids], path: c.head.path, line: c.head.line, title: c.head.title, severity: c.severity, ...(k === 'new' ? { newCode: c.newCode } : {}) }))])) })), null, 1));
+    return;
+  }
+  const lim = Number(f.limit || 20);
+  for (const r of res) {
+    out(`${scanTag(r.A)}\n  → ${scanTag(r.B)}`);
+    if (r.A.profile_id !== r.B.profile_id) {
+      const diff = specDiff(profileById(r.A.profile_id).spec, profileById(r.B.profile_id).spec);
+      out(`  profile versions differ in: ${diff.map((x) => x.label).join(', ') || 'nothing'}`);
+    }
+    out(`  files: ${r.files.reviewedAgain} reviewed again, ${r.files.newFiles} new, ${r.files.unchanged} unchanged (skipped; earlier findings carry over)`);
+    const c = r.cat;
+    out(`  new ${c.new.length} (${sevCounts(c.new)}; ${c.new.filter((x) => !x.newCode).length} on code the earlier scan also reviewed) · gone ${c.gone.length} (${sevCounts(c.gone)}) · still there ${c.refound.length + c.carried.length} (${c.refound.length} found again, ${c.carried.length} on unchanged files)${c.outOfScope.length ? ` · out of scope now ${c.outOfScope.length}` : ''}`);
+    if ((f.list || 'diff') === 'none') continue;
+    for (const [k, title] of [['new', 'new'], ['gone', 'gone'], ...(f.list === 'all' ? [['refound', 'found again'], ['carried', 'on unchanged files']] : [])]) {
+      if (!c[k].length) continue;
+      out(`\n  ${title}${c[k].length > lim ? ` (first ${lim} of ${c[k].length})` : ''}:`);
+      c[k].slice(0, lim).forEach((x) => out(`  ${clusterLine(x)}`));
+    }
+    out('');
+  }
 }
 
 // -------------------------------------------------------------------- dupes
@@ -3474,7 +4385,7 @@ function runnerFor(f, stored = {}) {
 async function agentCall({ ctx, prompt, kind, unit, full = false }) {
   const started = now();
   let pid = null;
-  const r = await RN.runAgent({ runner: ctx.runner, model: ctx.model ? RN.splitModel(ctx.model).model : null, prompt, cwd: repoRoot(), full,
+  const r = await RN.runAgent({ runner: ctx.runner, model: ctx.model ? RN.splitModel(ctx.model).model : null, prompt, cwd: repoRoot(), full, extra: ctx.extra,
     tmpDir: path.join(stateDir(), 'prompts'), onSpawn: (p) => { pid = p; } });
   if (!r.model) r.model = RN.defaultModel(ctx.runner);
   const priced = typeof r.costUsd === 'number' ? { usd: r.costUsd, estimated: false } : usageUsd(r.model || ctx.model, ctx.runner, r.usage);
@@ -3628,15 +4539,28 @@ function killRunner(task) {
 }
 
 async function cmdRun(a) {
-  let scan = a.pos[0] ? getScan(a.pos[0]) : openScan();
+  let scan = a.pos[0] ? scanByRef(a.pos[0]) : pickScan(a.f);
   if (!scan) die('no active scan — `start`, `restart` or `continue` first');
+  const spec = scanSpec(scan);
+  // a registered profile fixes the runner, model and CLI arguments
+  if (spec && (a.f.runner || a.f.model)) die(`scan ${scan.id} runs review profile ${scan.profile_name} (${spec.runner}${spec.model ? ` ${spec.model}` : ''}); --runner/--model belong to a profile — register another one`);
   if (scan.status !== 'active') die(`scan ${scan.id} is ${scan.status} — \`continue\` it first`);
   const so = JSON.parse(scan.options_json);
-  const ctx = runnerFor(a.f, so);
-  if (ctx.runner !== so.runner || ctx.model !== (so.model || null)) {
-    so.runner = ctx.runner; so.runnerWhy = ctx.why; so.model = ctx.model;
-    checkRunnerLimits(so);
-    db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(so), scan.id);
+  let ctx;
+  if (spec) {
+    ctx = runnerFor({}, { runner: spec.runner || so.runner, model: spec.model || so.model });
+    if (Array.isArray(spec.runnerArgs)) ctx.extra = spec.runnerArgs;
+    ctx.why = `review profile ${scan.profile_name}`;
+    const rr = scan.run_json ? JSON.parse(scan.run_json) : null;
+    const v = RN.version(ctx.runner);
+    if (rr && rr.runner && rr.runner.version && v && rr.runner.version !== v) log(`note: ${ctx.runner} CLI is ${v} now, ${rr.runner.version} when scan ${scan.id} was created`);
+  } else {
+    ctx = runnerFor(a.f, so);
+    if (ctx.runner !== so.runner || ctx.model !== (so.model || null)) {
+      so.runner = ctx.runner; so.runnerWhy = ctx.why; so.model = ctx.model;
+      checkRunnerLimits(so);
+      db().prepare('UPDATE scans SET options_json=? WHERE id=?').run(JSON.stringify(so), scan.id);
+    }
   }
   const lanesMax = a.f.concurrency !== undefined ? parseConcurrency(a.f.concurrency) : so.lanes || 10;
   if (scan.workflow_task !== `pid:${process.pid}` && pidAlive(scan.workflow_task)) die(`scan ${scan.id} already has a runner (${scan.workflow_task}); \`stop\` it first`);
@@ -3651,7 +4575,15 @@ async function cmdRun(a) {
   db().prepare('UPDATE scans SET workflow_task=?, updated=? WHERE id=?').run(`pid:${process.pid}`, now(), scan.id);
   onStopSignals();
   log(`scan ${scan.id}: runner ${ctx.runner}${ctx.model ? ` model ${ctx.model}` : ' (default model)'} — ${ctx.why}`);
-  if (!scan.plan_json && !so.noPlan && scan.kind === 'scan') {
+  if (so.planFrom && !so.planAdopted) {
+    // batch follower: the leader's planner decides the code set for every scan of the batch
+    log(`waiting for the plan of scan ${so.planFrom}`);
+    const t0 = Date.now();
+    while (!STOPPING && !planSettled(getScan(so.planFrom)) && Date.now() - t0 < 60 * 60 * 1000) await new Promise((r) => setTimeout(r, 3000));
+    adoptPlan(scan.id);
+    scan = getScan(scan.id);
+    log(scan.plan_json ? `adopted the plan of scan ${so.planFrom}` : `scan ${so.planFrom} has no plan; heuristic chunking`);
+  } else if (!scan.plan_json && !so.noPlan && !so.replay && scan.kind === 'scan') {
     log('planning');
     const plan = await runPlanner(scan, ctx);
     if (plan && plan.agentFailed) {
@@ -3866,32 +4798,40 @@ function cmdInstall(a) {
 // ---------------------------------------------------------------------- main
 
 const HELP = `code-scan.js [-C repo] <command> [...]
-scan:      start [--runner r] [--model m] [--profile p|--prompt-file f] [--only g] [--include g] [--exclude g] [--include-tests] [--chunk-kb N]
-                 [--force] [--force-path g] [--no-plan] [--new]
-           continue [--scan id] [--model m] | restart [--replan] [--reset-scope] [...start flags] | stop [--now] | set-run <scan> <task>
-runner:    run [scan] [--runner claude|codex|gemini|agy|copilot|cursor|opencode] [--model m|runner:m] [--concurrency N] [--detach]
+profiles:  profile register <name> --prompt p|--prompt-file f --model m|runner:m [--runner-args "…"] [--chunk-kb N] [--only g] [--include g] [--exclude g]
+                 [--include-tests] [--no-plan] [--no-dismissed] [--note s]     (immutable; a changed spec is the next version name@N)
+           profile list [--all-versions] [--retired] [--json] | show <ref> [--full] [--json] | diff <ref> <ref> | default [<ref>] | retire|unretire <ref>
+           refs: name (latest version) | name@N | #id | hash prefix
+prompts:   prompt list | show <name> | add <name> --file f | rm <name>     (review-focus texts profiles are registered from)
+scan:      start [--profile p1,p2,…] [--label l] [--force] [--force-path g] [--new] [--commit rev]     (no --profile: the default profile)
+           continue [--scan s] | restart [--profile p,…|--all|--scan s] [--replan] | stop [--scan s|--all] [--now] [--close] | set-run <scan> <task>
+           repeat <scan> [--commit same|rev] [--label l]     (same profile, commit, plan, chunks and context; reports drift)
+           --scan / <scan>: id | label | profile (its latest scan); needed when several scans are open
+store:     scans [list] [--profile p] [--model m] [--commit c] [--status s] [--label l] [--json] | scans show|label|rm <scan> [label] [--dry-run]
+compare:   compare <scan> <scan> […] [--severity s] [--type t] [--path p] [--list none|diff|all] [--limit n] [--json]
+           (same commit: overlap, disagreements, quality vs cost; same profile at two commits: new / gone / still there)
+runner:    run [scan] [--concurrency N] [--detach]     (runner, model and CLI args come from the scan's profile)
            runners  (installed agent CLIs, detected host, what a new scan would use) | run-prompt <file> [--runner r] [--model m] [--full]
            auto-triage run [run] | calibrate run [id] | init run [id]   (same flags; agents are headless CLI processes)
 install:   install [--user|--project|--dir d] [--uninstall]   (render skills into ~/.agents/skills for non-Claude hosts)
 planner:   plan-context <scan> | apply-plan <scan> --file plan.json
 workers:   claim <scan> | submit <scan> <chunk> --file <path> [--slice k] < findings.json
 limits:    start/restart/continue/limits [--max-usd N] [--max-5h-pct P]; start/restart/continue [--concurrency 1-32, default 10; Workflow caps at 16]  | statusline [-- <wrapped status line cmd>]
-progress:  status [--scan id|--all] | files [--state s] [--path p] [--out f]
+progress:  status [--scan s|--all] | files [--scan s] [--state s] [--path p] [--out f]
 findings:  query [--severity critical,high|high+] [--category c] [--type t1,t2] [--path p] [--triage t|all] [--confirmation c|all] [--reported|--unreported]
-                 [--tracker t] [--scan id|--latest] [--stale|--no-stale] [--gone|--include-gone] [--min-confidence x] [--max-fix-loc n] [--text s] [--unit u]
+                 [--tracker t] [--scan s1,s2|--latest] [--profile p] [--seen-by-all s1,s2] [--not-seen-by s] [--stale|--no-stale] [--gone|--include-gone] [--min-confidence x] [--max-fix-loc n] [--text s] [--unit u]
                  [--group g] [--dupe-of id] [--primary-only] [--ids 1,2] [--sort severity:desc,path,line]
                  [--limit n] [--format table|md|json|csv] [--out file]
            show <id> | sql "<SELECT ...>" | triage <ids|filters> --set <state> [--note s]
            confirm <ids|filters> --set confirmed|not_confirmed|unchecked [--set-severity s] [--set-type t] [--note s]
            retype <ids|filters> --set <type> [--note s] | retype --auto [filters] [--force] | retype --list-other [filters]
            types: ${TYPES.join(' ')}
-profiles:  profile list | show <name> | add <name> --file f | rm <name>
 dupes:     dupes [filters] [--line-window 10] [--title-sim 0.6] | dupes list | dupes show <g> | dupes merge|split <ids>
 trackers:  tracker-sync gh [--repo o/r] [--state all] [--search q] | tracker-import jira < issues.json
            match [filters] [--tracker t] [--include-reported] [--top 3] | match show <id> | match export [--min-score 3] [--out f]
            link <id|ids|gN> <tracker> <key> [--url u] [--kind k] | unlink <id> [tracker] [key]
            issues-sync [--tracker gh:o/r]   (issue state → findings: closed completed = fixed, not planned = wontfix)
-init:      init start [--models opus,sonnet,haiku,fable] [--only g] | init report [id] [--truth f] | init pick <model> | init status
+init:      init start [--models opus,sonnet,haiku,fable] [--prompt p] [--only g] | init report [id] [--truth f] | init pick <model> [--name default] [--prompt p] | init status
 calibrate: calibrate start --model m [--only g] [--sample-kb 200] [--medium 40] | calibrate report [id] [--truth f.json] | calibrate next [id] | calibrate status | calibrate set <m> <kb>
 verify:    verify-prompt <id> --repo owner/name --base <sha> --worktree <dir>   (prompt for a fresh verifying agent)
 auto-triage: auto-triage plan|start [ids|filters] [--group-size 5] [--recheck] [--repo owner/name] [--concurrency N] [--model m]
@@ -3903,7 +4843,7 @@ const COMMANDS = {
   start: cmdStart, continue: cmdContinue, restart: cmdRestart, stop: cmdStop, 'set-run': cmdSetRun,
   'plan-context': cmdPlanContext, 'apply-plan': cmdApplyPlan, claim: cmdClaim, submit: cmdSubmit,
   status: cmdStatus, files: cmdFiles, query: cmdQuery, show: cmdShow, sql: cmdSql, triage: cmdTriage, confirm: cmdConfirm, retype: cmdRetype,
-  profile: cmdProfile, dupes: cmdDupes, 'tracker-sync': cmdTrackerSync, 'tracker-import': cmdTrackerImport,
+  profile: cmdProfile, prompt: cmdPrompt, scans: cmdScans, compare: cmdCompare, repeat: cmdRepeat, dupes: cmdDupes, 'tracker-sync': cmdTrackerSync, 'tracker-import': cmdTrackerImport,
   match: cmdMatch, link: cmdLink, unlink: cmdUnlink, 'issues-sync': cmdIssuesSync, 'report-config': cmdReportConfig, render: cmdRender,
   drafts: cmdDrafts, calibrate: cmdCalibrate, 'verify-prompt': cmdVerifyPrompt, 'auto-triage': cmdAutoTriage, init: cmdInit, statusline: cmdStatusline, limits: cmdLimits, 'statusline-path': () => out(rateLimitsPath()), 'file-gh': cmdFileGh, 'record-filing': cmdRecordFiling,
   run: cmdRun, runners: cmdRunners, 'run-prompt': cmdRunPrompt, install: cmdInstall,

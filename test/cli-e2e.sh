@@ -12,6 +12,10 @@ ok()   { echo "PASS $1"; }
 bad()  { echo "FAIL $1"; FAILS=$((FAILS+1)); }
 check() { local name=$1; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
 has()  { grep -q -- "$2" <<<"$1"; }
+# scans run registered review profiles; `fresh` closes every open scan before switching profiles
+P()     { B profile register "$@" >/dev/null || echo "REGFAIL $*"; }
+fresh() { B stop --all --close >/dev/null 2>&1; }
+sidof() { B status | sed -n 's/^scan \([0-9]*\).*/\1/p'; }
 
 cat > "$W/bin/gh" <<'EOF'
 #!/bin/bash
@@ -37,9 +41,13 @@ python3 -c "print('\n'.join('int h%d(int a){return a+%d;}'%(i,i) for i in range(
 echo junk > src/untracked.c
 git add -A ':!src/untracked.c' && git commit -qm init
 
-# --- inventory / start
-o=$(B start --chunk-kb 8)
-has "$o" 'NEXT {' && ok start || bad start
+# --- inventory / start (a scan needs a registered review profile)
+has "$(B start)" '^INIT' && ok start-needs-profile || bad start-needs-profile
+has "$(B start --chunk-kb 8 2>&1)" 'part of a review profile' && ok start-rejects-spec-flags || bad start-rejects-spec-flags
+P base --prompt default --model opus --chunk-kb 8
+P np --prompt default --model opus --chunk-kb 8 --no-plan
+o=$(B start)
+has "$o" 'NEXT {' && has "$o" 'profile=base@1' && ok start || bad "start: $o"
 st=$(B files)
 has "$st" 'excluded	vendor/v.c' && has "$st" 'excluded	tests/test_x.py' && ! has "$st" untracked && ok classification || bad classification
 big=$(B sql "select count(*) || ' ' || max(json_array_length(items_json)) from chunks where scan_id=1 and state='pending' and items_json like '%src/store/big.c%'" | tail -1)
@@ -64,7 +72,7 @@ worker() {
   while true; do
     o=$(node "$HERE/bin/code-scan.js" claim 1); [ "$o" = NONE ] && break
     c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
-    sed -n 's/^- \(src[^ ]*\)\( lines.*slice \([0-9]*\).*\)\{0,1\}$/\1 \3/p' <<<"$o" | while read -r p k; do
+    sed -n 's/^- \([^ ]*\)\( lines.*slice \([0-9]*\).*\)\{0,1\}$/\1 \3/p' <<<"$o" | while read -r p k; do
       case $p in
         src/net/buf.c) f='[{"line":1,"severity":"critical","category":"memory-safety","title":"use after free of b in f","confidence":0.9}]';;
         src/store/db.py) f='[{"line":2,"severity":"critical","category":"vulnerability","title":"SQL injection in q via n"},{"line":2,"severity":"high","category":"vulnerability","title":"SQL injection in q through n"}]';;
@@ -147,21 +155,21 @@ has "$(B render)" '0 draft' && ok no-refile || bad no-refile
 B triage "$kv" --set fixed >/dev/null
 echo '// c' >> src/store/kv.go && git commit -qam c
 has "$(B query --stale --triage all)" kv.go && ok stale || bad stale
-o=$(B restart --no-plan)
+o=$(B restart)
 has "$o" 'to review: 1 files' && has "$o" 'reused plan' && ok restart-incremental || bad "restart-incremental: $o"
 c=$(B claim 2 | sed -n 's/^CHUNK \([0-9]*\).*/\1/p')
 B submit 2 "$c" --file src/store/kv.go <<<'[{"line":2,"severity":"high","category":"panic","title":"nil pointer dereference in G for missing key"}]' >/dev/null
 has "$(B show "$kv")" 'triage=open' && ok reopen || bad reopen
 has "$(B restart)" '"workers":0' && ok restart-noop || bad restart-noop
 has "$(B status)" '\[done\]' && ok noop-done || bad noop-done
-has "$(B restart --force --no-plan)" 'to review: 5 files' && ok force || bad force
+has "$(B restart --force)" 'to review: 5 files' && ok force || bad force
 
 # --- cross-scan dedup with reworded title + shifted line; gone marking
 uaf=$(B query --path src/net/buf.c --format json --triage all | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')
 nsql=$(B query --path src/store/db.py --triage all | head -1)
 printf '// header\n' | cat - src/net/buf.c > t && mv t src/net/buf.c; echo '# c' >> src/store/db.py; git commit -qam shift
-B stop >/dev/null; B restart --no-plan >/dev/null
-sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+B stop >/dev/null; B restart >/dev/null
+sid=$(sidof)
 while o=$(B claim "$sid"); [ "$o" != NONE ]; do
   c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
   for p in $(sed -n 's/^- \(src[^ ]*\)$/\1/p' <<<"$o"); do
@@ -172,24 +180,26 @@ done
 [ "$(B query --path src/net/buf.c --format json --triage all | python3 -c 'import json,sys; r=json.load(sys.stdin); print(len(r), r[0]["id"], r[0]["line"])')" = "1 $uaf 2" ] && ok dedup-reworded || bad "dedup-reworded: $(B query --path src/net/buf.c --triage all)"
 [ "$(B query --path src/store/db.py --triage all | head -1)" = 'no findings match' ] && has "$(B query --path src/store/db.py --gone --triage all)" gone && ok gone || bad "gone: $(B query --path src/store/db.py --include-gone --triage all)"
 
-# --- profiles
+# --- prompts and profiles
 echo 'Only SQL injection.' > "$W/p.md"
-B profile add sqli --file "$W/p.md" >/dev/null && has "$(B profile list)" sqli && ok profile-add || bad profile-add
-B stop >/dev/null; has "$(B restart --profile sqli --no-plan)" 'profile=sqli' && ok profile-scan || bad profile-scan
+B prompt add sqli --file "$W/p.md" >/dev/null && has "$(B prompt list)" sqli && ok prompt-add || bad prompt-add
+has "$(B profile add x --file "$W/p.md" 2>&1)" 'prompt add' && ok profile-add-moved || bad profile-add-moved
+P sqli --prompt sqli --model opus --no-plan
+fresh; has "$(B restart --profile sqli)" 'profile=sqli@1' && ok profile-scan || bad profile-scan
 
 # --- a stopped scan whose in-flight work completes becomes done
 echo '// s' >> src/net/buf.h && git commit -qam s
-B stop >/dev/null 2>&1; B restart --no-plan >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+B stop >/dev/null 2>&1; B restart >/dev/null; sid=$(sidof)
 claims=(); while o=$(B claim "$sid"); [ "$o" != NONE ]; do claims+=("$o"); done
 B stop >/dev/null
 for o in "${claims[@]}"; do c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
-  sed -n 's/^- \(src[^ ]*\)\( lines.*slice \([0-9]*\).*\)\{0,1\}$/\1 \3/p' <<<"$o" | while read -r p k; do
+  sed -n 's/^- \([^ ]*\)\( lines.*slice \([0-9]*\).*\)\{0,1\}$/\1 \3/p' <<<"$o" | while read -r p k; do
     B submit "$sid" "$c" --file "$p" ${k:+--slice "$k"} <<<'[]' >/dev/null || echo "SUBMITFAIL $p"; done; done
 has "$(B status --scan "$sid")" '\[done\]' && ok stopped-then-done || bad "stopped-then-done: $(B status --scan "$sid" | head -3)"
 
 # --- repeated pattern across files, titles differ by symbol names -> one auto group
 mkdir -p src/pat; for n in a b c; do printf 'int *mk_%s(int n){ int *p = malloc(n); for (int i = 0; i <= n; i++) p[i] = i; return p; }\n' $n > src/pat/$n.c; done
-git add -A && git commit -qm pat; B stop >/dev/null 2>&1; B restart --no-plan >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+git add -A && git commit -qm pat; B stop >/dev/null 2>&1; B restart >/dev/null; sid=$(sidof)
 while o=$(B claim "$sid"); [ "$o" != NONE ]; do c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
   for p in $(sed -n 's/^- \(src[^ ]*\)$/\1/p' <<<"$o"); do n=$(basename "$p" .c)
     if [[ $p == src/pat/* ]]; then f="[{\"line\":1,\"severity\":\"high\",\"category\":\"memory-safety\",\"title\":\"Off-by-one heap overflow in mk_$n loop (i <= n)\"}]"; else f='[]'; fi
@@ -217,38 +227,42 @@ r=$(calrun grows 'size <= 24 ? 100 : 1'); has "$r" 'DONE chunk_kb=24' && ok cali
 r=$(calrun shrinks 'size <= 8 ? 100 : 2'); has "$r" 'DONE chunk_kb=8' && ok calibrate-smaller || bad "calibrate-smaller: $r"
 r=$(calrun flat '100'); has "$r" 'DONE chunk_kb=36' && ok calibrate-flat || bad "calibrate-flat: $r"
 has "$(B status --all)" 'cal' && bad calibrate-hidden || ok calibrate-hidden
-B stop >/dev/null 2>&1
-has "$(B restart --model grows --no-plan)" 'chunk size: 24KB (calibrated for grows)' && ok calibrated-chunk || bad calibrated-chunk
-has "$(B restart --model unknown-model --no-plan)" 'CALIBRATE' && ok calibrate-hint || bad calibrate-hint
+has "$(B profile register grows --prompt default --model grows --no-plan)" 'chunk 24KB (calibrated)' && ok calibrated-chunk || bad calibrated-chunk
+has "$(B profile register unk --prompt default --model unknown-model --no-plan)" 'no chunk-size calibration' && ok calibrate-hint || bad calibrate-hint
 
-# --- continue --model re-chunks a pending scan with a calibration finished after it was created
-B stop >/dev/null 2>&1; o=$(B restart --model late-model --no-plan --force)
-has "$o" 'CALIBRATE' && ok late-hint || bad late-hint
+# --- a calibration finished later goes into a new profile version; scans of the old version keep theirs
+has "$(B continue --model late-model 2>&1)" 'part of a review profile' && ok continue-rejects-model || bad continue-rejects-model
 B calibrate set late-model 12 >/dev/null
-o=$(B continue --model late-model); has "$o" 'chunk size: 12KB (calibrated for late-model)' && ok continue-rechunk || bad "continue-rechunk: $o"
-sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+o=$(B profile register late --prompt default --model late-model --no-plan); has "$o" 'chunk 12KB (calibrated)' && ok register-uses-calibration || bad "register-uses-calibration: $o"
+fresh; o=$(B restart --profile late --force); has "$o" 'chunk size: 12KB' && ok restart-new-profile || bad "restart-new-profile: $o"
+sid=$(sidof)
 [ "$(B sql "select count(*) from chunks where scan_id=$sid and state='pending' and bytes > 12*1024 and json_array_length(items_json) > 1" | tail -1)" = 0 ] && ok rechunk-sizes || bad rechunk-sizes
 
+B calibrate set late-model 20 >/dev/null
+o=$(B profile register late --prompt default --model late-model --no-plan); has "$o" 'registered late@2' && has "$o" 'changed from late@1: chunk size' && ok profile-version-bump || bad "profile-version-bump: $o"
+has "$(B scans show "$sid")" 'late@1' && ok old-scan-keeps-version || bad old-scan-keeps-version
 has "$(B calibrate start --model tiny --sample-kb 40 --medium 64)" 'too small to calibrate' && ok calibrate-tiny || bad calibrate-tiny
 
-B stop >/dev/null 2>&1; o=$(B restart --no-plan --force --only src/net/ --only src/pat/)
+P netpat --prompt default --model opus --no-plan --only src/net/ --only src/pat/
+fresh; o=$(B restart --profile netpat --force)
 has "$o" 'to review: 5 files' && has "$(B files --path src/store/db.py)" 'out-of-scope' && ok only-scope || bad "only-scope: $o"
-B apply-plan "$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')" --file <(echo '{"include":[{"glob":"src/store/","reason":"x"}]}') >/dev/null
+B apply-plan "$(sidof)" --file <(echo '{"include":[{"glob":"src/store/","reason":"x"}]}') >/dev/null
 has "$(B files --path src/store/db.py)" 'out-of-scope' && ok only-vs-planner || bad only-vs-planner
 
-B stop >/dev/null 2>&1; B restart --no-plan --exclude src/net/ >/dev/null; B stop >/dev/null 2>&1
-o=$(B restart --no-plan --force --only src/net/); has "$o" 'to review: 2 files' && ok restart-scope-replaces || bad "restart-scope-replaces: $o"
-B stop >/dev/null 2>&1; o=$(B restart --no-plan --force --reset-scope); ! has "$o" 'out-of-scope' && ! has "$o" 'user-exclude' && ok reset-scope || bad "reset-scope: $o"
-B stop >/dev/null 2>&1; o=$(B restart --no-plan --force --only 'src/{net,pat}/**')
+has "$(B restart --only src/net/ 2>&1)" 'part of a review profile' && ok restart-rejects-scope || bad restart-rejects-scope
+P braces --prompt default --model opus --no-plan --only 'src/{net,pat}/**'
+fresh; o=$(B restart --profile braces --force)
 has "$o" 'to review: 5 files' && ok only-brace-glob || bad "only-brace-glob: $o"
 
 # --- inline claim + one batch submit for the whole chunk
-B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+P net40 --prompt default --model opus --no-plan --only src/net/ --chunk-kb 40
+P big40 --prompt default --model opus --no-plan --only src/store/big.c --chunk-kb 40
+fresh; B restart --profile net40 --force >/dev/null; sid=$(sidof)
 o=$(B claim --inline "$sid"); c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
 has "$o" '=== src/net/buf.c' && grep -qP '^\s+1\t' <<<"$o" && ok claim-inline || bad "claim-inline: $o"
-B stop >/dev/null 2>&1; B restart --no-plan --force --only src/store/big.c --chunk-kb 40 >/dev/null; sid2=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+fresh; B restart --profile big40 --force >/dev/null; sid2=$(sidof)
 o2=$(B claim --inline "$sid2"); has "$o2" 'in ONE turn' && has "$o2" "Read $W/repo/src/store/big.c offset=1001 limit=1000" && ok claim-large-lists-files || bad "claim-large-lists-files: $(head -c 400 <<<"$o2")"
-B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+fresh; B restart --profile net40 --force >/dev/null; sid=$(sidof)
 o=$(B claim --inline "$sid"); c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
 v=$(B submit "$sid" "$c" <<<'{"src/nope.c": []}' 2>&1); has "$v" 'not in chunk' && ok batch-rejects-unknown || bad "batch-rejects-unknown: $v"
 v=$(B submit "$sid" "$c" <<<'{"src/net/buf.c": [{"line":1,"severity":"high","type":"leak","category":"memory-safety","title":"batch finding"}], "src/net/buf.h": []}')
@@ -257,7 +271,7 @@ has "$(B query --type leak --triage all)" 'batch finding' && ok type-explicit ||
 has "$o" 'type: exactly one of' && has "$o" '"type":"<type>"' && ok type-in-claim || bad type-in-claim
 
 # --- re-found bug with shifted range / different cited spot matches the existing finding
-B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+fresh; B restart --profile net40 --force >/dev/null; sid=$(sidof)
 c=$(B claim "$sid" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p')
 before=$(B sql "select count(*) from findings" | tail -1)
 B submit "$sid" "$c" <<<'{"src/net/buf.c": [{"line":1,"end_line":3,"severity":"high","category":"memory-safety","title":"batch finding: buffer reused"}], "src/net/buf.h": []}' >/dev/null
@@ -266,7 +280,8 @@ after=$(B sql "select count(*) from findings" | tail -1)
 
 # --- limits: dollar cap from the scan's own agent transcripts, 5-hour cap from the status-line snapshot
 export CLAUDE_CONFIG_DIR=$W/claude XDG_CACHE_HOME=$W/xdg
-B stop >/dev/null 2>&1; B restart --no-plan --force --only src/pat/ --chunk-kb 1 --max-usd 1 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+P pat1 --prompt default --model opus --no-plan --only src/pat/ --chunk-kb 1
+fresh; B restart --profile pat1 --force --max-usd 1 >/dev/null; sid=$(sidof)
 has "$(B claim --inline "$sid")" '^CHUNK' && ok usd-under-limit || bad usd-under-limit
 mkdir -p "$W/claude/projects/p/s/subagents/workflows/wf_x"
 { printf '{"type":"user","message":{"role":"user","content":"Run: CODESCAN_HOME=%s node x -C %s claim --inline %s"}}\n' "$CODESCAN_HOME" "$W/repo" "$sid"
@@ -315,7 +330,7 @@ has "$(B limits)" 'spend: \$15.20 of \$1000 limit' && ok pricing-by-id || bad "p
 printf '{"type":"assistant","message":{"id":"h2","model":"claude-haiku-4-5","usage":{"output_tokens":200000}}}\n' >> "$W/claude/projects/p/s/subagents/workflows/wf_x/agent-c.jsonl"
 has "$(B limits)" 'spend: \$16.20 of' && ok spend-incremental || bad "spend-incremental: $(B limits)"
 # spend of one scan's agents is still counted after another scan looked at the same transcripts first
-o_sid=$sid; B stop >/dev/null 2>&1; B restart --no-plan --force --only src/pat/ --chunk-kb 1 --max-usd 1000 >/dev/null; sid2=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+o_sid=$sid; B stop >/dev/null 2>&1; B restart --force --max-usd 1000 >/dev/null; sid2=$(sidof)
 B limits --scan "$sid2" >/dev/null   # the new scan scans the transcripts first: none are its own
 { printf '{"type":"user","message":{"role":"user","content":"Run: CODESCAN_HOME=%s node x -C %s claim --inline %s"}}\n' "$CODESCAN_HOME" "$W/repo" "$sid2"
   printf '{"type":"assistant","message":{"id":"n1","model":"claude-opus-5-5","usage":{"output_tokens":50000}}}\n'
@@ -345,29 +360,29 @@ for cal in $(B sql "select id from calibrations where init_id=1 order by id" | t
 done
 r=$(B init report)
 has "$r" 'good-model' && has "$r" '\$/1kLOC' && [ "$(sed -n 3p <<<"$r" | cut -f1)" = good-model ] && ok init-report || bad "init-report: $r"
-has "$(B init pick good-model)" 'default reviewer model: good-model' && ok init-pick || bad init-pick
-o=$(B start --new --no-plan --force)
-has "$o" 'calibrated for good-model' && ! has "$o" '^INIT' && ok init-default-used || bad "init-default-used: $o"
-B sql "delete from config where key='default_model'" >/dev/null 2>&1 || node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"delete from config where key='default_model'\")"
-has "$(B start --new --no-plan --force)" '^INIT' && ok init-hint || bad init-hint
+o=$(B init pick good-model); has "$o" 'default reviewer model: good-model' && has "$o" 'review profile default@1' && ok init-pick || bad "init-pick: $o"
+fresh; o=$(B start --force)
+has "$o" 'profile=default@1' && has "$o" 'model good-model' && ! has "$o" '^INIT' && ok init-default-used || bad "init-default-used: $o"
+node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"delete from config where key='default_profile'\")"
+has "$(B start --new --force)" '^INIT' && ok init-hint || bad init-hint
 
 # --- review fixes for init
 has "$(B init report 99 2>&1)" 'no init 99' && ok init-report-bad-id || bad init-report-bad-id
 B calibrate set sonnet 24 >/dev/null; has "$(B sql "select value from config where key='chunk_kb:claude-sonnet-5-5'")" 24 && ok calibrate-set-normalizes || bad calibrate-set-normalizes
-B init pick good-model >/dev/null; B stop >/dev/null 2>&1; B start --new --no-plan --force --model claude-sonnet-5-5 >/dev/null
-B init pick weak-model >/dev/null; B stop >/dev/null 2>&1; o=$(B restart --no-plan --force)
-has "$o" 'calibrated for weak-model' && ok restart-honours-pick || bad "restart-honours-pick: $o"
+B init pick good-model >/dev/null; B init pick weak-model >/dev/null; fresh; o=$(B restart --profile default --force)
+has "$o" 'profile=default@2' && has "$o" 'model weak-model' && ok restart-honours-pick || bad "restart-honours-pick: $o"
 has "$o" '"model":"weak-model"' && ok model-id-passthrough || bad "model-id-passthrough: $o"
-o=$(B start --new --no-plan --force --model sonnet); has "$o" '"model":"sonnet"' && has "$o" 'calibrated for claude-sonnet-5-5' && ok model-alias-current || bad "model-alias-current: $o"
-sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p'); o=$(B claim --inline --rules "$sid"); has "$o" '== REVIEWER INSTRUCTIONS ==' && has "$o" 'Submit once' && ok claim-rules || bad "claim-rules: $(head -c 300 <<<"$o")"
+P son --prompt default --model sonnet --no-plan
+fresh; o=$(B start --profile son --force); has "$o" '"model":"sonnet"' && has "$o" 'chunk size: 24KB' && ok model-alias-current || bad "model-alias-current: $o"
+sid=$(sidof); o=$(B claim --inline --rules "$sid"); has "$o" '== REVIEWER INSTRUCTIONS ==' && has "$o" 'Submit once' && ok claim-rules || bad "claim-rules: $(head -c 300 <<<"$o")"
 node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"update calibrations set status='failed', result_kb=null where model='weak-model'\")"
 has "$(B init pick weak-model)" 'default reviewer model: weak-model' && ok pick-unfinished-calibration || bad pick-unfinished-calibration
 
-o=$(B start --new --no-plan --force --concurrency 4); has "$o" '"lanes":4' && ok concurrency-flag || bad "concurrency-flag: $o"
-has "$(B start --new --no-plan --force --concurrency 40 2>&1)" 'whole number 1-32' && ok concurrency-validated || bad concurrency-validated
+o=$(B start --new --profile son --force --concurrency 4); has "$o" '"lanes":4' && ok concurrency-flag || bad "concurrency-flag: $o"
+has "$(B start --new --profile son --force --concurrency 40 2>&1)" 'whole number 1-32' && has "$(B status)" '\[active\]' && ok concurrency-validated || bad concurrency-validated
 
 # --- dismissed findings are shown to reviewers of the same files
-B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+fresh; B restart --profile net40 --force >/dev/null; sid=$(sidof)
 fid=$(B query --path src/net/buf.c --triage all --include-gone --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')
 B triage "$fid" --set false_positive --note "guarded by caller (test)" >/dev/null
 o=$(B claim --inline "$sid"); has "$o" 'ALREADY DISMISSED' && has "$o" 'guarded by caller (test)' && ok dismissed-shown || bad "dismissed-shown: $(head -c 600 <<<"$o")"
@@ -398,11 +413,11 @@ echo '{"state":"MERGED","url":"https://github.com/acme/toy/pull/77"}' > "$FAKEGH
 B issues-sync --tracker gh:acme/toy >/dev/null; has "$(B show "$fid")" 'triage=fixed' && ok sync-pr-merged || bad "sync-pr-merged: $(B show "$fid" | sed -n 2p)"
 # many dismissed findings for one file are capped
 for k in $(seq 1 12); do echo "[{\"line\":$k,\"severity\":\"low\",\"category\":\"c$k\",\"title\":\"distinct dismissed thing number $k zz$k\"}]" > "$W/d$k.json"; done
-B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+fresh; B restart --profile net40 --force >/dev/null; sid=$(sidof)
 c=$(B claim "$sid" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p')
 jq -s 'add' "$W"/d*.json > "$W/dall.json"; B submit "$sid" "$c" --file src/net/buf.c --input "$W/dall.json" >/dev/null; B submit "$sid" "$c" --file src/net/buf.h <<<'[]' >/dev/null
 B triage --text 'distinct dismissed thing' --triage all --set false_positive --note "fine (test)" >/dev/null
-B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+fresh; B restart --profile net40 --force >/dev/null; sid=$(sidof)
 o=$(B claim --inline "$sid"); n=$(grep -c '^- src/net/buf.c:.*\[false_positive\]' <<<"$o"); has "$o" 'older dismissed finding(s) not shown' && [ "$n" -le 8 ] && ok dismissed-capped || bad "dismissed-capped: $n"
 
 # --- auto-triage: groups, claim, submit validation, recorded outcome
@@ -434,5 +449,76 @@ has "$(B retype 9 --set nonsense 2>&1)" '--set must be one of' && ok retype-vali
 has "$(B confirm 7 --set confirmed --set-type dos)" 'type: #7 integer→dos' && ok confirm-set-type || bad confirm-set-type
 has "$(B query --triage all --sort type --format csv)" 'id,severity,type,category' && ok type-csv || bad type-csv
 has "$(B status)" 'by type:' && ok type-status || bad type-status
+
+# --- registered profiles side by side: versions, parallel scans, per-scan reports, compare, repeat, store
+fresh
+o=$(B profile register sec-a --prompt security --model opus --no-plan --only src/net/ --only src/store/kv.go --chunk-kb 40)
+has "$o" 'registered sec-a@1' && ok profile-register || bad "profile-register: $o"
+has "$(B profile register sec-a --prompt security --model opus --no-plan --only src/store/kv.go --only src/net/ --chunk-kb 40)" 'unchanged, already registered as sec-a@1' && ok profile-idempotent || bad profile-idempotent
+P sec-b --prompt security --model codex:gpt-x --no-plan --only src/net/ --only src/store/kv.go --chunk-kb 40
+has "$(B profile diff sec-a sec-b)" 'runner, model' && ok profile-diff || bad "profile-diff: $(B profile diff sec-a sec-b)"
+has "$(B profile show sec-a@1)" 'frozen copy' && has "$(B profile list)" 'sec-b@1' && ok profile-show-list || bad profile-show-list
+o=$(B start --profile sec-a,sec-b --label par)
+has "$o" '(par-sec-a)' && has "$o" '(par-sec-b)' && [ "$(grep -c '^RUN ' <<<"$o")" = 2 ] && [ "$(grep -c 'to review: 3 files' <<<"$o")" = 2 ] && ok parallel-start || bad "parallel-start: $o"
+sa=$(B sql "select id from scans where label='par-sec-a'" | tail -1); sb=$(B sql "select id from scans where label='par-sec-b'" | tail -1)
+has "$(B continue 2>&1)" 'scans are open' && ok ambiguous-needs-scan || bad ambiguous-needs-scan
+has "$(B continue --scan par-sec-b)" '"workers":' && ok continue-by-label || bad continue-by-label
+has "$(B start --profile sec-a 2>&1)" "scan $sa of profile sec-a is active" && ok start-refuses-same-profile || bad start-refuses-same-profile
+drain() {  # $1 scan, $2 findings for buf.c, $3 for kv.go
+  local o c
+  while o=$(B claim --inline "$1"); [ "$o" != NONE ]; do c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
+    printf '%s' "$o" > "$W/claim.txt"
+    python3 -c 'import json, re, sys
+keys = re.findall(r"\"(src/[^\"]+)\": \[ \]", open(sys.argv[3]).read())
+print(json.dumps({k: json.loads(sys.argv[1] if k == "src/net/buf.c" else sys.argv[2] if k == "src/store/kv.go" else "[]") for k in keys}))' "$2" "$3" "$W/claim.txt" > "$W/batch.json"
+    B submit "$1" "$c" --input "$W/batch.json" >/dev/null || echo "SUBMITFAIL $1"; done
+}
+drain "$sa" '[{"line":2,"severity":"critical","category":"uaf","title":"f writes into b after free(b): use-after-free"}]' '[{"line":2,"severity":"high","category":"nil-deref","title":"nil map value dereference in G"}]'
+drain "$sb" '[{"line":2,"severity":"high","category":"uaf","title":"use-after-free: b written after free in f"}]' '[]'
+uaf=$(B query --scan "$sa" --path src/net/buf.c --triage all --include-gone --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')
+o=$(B show "$uaf"); has "$o" "scan $sa (par-sec-a).*sec-a@1.*\[critical" && has "$o" "scan $sb (par-sec-b).*sec-b@1.*codex:gpt-x \[high" && ok per-scan-reports || bad "per-scan-reports: $o"
+o=$(B compare par-sec-a par-sec-b)
+has "$o" 'found by all: 1 (critical 1)' && has "$o" "only scan $sa: 1 (high 1)" && has "$o" "only scan $sb: 0" && has "$o" "$sa:critical $sb:high" && has "$o" 'profiles differ in: runner, model' && ok compare-overlap || bad "compare-overlap: $o"
+[ "$(B compare "$sa" "$sb" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["clusters"]), d["basis"]["files"], [s["unique"] for s in d["scans"]])')" = "2 3 [1, 0]" ] && ok compare-json || bad "compare-json: $(B compare "$sa" "$sb" --json | head -c 600)"
+has "$(B query --scan "$sa" --not-seen-by "$sb" --triage all --include-gone)" 'kv.go' && ! has "$(B query --scan "$sa" --not-seen-by "$sb" --triage all --include-gone)" 'buf.c' && ok query-not-seen-by || bad query-not-seen-by
+has "$(B query --profile sec-b --triage all --include-gone)" 'buf.c' && ok query-profile || bad query-profile
+has "$(B scans --profile sec-b)" par-sec-b && ! has "$(B scans --profile sec-b)" par-sec-a && ok scans-filter || bad scans-filter
+o=$(B scans show "$sa"); has "$o" 'profile: sec-a@1' && has "$o" 'repeat exactly' && has "$o" 'chunks: 2, 2 with a recorded prompt hash' && ok scans-show || bad "scans-show: $o"
+# exact repeat: same chunks in the same order and the same dismissed context, even after triage changed
+B triage --path src/store/kv.go --triage all --set false_positive --note "repeat test" >/dev/null
+o=$(B repeat par-sec-a --label again); r=$(sed -n 's/^scan \([0-9]*\) (again) repeats scan.*/\1/p' <<<"$o")
+[ -n "$r" ] && has "$o" 'the same 2 chunk(s)' && [ "$(B sql "select group_concat(items_json,'|') from (select items_json from chunks where scan_id=$sa and state!='void' order by ord)" | tail -1)" = "$(B sql "select group_concat(items_json,'|') from (select items_json from chunks where scan_id=$r order by ord)" | tail -1)" ] && ok repeat-same-chunks || bad "repeat-same-chunks: $o"
+o=$(B claim --inline "$r"); ! has "$o" 'repeat test' && ok repeat-replays-context || bad "repeat-replays-context: $(head -c 500 <<<"$o")"
+B stop --scan "$r" --close >/dev/null
+o=$(CODESCAN_CLAUDE_BIN=/bin/true B repeat "$sa" 2>&1); has "$o" 'drift: runner binary' && ok repeat-drift || bad "repeat-drift: $o"
+B stop --scan again --close >/dev/null 2>&1; B stop --all --close >/dev/null 2>&1
+# another review type re-reviewing a changed file leaves the first type's findings alone
+printf '// touch\n' >> src/net/buf.c; git commit -qam touch
+P conc --prompt concurrency --model opus --no-plan --only src/net/ --chunk-kb 40
+B restart --profile conc >/dev/null; drain "$(sidof)" '[]' '[]'
+has "$(B query --path src/net/buf.c --triage all)" "#$uaf" && ok gone-per-profile || bad "gone-per-profile: $(B query --path src/net/buf.c --triage all --include-gone)"
+# same profile at a later commit: new / gone / still there
+fresh; B restart --profile sec-a >/dev/null; s2=$(sidof); drain "$s2" '[]' '[]'
+o=$(B compare "$sa" "$s2"); has "$o" 'gone 1 (critical 1)' && has "$o" 'still there 1 (0 found again, 1 on unchanged files)' && ok compare-commits || bad "compare-commits: $o"
+has "$(B query --path src/net/buf.c --gone --triage all)" "#$uaf" && ok gone-same-profile || bad gone-same-profile
+# remove a scan: findings only it reported go unless someone triaged them
+o=$(B scans rm "$sb" --dry-run); has "$o" '0 finding(s) only it reported' && ok scans-rm-dry || bad "scans-rm-dry: $o"
+B scans label "$sb" keep >/dev/null; has "$(B scans)" 'keep' && ok scans-label || bad scans-label
+B scans rm keep >/dev/null; ! has "$(B scans)" 'keep' && has "$(B show "$uaf")" "scan $sa" && ! has "$(B show "$uaf")" "scan $sb " && ok scans-rm || bad "scans-rm: $(B show "$uaf")"
+has "$(B run "$s2" --model opus 2>&1)" 'belong to a profile' && ok run-locked-to-profile || bad run-locked-to-profile
+
+# --- upgrade: a store made by the previous release gets legacy profiles, keeps its ledger
+OLD=2faaeaa270ecbe8a689c2a67403b2e36389fcf2b   # 1.7.0, the last release before registered profiles
+if git -C "$HERE" cat-file -e "$OLD:bin/code-scan.js" 2>/dev/null; then
+  mkdir -p "$W/old" && git -C "$HERE" archive "$OLD" bin profiles agents prompts package.json | tar -x -C "$W/old"
+  O() { node "$W/old/bin/code-scan.js" "$@"; }
+  export CODESCAN_HOME=$W/state-old
+  O start --chunk-kb 8 --no-plan --model opus >/dev/null; c=$(O claim 1 | sed -n 's/^CHUNK \([0-9]*\).*/\1/p')
+  while [ -n "$c" ]; do o=$(O claim 1); c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o"); for p in $(sed -n 's/^- \([^ ]*\)$/\1/p' <<<"$o"); do O submit 1 "$c" --file "$p" <<<'[]' >/dev/null; done; done
+  O sql "select count(*) from reviewed" >/dev/null
+  o=$(B profile list); has "$o" 'legacy-default@1' && has "$(B scans show 1)" 'legacy-default@1' && ok upgrade-legacy-profile || bad "upgrade-legacy-profile: $o"
+  o=$(B restart); has "$o" 'profile=legacy-default@1' && has "$o" 'unchanged (skipped): [1-9]' && ok upgrade-ledger-kept || bad "upgrade-ledger-kept: $o"
+  export CODESCAN_HOME=$W/state
+else ok "upgrade (skipped: 1.7.0 not in this checkout)"; fi
 
 echo "---"; [ $FAILS = 0 ] && echo "ALL PASS" || echo "$FAILS FAILED"; exit $FAILS
