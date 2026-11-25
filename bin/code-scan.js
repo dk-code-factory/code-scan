@@ -259,7 +259,7 @@ function pathMatcher(spec) {
 
 // ------------------------------------------------------------------ arg parse
 
-const BOOL_FLAGS = new Set(['close', 'no-dismissed', 'all-versions', 'retired', 'include-tests', 'force', 'no-plan', 'replan', 'now', 'all',
+const BOOL_FLAGS = new Set(['reclaim', 'close', 'no-dismissed', 'all-versions', 'retired', 'include-tests', 'force', 'no-plan', 'replan', 'now', 'all',
   'latest', 'stale', 'no-stale', 'reported', 'unreported', 'primary-only', 'new',
   'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules', 'recheck',
   'detach', 'reply', 'full', 'uninstall', 'user', 'project']);
@@ -447,14 +447,20 @@ function db() {
   return DB;
 }
 
+let txDepth = 0;
+/** Run fn in one transaction; nested calls join the outer one (an error anywhere rolls all of it back). */
 function tx(fn) {
   const d = db();
+  if (txDepth) { txDepth++; try { return fn(d); } finally { txDepth--; } }
   d.exec('BEGIN IMMEDIATE');
+  txDepth = 1;
   try {
     const r = fn(d);
+    txDepth = 0;
     d.exec('COMMIT');
     return r;
   } catch (e) {
+    txDepth = 0;
     try { d.exec('ROLLBACK'); } catch (ignored) { /* already rolled back */ }
     throw e;
   }
@@ -966,9 +972,15 @@ function pendingChunks(scanId) {
   return db().prepare("SELECT COUNT(*) n FROM chunks WHERE scan_id=? AND state='pending'").get(scanId).n;
 }
 
+/** Shell word for t: bare when it is plainly safe (keeps commands readable), single-quoted otherwise. */
+function shw(t) { return /^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : shq(t); }
+/** Inverse of shw for a word matched by SHW_RE (also as it appears JSON-escaped inside a transcript). */
+function unshw(t) { return t.startsWith("'") ? t.slice(1, -1).replace(/'\\{1,2}''/g, "'") : t; }
+const SHW_RE = String.raw`(?:'(?:[^']|'\\{1,2}'')*'|\S+)`;
+
 function cliPrefix() {
-  const h = process.env.CODESCAN_HOME ? `CODESCAN_HOME=${path.resolve(process.env.CODESCAN_HOME)} ` : '';
-  return `${h}node ${CLI} -C ${repoRoot()}`;
+  const h = process.env.CODESCAN_HOME ? `CODESCAN_HOME=${shw(path.resolve(process.env.CODESCAN_HOME))} ` : '';
+  return `${h}node ${shw(CLI)} -C ${shw(repoRoot())}`;
 }
 
 /** Workflow agent() model alias for a model id (claude-sonnet-5-5 → sonnet); null = inherit. */
@@ -1102,7 +1114,7 @@ function adoptFollowers(leaderId) {
  * the batch reviews the same code set. Prints each scan, a RUN line per scan, and one NEXT for the
  * Workflow covering the claude scans (`follow` = further scans its reviewer lanes serve).
  */
-function createBatch(items, f) {
+function createBatch(items, f, supersede = []) {
   const labels = listFlag(f.label) || [];
   const labelFor = (i, it) => (labels.length === items.length ? labels[i] : labels.length === 1 ? (items.length > 1 ? `${labels[0]}-${it.prof.name}` : labels[0]) : null);
   if (labels.length > 1 && labels.length !== items.length) die(`--label: give one label, or one per profile (${items.length})`);
@@ -1126,6 +1138,8 @@ function createBatch(items, f) {
     if (it === leadIt) lead = r;
     res.push(r);
   }
+  // only now that the new scans exist: a createScan that dies leaves the open scans resumable
+  for (const id of supersede) setScanStatus(id, 'superseded');
   for (const r of res) r.lines.forEach((l) => out(l));
   if (!res.length) return;
   const live = res.filter((r) => r.scan.status === 'active');
@@ -1170,8 +1184,7 @@ function cmdStart(a) {
     if (ex && !a.f.new) die(`scan ${ex.id} of profile ${p.name} is ${ex.status} at ${ex.commit_sha.slice(0, 12)} — \`continue --scan ${ex.id}\`, \`restart --profile ${p.name}\`, or \`start --new\``);
   }
   const items = profs.map((p) => ({ prof: p, commit, opts: optsFromProfile(p, a.f) })); // validates flags first
-  for (const p of profs) { const ex = exQ.get(p.name); if (ex) setScanStatus(ex.id, 'superseded'); }
-  createBatch(items, a.f);
+  createBatch(items, a.f, profs.map((p) => exQ.get(p.name)).filter(Boolean).map((ex) => ex.id));
 }
 
 function cmdRestart(a) {
@@ -1192,8 +1205,7 @@ function cmdRestart(a) {
   }
   const commit = git(['rev-parse', 'HEAD']).trim();
   const items = pairs.map(({ prev, prof }) => ({ prof, commit, opts: optsFromProfile(prof, a.f, prev ? JSON.parse(prev.options_json) : {}) }));
-  for (const { prev } of pairs) if (prev && ['active', 'stopped'].includes(prev.status)) setScanStatus(prev.id, 'superseded');
-  createBatch(items, a.f);
+  createBatch(items, a.f, pairs.filter(({ prev }) => prev && ['active', 'stopped'].includes(prev.status)).map(({ prev }) => prev.id));
 }
 
 /** Put a repeated scan's own chunks back in the queue (it is never repacked: chunks stay as copied). */
@@ -1208,11 +1220,24 @@ function reviveReplay(scanId) {
   return { chunks: r.n, bytes: r.b, files };
 }
 
+const CLAIM_LIVE_MS = 45 * 60 * 1000; // an agent's own timeout: an older claim has no live reviewer
 function cmdContinue(a) {
   rejectSpecFlags(a.f, 'continue');
   const scan = pickScan(a.f);
   if (!scan) die('no active or stopped scan — use `start` or `restart`');
   if (!['active', 'stopped'].includes(scan.status)) die(`scan ${scan.id} is ${scan.status}`);
+  // pack() voids claimed chunks and re-queues their files: with reviewers still working on them
+  // (a live runner, or a user `stop` without --now whose in-flight agents have not submitted yet) that
+  // would review the same code twice and record duplicate findings
+  const cl = db().prepare("SELECT COUNT(*) n, MAX(claimed_at) last FROM chunks WHERE scan_id=? AND state='claimed'").get(scan.id);
+  if (cl.n && !a.f.reclaim) {
+    const runnerLive = /^pid:/.test(scan.workflow_task || '') && pidAlive(scan.workflow_task);
+    const recent = Date.now() - Date.parse(cl.last) < CLAIM_LIVE_MS;
+    const userStop = scan.status === 'stopped' && !cfgGet(`stop_reason:${scan.id}`); // not a spending-limit stop
+    if (runnerLive || (userStop && recent)) {
+      die(`scan ${scan.id}: ${cl.n} chunk(s) still claimed by in-flight reviewers${runnerLive ? ` (runner ${scan.workflow_task} is running)` : ''} — wait for them to finish, \`stop --now\` to release them, or \`continue --reclaim\` to re-queue them anyway`);
+    }
+  }
   const head = git(['rev-parse', 'HEAD']).trim();
   setScanStatus(scan.id, 'active');
   db().prepare('DELETE FROM config WHERE key=?').run(`stop_reason:${scan.id}`);
@@ -1662,10 +1687,14 @@ function cmdSubmit(a) {
       if (!Array.isArray(v)) die(`value for ${k} must be an array`);
     }
     const missing = [...keys].filter((k) => !(k in arr));
-    for (const [k, v] of Object.entries(arr)) {
-      const m = k.replace(/^\.\//, '').match(/^(.*?)(?:#(\d+))?$/);
-      cmdSubmit({ pos: [String(scanId), String(chunkId)], f: { file: m[1], slice: m[2] }, arr: v });
-    }
+    // one transaction for the whole chunk: a file rejected later (die exits without COMMIT) leaves the
+    // earlier files unrecorded too, so the resubmitted object is not counted or inserted twice
+    tx(() => {
+      for (const [k, v] of Object.entries(arr)) {
+        const m = k.replace(/^\.\//, '').match(/^(.*?)(?:#(\d+))?$/);
+        cmdSubmit({ pos: [String(scanId), String(chunkId)], f: { file: m[1], slice: m[2] }, arr: v });
+      }
+    });
     if (missing.length) out(`note: not submitted yet: ${missing.join(', ')}`);
     return;
   }
@@ -2390,7 +2419,7 @@ function transcriptSpendUsd(scan) {
   // the prefix is matched on the command itself (code under review may mention CODESCAN_HOME too)
   // The owner (repo, state dir, scan) is parsed from the task command itself — never judged against
   // the scan that happens to ask first, since other scans (calibration rounds) share the cache.
-  const owner = /(?:CODESCAN_HOME=(\S+) )?node \S+ -C (\S+) (?:claim(?: --inline)?|plan-context|apply-plan) (\d+)\b/;
+  const owner = new RegExp(`(?:CODESCAN_HOME=(${SHW_RE}) )?node ${SHW_RE} -C (${SHW_RE}) (?:claim(?: --inline)?|plan-context|apply-plan) (\\d+)\\b`);
   const since = Date.parse(scan.created) - 60000;
   const get = d.prepare('SELECT size, scan_key, usd, last_id FROM spend_files2 WHERE path=?');
   const put = d.prepare(`INSERT INTO spend_files2(path,size,scan_key,usd,last_id) VALUES(?,?,?,?,?)
@@ -2414,7 +2443,7 @@ function transcriptSpendUsd(scan) {
         const head = Buffer.alloc(Math.min(size, 20000));
         fs.readSync(fd, head, 0, head.length, 0);
         const m = head.toString('utf8').match(owner);
-        const ownerKey = m ? `${m[2]}|${m[1] ? path.resolve(m[1]) : ''}|${m[3]}` : null;
+        const ownerKey = m ? `${unshw(m[2])}|${m[1] ? path.resolve(unshw(m[1])) : ''}|${m[3]}` : null;
         belongs = ownerKey === key;
         // another scan's agent: remember its owner (usage is counted when that scan asks)
         // ownerless with a full head: never a code-scan agent (''); shorter: undecided (NULL), retried as it grows
@@ -3469,7 +3498,10 @@ function cmdDupes(a) {
     if (ids.length < 2) die('merge needs at least two finding ids');
     tx(() => {
       const gid = (d.prepare('SELECT MAX(group_id) m FROM dupe_groups').get().m || 0) + 1;
+      const oldGroups = d.prepare(`SELECT DISTINCT group_id FROM dupe_groups WHERE finding_id IN (${ids.map(() => '?').join(',')})`).all(...ids);
       d.prepare(`DELETE FROM dupe_groups WHERE finding_id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+      // the groups they left: drop a group left with one member, re-pick a primary that was merged away
+      for (const g of oldGroups) cleanupGroup(g.group_id);
       ids.forEach((id) => d.prepare('INSERT INTO dupe_groups(group_id,finding_id,is_primary,reason,manual) VALUES(?,?,0,?,1)').run(gid, id, 'manual'));
       d.prepare(`UPDATE findings SET dupe_lock=1 WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
       setPrimary(gid);
@@ -3527,10 +3559,15 @@ function cmdDupes(a) {
   let groups = 0, members = 0;
   tx(() => {
     const ids = rows.map((r) => r.id);
+    const left = new Set();
     for (let i = 0; i < ids.length; i += 500) {
       const part = ids.slice(i, i + 500);
-      d.prepare(`DELETE FROM dupe_groups WHERE manual=0 AND finding_id IN (${part.map(() => '?').join(',')})`).run(...part);
+      const q = part.map(() => '?').join(',');
+      for (const g of d.prepare(`SELECT DISTINCT group_id FROM dupe_groups WHERE manual=0 AND finding_id IN (${q})`).all(...part)) left.add(g.group_id);
+      d.prepare(`DELETE FROM dupe_groups WHERE manual=0 AND finding_id IN (${q})`).run(...part);
     }
+    // groups that kept members outside this selection: no single-member or primary-less leftovers
+    for (const g of left) cleanupGroup(g);
     let gid = d.prepare('SELECT MAX(group_id) m FROM dupe_groups').get().m || 0;
     for (const list of clusters.values()) {
       if (list.length < 2) continue;
@@ -4287,7 +4324,9 @@ function atSubmit(a) {
       else if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) errs.push(`${at}: issue needs "repo":"owner/name" (the run has no --repo)`);
     }
   }
-  const missing = want.filter((id) => !seen.has(id));
+  // a finding deleted since the run started (e.g. `scans rm`) cannot be recorded and is not required
+  const hasF = db().prepare('SELECT 1 FROM findings WHERE id=?');
+  const missing = want.filter((id) => !seen.has(id) && hasF.get(id));
   if (missing.length) errs.push(`missing: ${missing.map((i) => '#' + i).join(' ')} (submit every finding of the group)`);
   if (errs.length) die(`rejected, fix and resubmit:\n${errs.join('\n')}`);
   const summary = [];
@@ -4298,6 +4337,7 @@ function atSubmit(a) {
       VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
     for (const x of arr) {
       const cur = getF.get(x.id);
+      if (!cur) { summary.push(`#${x.id} skipped (finding deleted)`); continue; }
       const conf = x.verdict === 'real' || x.verdict === 'wontfix' ? 'confirmed' : 'not_confirmed';
       const tri = x.verdict === 'false_positive' ? 'false_positive' : x.verdict === 'wontfix' ? 'wontfix'
         : x.verdict === 'real' && cur.triage === 'open' ? 'confirmed' : cur.triage;
@@ -4804,7 +4844,7 @@ profiles:  profile register <name> --prompt p|--prompt-file f --model m|runner:m
            refs: name (latest version) | name@N | #id | hash prefix
 prompts:   prompt list | show <name> | add <name> --file f | rm <name>     (review-focus texts profiles are registered from)
 scan:      start [--profile p1,p2,…] [--label l] [--force] [--force-path g] [--new] [--commit rev]     (no --profile: the default profile)
-           continue [--scan s] | restart [--profile p,…|--all|--scan s] [--replan] | stop [--scan s|--all] [--now] [--close] | set-run <scan> <task>
+           continue [--scan s] [--reclaim] | restart [--profile p,…|--all|--scan s] [--replan] | stop [--scan s|--all] [--now] [--close] | set-run <scan> <task>
            repeat <scan> [--commit same|rev] [--label l]     (same profile, commit, plan, chunks and context; reports drift)
            --scan / <scan>: id | label | profile (its latest scan); needed when several scans are open
 store:     scans [list] [--profile p] [--model m] [--commit c] [--status s] [--label l] [--json] | scans show|label|rm <scan> [label] [--dry-run]
