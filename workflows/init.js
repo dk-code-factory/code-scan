@@ -10,7 +10,8 @@ export const meta = {
 
 // args: { cli, root, home?, initId, runs: [{ calId, model, scanId, workers }] }
 // Self-contained (no nested workflow): each model runs its own rounds, all models in parallel.
-const CLI = `${args.home ? `CODESCAN_HOME=${args.home} ` : ''}node ${args.cli} -C ${args.root}`
+const shArg = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
+const CLI = `${args.home ? `CODESCAN_HOME=${shArg(args.home)} ` : ''}node ${shArg(args.cli)} -C ${shArg(args.root)}`
 const WORKER_SCHEMA = {
   type: 'object',
   properties: { chunk: { type: ['integer', 'null'] }, files: { type: 'integer' }, findings: { type: 'integer' } },

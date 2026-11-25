@@ -9,7 +9,8 @@ export const meta = {
 }
 
 // args: NEXT object from `calibrate start` plus {scanScript: absolute path of workflows/scan.js}
-const CLI = `${args.home ? `CODESCAN_HOME=${args.home} ` : ''}node ${args.cli} -C ${args.root}`
+const shArg = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
+const CLI = `${args.home ? `CODESCAN_HOME=${shArg(args.home)} ` : ''}node ${shArg(args.cli)} -C ${shArg(args.root)}`
 const DECIDE_SCHEMA = {
   type: 'object',
   properties: {

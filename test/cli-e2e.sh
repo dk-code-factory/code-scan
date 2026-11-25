@@ -111,6 +111,14 @@ B confirm 2 --set unchecked >/dev/null; [ "$(B query --confirmation unchecked | 
 # --- dupes
 has "$(B dupes)" '1 duplicate group' && ok dupes || bad "dupes: $(B dupes)"
 [ "$(B query --primary-only --triage all | head -1)" = '3 finding(s)' ] && ok primary-only || bad primary-only
+# merging a group's member away leaves no single-member or primary-less group behind (on a copy of the state)
+cp -r "$CODESCAN_HOME" "$W/state-m"
+( export CODESCAN_HOME=$W/state-m
+  read -r g1 m1 m2 < <(B sql "select group_id, min(finding_id), max(finding_id) from dupe_groups group by group_id limit 1" | tail -1 | tr '|,\t' '   ')
+  other=$(B sql "select id from findings where id not in (select finding_id from dupe_groups) limit 1" | tail -1)
+  B dupes merge "$m1" "$other" >/dev/null
+  bad1=$(B sql "select count(*) from (select group_id from dupe_groups group by group_id having count(*)<2 or sum(is_primary)!=1)" | tail -1)
+  [ "$bad1" = 0 ] && ! B sql "select 1 from dupe_groups where group_id=$g1" | grep -q '^1' ) && ok dupes-merge-cleans-old-group || bad "dupes-merge-cleans-old-group"
 
 # --- trackers: marker autolink, match, link, jira import
 kv=$(B query --path src/store/kv.go --format json | python3 -c 'import json,sys; r=json.load(sys.stdin)[0]; print(r["id"])')
@@ -251,10 +259,18 @@ o2=$(B claim --inline "$sid2"); has "$o2" 'in ONE turn' && has "$o2" "Read $W/re
 B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
 o=$(B claim --inline "$sid"); c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
 v=$(B submit "$sid" "$c" <<<'{"src/nope.c": []}' 2>&1); has "$v" 'not in chunk' && ok batch-rejects-unknown || bad "batch-rejects-unknown: $v"
+v=$(B submit "$sid" "$c" <<<'{"src/net/buf.c": [{"line":1,"severity":"high","title":"atomic probe"}], "src/net/buf.h": [{"severity":"nope","title":"x"}]}' 2>&1); rc=$?
+[ $rc -ne 0 ] && has "$v" 'nothing in this batch was stored' && ! has "$(B query --text 'atomic probe' --triage all)" 'buf.c' \
+  && has "$(B files --path src/net/buf.c)" 'in_progress' && ok batch-submit-atomic || bad "batch-submit-atomic: $v / $(B files --path src/net/buf.c)"
 v=$(B submit "$sid" "$c" <<<'{"src/net/buf.c": [{"line":1,"severity":"high","type":"leak","category":"memory-safety","title":"batch finding"}], "src/net/buf.h": []}')
 has "$(B status --scan "$sid")" '\[done\]' && has "$(B query --text 'batch finding' --triage all)" 'buf.c' && ok batch-submit || bad "batch-submit: $v"
 has "$(B query --type leak --triage all)" 'batch finding' && ok type-explicit || bad type-explicit
 has "$o" 'type: exactly one of' && has "$o" '"type":"<type>"' && ok type-in-claim || bad type-in-claim
+# continue after a plain stop leaves chunks still claimed by running reviewers to them; --reclaim repacks
+B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ --chunk-kb 40 >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
+B claim "$sid" >/dev/null; B stop >/dev/null
+o=$(B continue); has "$o" 'still claimed by running reviewers' && has "$o" '"workers":0' && has "$(B status)" '1 claimed' && ok continue-keeps-live-claims || bad "continue-keeps-live-claims: $o"
+o=$(B continue --reclaim); has "$o" '"workers":1' && has "$(B status)" '0 claimed' && ok continue-reclaim || bad "continue-reclaim: $o"
 
 # --- re-found bug with shifted range / different cited spot matches the existing finding
 B stop >/dev/null 2>&1; B restart --no-plan --force --only src/net/ >/dev/null; sid=$(B status | sed -n 's/^scan \([0-9]*\).*/\1/p')
@@ -277,18 +293,18 @@ mkdir -p "$W/claude/projects/p/s/subagents/workflows/wf_x"
 printf '{"type":"user","message":{"content":"node x -C %s claim --inline 999"}}\n{"type":"assistant","message":{"id":"z","model":"claude-opus-5-5","usage":{"output_tokens":9000000}}}\n' "$W/repo" > "$W/claude/projects/p/s/subagents/workflows/wf_x/agent-b.jsonl"
 has "$(B limits)" 'spend: \$1.20 of \$1 limit' && ok usd-from-transcripts || bad "usd-from-transcripts: $(B limits)"
 o=$(B claim --inline "$sid"); has "$o" 'NONE (spend \$1.20 reached the \$1 limit)' && has "$(B status)" '\[stopped\]' && has "$(B status)" 'stopped by limit' && ok usd-stops || bad "usd-stops: $o"
-B limits --max-usd 0 >/dev/null; has "$(B continue)" '"workers"' && has "$(B claim --inline "$sid")" '^CHUNK' && ok usd-limit-lifted || bad usd-limit-lifted
+B limits --max-usd 0 >/dev/null; has "$(B continue --reclaim)" '"workers"' && has "$(B claim --inline "$sid")" '^CHUNK' && ok usd-limit-lifted || bad usd-limit-lifted
 B limits --max-5h-pct 80 >/dev/null
 o=$(B claim --inline "$sid"); has "$o" 'NONE (5-hour usage is unknown' && ok pct-unknown-stops || bad "pct-unknown-stops: $o"
 RL=$(B statusline-path); mkdir -p "$(dirname "$RL")"; now=$(date +%s%3N)
 echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":50,\"resets_at\":9999999999}}}" > "$RL"
-B continue >/dev/null; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-under-limit || bad pct-under-limit
+B continue --reclaim >/dev/null; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-under-limit || bad pct-under-limit
 echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":85,\"resets_at\":9999999999}}}" > "$RL"
 o=$(B claim --inline "$sid"); has "$o" 'NONE (5-hour subscription usage 85% reached the 80% limit' && ok pct-stops || bad "pct-stops: $o"
 echo "{\"ts\":$((now-3600000)),\"rate_limits\":{\"five_hour\":{\"used_percentage\":10,\"resets_at\":9999999999}}}" > "$RL"
 o=$(B continue 2>&1); has "$o" 'not resuming' && has "$o" 'unknown' && ok pct-stale-stops || bad "pct-stale-stops: $o"
 echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":95,\"resets_at\":1000}}}" > "$RL"
-B continue >/dev/null 2>&1; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-window-reset || bad pct-window-reset
+B continue --reclaim >/dev/null 2>&1; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-window-reset || bad pct-window-reset
 o=$(echo '{"model":{"display_name":"M"},"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":5},"seven_day":{"used_percentage":2}}}' | B statusline)
 has "$o" '5h 40%' && has "$(cat "$RL")" '"used_percentage":40' && ok statusline-snapshot || bad "statusline-snapshot: $o"
 has "$(echo '{}' | B statusline -- echo wrapped)" 'wrapped' && ok statusline-wraps || bad statusline-wraps

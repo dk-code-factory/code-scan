@@ -79,6 +79,8 @@ const RATE_LIMIT_MAX_AGE_MIN = 15;
 // calibration below on real code (see README "Chunk size"); calibration starts from it.
 const DEFAULT_CHUNK_KB = 40;
 const MIN_CHUNK_KB = 8;
+// a chunk claim older than this is from a dead reviewer (runner agents time out at 45 minutes)
+const CLAIM_STALE_MS = 60 * 60 * 1000;
 const CAL_SAMPLE_KB = 200;
 const CAL_DELTA = 0.15;
 const MAX_WORKERS_PER_RUN = 900;
@@ -259,7 +261,7 @@ function pathMatcher(spec) {
 
 // ------------------------------------------------------------------ arg parse
 
-const BOOL_FLAGS = new Set(['include-tests', 'force', 'no-plan', 'replan', 'now', 'all',
+const BOOL_FLAGS = new Set(['include-tests', 'force', 'no-plan', 'replan', 'now', 'reclaim', 'all',
   'latest', 'stale', 'no-stale', 'reported', 'unreported', 'primary-only', 'new',
   'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules', 'recheck',
   'detach', 'reply', 'full', 'uninstall', 'user', 'project']);
@@ -428,9 +430,13 @@ function db() {
   return DB;
 }
 
+let TX_DEPTH = 0;
+/** Run fn in one transaction; a nested tx() joins the outer one (all or nothing). */
 function tx(fn) {
   const d = db();
+  if (TX_DEPTH > 0) return fn(d);
   d.exec('BEGIN IMMEDIATE');
+  TX_DEPTH++;
   try {
     const r = fn(d);
     d.exec('COMMIT');
@@ -438,6 +444,8 @@ function tx(fn) {
   } catch (e) {
     try { d.exec('ROLLBACK'); } catch (ignored) { /* already rolled back */ }
     throw e;
+  } finally {
+    TX_DEPTH--;
   }
 }
 
@@ -651,13 +659,25 @@ function stemKey(p) {
   return stem;
 }
 
-function pack(scan) {
+/**
+ * Re-chunk what is left of a scan. `keepClaimedSince` (ISO time): chunks claimed at or after it stay
+ * with the reviewers still working on them (their files are not repacked); older claims are void.
+ */
+function pack(scan, { keepClaimedSince = null } = {}) {
   const opts = JSON.parse(scan.options_json);
   const budget = Math.max(MIN_CHUNK_KB, Number(opts.chunkKb || DEFAULT_CHUNK_KB)) * 1024;
   const plan = scan.plan_json ? JSON.parse(scan.plan_json) : null;
   const d = db();
-  d.prepare("UPDATE chunks SET state='void' WHERE scan_id=? AND state IN ('pending','claimed')").run(scan.id);
-  d.prepare("UPDATE files SET state='pending', slices_done='[]' WHERE scan_id=? AND state IN ('in_progress','partial')").run(scan.id);
+  const kept = keepClaimedSince
+    ? d.prepare("SELECT items_json FROM chunks WHERE scan_id=? AND state='claimed' AND claimed_at >= ?").all(scan.id, keepClaimedSince)
+    : [];
+  const keptPaths = new Set(kept.flatMap((c) => JSON.parse(c.items_json).map((it) => it.path)));
+  d.prepare(`UPDATE chunks SET state='void' WHERE scan_id=? AND (state='pending' OR (state='claimed' AND
+    (? IS NULL OR claimed_at IS NULL OR claimed_at < ?)))`).run(scan.id, keepClaimedSince, keepClaimedSince);
+  const reset = d.prepare("UPDATE files SET state='pending', slices_done='[]' WHERE scan_id=? AND path=?");
+  for (const r of d.prepare("SELECT path FROM files WHERE scan_id=? AND state IN ('in_progress','partial')").all(scan.id)) {
+    if (!keptPaths.has(r.path)) reset.run(scan.id, r.path);
+  }
   const files = d.prepare("SELECT * FROM files WHERE scan_id=? AND state IN ('pending','partial') ORDER BY path").all(scan.id);
   const unitMeta = new Map((plan && plan.units || []).map((u) => [u.name, u]));
   const groups = (plan && plan.groups || []).map((g) => pathMatcher(g));
@@ -709,16 +729,19 @@ function pack(scan) {
   chunks.sort((a, b) => prio(b.unit) - prio(a.unit) || b.bytes - a.bytes);
   const ins = d.prepare("INSERT INTO chunks(scan_id,ord,unit,items_json,bytes,state) VALUES(?,?,?,?,?,'pending')");
   chunks.forEach((c, i) => ins.run(scan.id, i, c.unit, JSON.stringify(c.items), c.bytes));
-  return { chunks: chunks.length, files: files.length, bytes: chunks.reduce((s, c) => s + c.bytes, 0) };
+  return { chunks: chunks.length, files: files.length, bytes: chunks.reduce((s, c) => s + c.bytes, 0), keptClaims: kept.length };
 }
 
 function pendingChunks(scanId) {
   return db().prepare("SELECT COUNT(*) n FROM chunks WHERE scan_id=? AND state='pending'").get(scanId).n;
 }
 
+/** One shell word: left bare when it is plain (keeps commands readable), single-quoted otherwise. */
+function shArg(t) { return /^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : shq(t); }
+
 function cliPrefix() {
-  const h = process.env.CODESCAN_HOME ? `CODESCAN_HOME=${path.resolve(process.env.CODESCAN_HOME)} ` : '';
-  return `${h}node ${CLI} -C ${repoRoot()}`;
+  const h = process.env.CODESCAN_HOME ? `CODESCAN_HOME=${shArg(path.resolve(process.env.CODESCAN_HOME))} ` : '';
+  return `${h}node ${shArg(CLI)} -C ${shArg(repoRoot())}`;
 }
 
 /** Workflow agent() model alias for a model id (claude-sonnet-5-5 → sonnet); null = inherit. */
@@ -794,12 +817,14 @@ function planSource(f) {
   return db().prepare("SELECT * FROM scans WHERE kind='scan' AND plan_json IS NOT NULL ORDER BY id DESC LIMIT 1").get() || null;
 }
 
-function createScan(f, base, profile) {
+/** `supersede`: the open scan this one replaces — superseded only once the new scan is validated and stored. */
+function createScan(f, base, profile, supersede) {
   const prev = planSource(f);
   const commit = git(['rev-parse', f.commit || 'HEAD']).trim();
   const opts = buildOpts(f, base);
   const d = db();
   const scan = tx(() => {
+    if (supersede) setScanStatus(supersede, 'superseded');
     const r = d.prepare(`INSERT INTO scans(commit_sha,profile_name,profile_hash,options_json,status,created,updated)
       VALUES(?,?,?,?,'active',?,?)`).run(commit, profile.name, profile.hash, JSON.stringify(opts), now(), now());
     const s = getScan(r.lastInsertRowid);
@@ -849,14 +874,12 @@ function cmdStart(a) {
   if (ex && !a.f.new) {
     die(`scan ${ex.id} is ${ex.status} at ${ex.commit_sha.slice(0, 12)} — use \`continue\`, \`restart\`, or \`start --new\``);
   }
-  if (ex) setScanStatus(ex.id, 'superseded');
   const profile = profileFromFlags(a.f);
-  createScan(a.f, {}, profile);
+  createScan(a.f, {}, profile, ex ? ex.id : null);
 }
 
 function cmdRestart(a) {
   const prev = openScan() || latestScan(false);
-  if (prev && ['active', 'stopped'].includes(prev.status)) setScanStatus(prev.id, 'superseded');
   const base = prev ? JSON.parse(prev.options_json) : {};
   delete base.force; delete base.forcePath;
   if (!a.f.model && cfgGet('default_model') && base.model !== cfgGet('default_model')) {
@@ -868,7 +891,7 @@ function cmdRestart(a) {
   if (a.f.only || a.f.include || a.f.exclude || a.f['reset-scope']) { delete base.only; delete base.include; delete base.exclude; }
   const profile = (a.f.profile || a.f['prompt-file']) ? profileFromFlags(a.f)
     : prev ? resolveProfile(prev.profile_name) : resolveProfile('default');
-  createScan(a.f, base, profile);
+  createScan(a.f, base, profile, prev && ['active', 'stopped'].includes(prev.status) ? prev.id : null);
 }
 
 function cmdContinue(a) {
@@ -876,6 +899,7 @@ function cmdContinue(a) {
   if (!scan) die('no active or stopped scan — use `start` or `restart`');
   if (!['active', 'stopped'].includes(scan.status)) die(`scan ${scan.id} is ${scan.status}`);
   const head = git(['rev-parse', 'HEAD']).trim();
+  const wasStopped = scan.status === 'stopped';
   setScanStatus(scan.id, 'active');
   db().prepare('DELETE FROM config WHERE key=?').run(`stop_reason:${scan.id}`);
   if (a.f['max-usd'] !== undefined || a.f['max-5h-pct'] !== undefined || a.f.concurrency !== undefined) {
@@ -903,11 +927,19 @@ function cmdContinue(a) {
     out(`chunk size: ${opts.chunkKb}KB (${opts.chunkSource})`);
     out(`runner: ${opts.runner || 'none'}${opts.model ? ` model ${opts.model}` : ''} — ${opts.runnerWhy}`);
   }
-  const pk = tx(() => pack(getScan(scan.id)));
+  // a scan stopped (by `stop` without --now, or a limit) may still have reviewers finishing claimed
+  // chunks: leave those to them. A claim older than any reviewer can run, or of a runner process that
+  // is gone, is from a dead agent and is repacked; so is every claim of an active scan (its run ended
+  // with failed agents) and every claim with --reclaim.
+  const pidRun = /^pid:/.test(scan.workflow_task || '');
+  const mayBeRunning = wasStopped && !a.f.reclaim && (!pidRun || pidAlive(scan.workflow_task));
+  const since = mayBeRunning ? new Date(Date.now() - CLAIM_STALE_MS).toISOString() : null;
+  const pk = tx(() => pack(getScan(scan.id), { keepClaimedSince: since }));
   const unplanned = !scan.plan_json && !JSON.parse(scan.options_json).noPlan;
   out(`scan ${scan.id} @ ${scan.commit_sha.slice(0, 12)}: ${pk.files} files (${kb(pk.bytes)}) left in ${pk.chunks} chunks`);
+  if (pk.keptClaims) out(`note: ${pk.keptClaims} chunk(s) still claimed by running reviewers are left to them (\`continue --reclaim\` repacks them now)`);
   if (head !== scan.commit_sha) out(`note: HEAD is ${head.slice(0, 12)}; this scan reviews ${scan.commit_sha.slice(0, 12)} (use \`restart\` for HEAD)`);
-  if (pk.chunks === 0) { setScanStatus(scan.id, 'done'); out('nothing left — scan marked done'); }
+  if (pk.chunks === 0 && !pk.keptClaims) { setScanStatus(scan.id, 'done'); out('nothing left — scan marked done'); }
   out(nextLine(scan, unplanned && pk.files > 0));
 }
 
@@ -1234,10 +1266,16 @@ function cmdSubmit(a) {
       if (!Array.isArray(v)) die(`value for ${k} must be an array`);
     }
     const missing = [...keys].filter((k) => !(k in arr));
-    for (const [k, v] of Object.entries(arr)) {
-      const m = k.replace(/^\.\//, '').match(/^(.*?)(?:#(\d+))?$/);
-      cmdSubmit({ pos: [String(scanId), String(chunkId)], f: { file: m[1], slice: m[2] }, arr: v });
-    }
+    // one transaction for the whole batch: a file rejected late (bad severity, unknown path) leaves
+    // nothing stored, so resubmitting the corrected batch cannot double-count or duplicate findings
+    const msgs = [];
+    tx(() => {
+      for (const [k, v] of Object.entries(arr)) {
+        const m = k.replace(/^\.\//, '').match(/^(.*?)(?:#(\d+))?$/);
+        cmdSubmit({ pos: [String(scanId), String(chunkId)], f: { file: m[1], slice: m[2] }, arr: v, sink: msgs });
+      }
+    });
+    msgs.forEach((x) => out(x));
     if (missing.length) out(`note: not submitted yet: ${missing.join(', ')}`);
     return;
   }
@@ -1275,7 +1313,7 @@ function cmdSubmit(a) {
       confidence: conf,
     };
   });
-  if (errs.length) die(`invalid findings:\n  ${errs.join('\n  ')}`);
+  if (errs.length) die(`invalid findings${a.sink ? ` for ${file} (nothing in this batch was stored)` : ''}:\n  ${errs.join('\n  ')}`);
   const res = tx(() => {
     const blobQ = d.prepare('SELECT blob_sha, unit FROM files WHERE scan_id=? AND path=?');
     let added = 0, updated = 0;
@@ -1346,7 +1384,8 @@ function cmdSubmit(a) {
     if (!open && (cur === 'active' || cur === 'stopped')) setScanStatus(scanId, 'done');
     return { added, updated, state, left: left.length };
   });
-  out(`ok: ${file} ${res.state}; findings +${res.added} new, ${res.updated} known; ${res.left} item(s) left in chunk`);
+  const msg = `ok: ${file} ${res.state}; findings +${res.added} new, ${res.updated} known; ${res.left} item(s) left in chunk`;
+  if (a.sink) a.sink.push(msg); else out(msg);
 }
 
 // --------------------------------------------------------------- calibration
@@ -1954,7 +1993,10 @@ function transcriptSpendUsd(scan) {
   // the prefix is matched on the command itself (code under review may mention CODESCAN_HOME too)
   // The owner (repo, state dir, scan) is parsed from the task command itself — never judged against
   // the scan that happens to ask first, since other scans (calibration rounds) share the cache.
-  const owner = /(?:CODESCAN_HOME=(\S+) )?node \S+ -C (\S+) (?:claim(?: --inline)?|plan-context|apply-plan) (\d+)\b/;
+  // a word is bare or single-quoted by shArg ('it'\''s' style), see cliPrefix
+  const W = String.raw`('(?:[^']|'\\'')*'|\S+)`;
+  const owner = new RegExp(String.raw`(?:CODESCAN_HOME=${W} )?node ${W} -C ${W} (?:claim(?: --inline)?|plan-context|apply-plan) (\d+)\b`);
+  const unq = (w) => (w && w[0] === "'" ? w.slice(1, -1).replace(/'\\''/g, "'") : w);
   const since = Date.parse(scan.created) - 60000;
   const get = d.prepare('SELECT size, scan_key, usd, last_id FROM spend_files2 WHERE path=?');
   const put = d.prepare(`INSERT INTO spend_files2(path,size,scan_key,usd,last_id) VALUES(?,?,?,?,?)
@@ -1978,7 +2020,7 @@ function transcriptSpendUsd(scan) {
         const head = Buffer.alloc(Math.min(size, 20000));
         fs.readSync(fd, head, 0, head.length, 0);
         const m = head.toString('utf8').match(owner);
-        const ownerKey = m ? `${m[2]}|${m[1] ? path.resolve(m[1]) : ''}|${m[3]}` : null;
+        const ownerKey = m ? `${unq(m[3])}|${m[1] ? path.resolve(unq(m[1])) : ''}|${m[4]}` : null;
         belongs = ownerKey === key;
         // another scan's agent: remember its owner (usage is counted when that scan asks)
         // ownerless with a full head: never a code-scan agent (''); shorter: undecided (NULL), retried as it grows
@@ -2558,10 +2600,13 @@ function cmdDupes(a) {
     if (ids.length < 2) die('merge needs at least two finding ids');
     tx(() => {
       const gid = (d.prepare('SELECT MAX(group_id) m FROM dupe_groups').get().m || 0) + 1;
+      const old = d.prepare(`SELECT DISTINCT group_id FROM dupe_groups WHERE finding_id IN (${ids.map(() => '?').join(',')})`).all(...ids);
       d.prepare(`DELETE FROM dupe_groups WHERE finding_id IN (${ids.map(() => '?').join(',')})`).run(...ids);
       ids.forEach((id) => d.prepare('INSERT INTO dupe_groups(group_id,finding_id,is_primary,reason,manual) VALUES(?,?,0,?,1)').run(gid, id, 'manual'));
       d.prepare(`UPDATE findings SET dupe_lock=1 WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
       setPrimary(gid);
+      // the groups the merged findings left: drop a single leftover, re-pick a primary that moved away
+      for (const g of old) cleanupGroup(g.group_id);
       out(`group ${gid}: ${ids.map((i) => '#' + i).join(' ')}`);
     });
     return;
@@ -2616,10 +2661,15 @@ function cmdDupes(a) {
   let groups = 0, members = 0;
   tx(() => {
     const ids = rows.map((r) => r.id);
+    const old = new Set();
     for (let i = 0; i < ids.length; i += 500) {
       const part = ids.slice(i, i + 500);
-      d.prepare(`DELETE FROM dupe_groups WHERE manual=0 AND finding_id IN (${part.map(() => '?').join(',')})`).run(...part);
+      const q = part.map(() => '?').join(',');
+      for (const g of d.prepare(`SELECT DISTINCT group_id FROM dupe_groups WHERE manual=0 AND finding_id IN (${q})`).all(...part)) old.add(g.group_id);
+      d.prepare(`DELETE FROM dupe_groups WHERE manual=0 AND finding_id IN (${q})`).run(...part);
     }
+    // groups only partly re-clustered (filters selected some members): fix their leftovers
+    for (const g of old) cleanupGroup(g);
     let gid = d.prepare('SELECT MAX(group_id) m FROM dupe_groups').get().m || 0;
     for (const list of clusters.values()) {
       if (list.length < 2) continue;
@@ -3868,7 +3918,7 @@ function cmdInstall(a) {
 const HELP = `code-scan.js [-C repo] <command> [...]
 scan:      start [--runner r] [--model m] [--profile p|--prompt-file f] [--only g] [--include g] [--exclude g] [--include-tests] [--chunk-kb N]
                  [--force] [--force-path g] [--no-plan] [--new]
-           continue [--scan id] [--model m] | restart [--replan] [--reset-scope] [...start flags] | stop [--now] | set-run <scan> <task>
+           continue [--scan id] [--model m] [--reclaim] | restart [--replan] [--reset-scope] [...start flags] | stop [--now] | set-run <scan> <task>
 runner:    run [scan] [--runner claude|codex|gemini|agy|copilot|cursor|opencode] [--model m|runner:m] [--concurrency N] [--detach]
            runners  (installed agent CLIs, detected host, what a new scan would use) | run-prompt <file> [--runner r] [--model m] [--full]
            auto-triage run [run] | calibrate run [id] | init run [id]   (same flags; agents are headless CLI processes)

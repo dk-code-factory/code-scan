@@ -14,8 +14,13 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
-// read-only shell commands reviewers use; `gh` for issue search during triage
-const RO_CMDS = ['git', 'grep', 'rg', 'sed', 'cat', 'head', 'tail', 'wc', 'ls', 'find', 'awk', 'sort', 'uniq', 'cut', 'tr', 'nl', 'file', 'gh'];
+// Read-only shell command prefixes reviewers use; `gh` search/view for issue lookup during triage.
+// Allowlists match by prefix, so whole tools that can write or run other programs are left out
+// (find -delete/-exec, awk system(), sed -i, rg --pre, sort -o, git push/reset, gh api/pr merge):
+// code under review may carry prompt injection. Only codex enforces read-only with an OS sandbox.
+const RO_CMDS = ['git log', 'git show', 'git blame', 'git grep', 'git ls-files', 'git rev-parse', 'git cat-file',
+  'grep', 'sed -n', 'cat', 'head', 'tail', 'wc', 'ls', 'uniq', 'cut', 'nl',
+  'gh search', 'gh issue list', 'gh issue view', 'gh pr list', 'gh pr view', 'gh label list'];
 const ARG_PROMPT_MAX = 96 * 1024; // one argv string is capped at 128KB on Linux
 
 function extraArgs(name) {
@@ -341,7 +346,11 @@ function extractJson(text) {
     let depth = 0, inStr = false;
     for (let i = end; i >= 0; i--) {
       const ch = s[i];
-      if (ch === '"' && s[i - 1] !== '\\') inStr = !inStr;
+      if (ch === '"') {
+        let bs = 0; // a quote is escaped only by an odd run of backslashes ("C:\\\\" ends a string)
+        for (let k = i - 1; k >= 0 && s[k] === '\\'; k--) bs++;
+        if (bs % 2 === 0) inStr = !inStr;
+      }
       if (inStr) continue;
       if (ch === c) depth++;
       else if (ch === open && --depth === 0) {

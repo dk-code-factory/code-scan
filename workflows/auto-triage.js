@@ -7,7 +7,8 @@ export const meta = {
   ],
 }
 
-const CLI = `${args.home ? `CODESCAN_HOME=${args.home} ` : ''}node ${args.cli} -C ${args.root}`
+const shArg = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
+const CLI = `${args.home ? `CODESCAN_HOME=${shArg(args.home)} ` : ''}node ${shArg(args.cli)} -C ${shArg(args.root)}`
 
 // Standing instructions live in agents/triager.md (minimal-tool agent); the prompt only carries the command.
 const PROMPT = `Run: ${CLI} auto-triage claim ${args.runId}
