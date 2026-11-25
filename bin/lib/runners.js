@@ -15,10 +15,13 @@ const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
 // Read-only shell command prefixes reviewers may run; `gh` read subcommands for issue search during triage.
-// No sed/awk/find/sort/uniq (they can write files or run commands), and git/gh only through read subcommands,
-// so prompt-injected code under review cannot modify the checkout or remote state through the allowlist.
-const RO_CMDS = ['git log', 'git show', 'git diff', 'git blame', 'git grep', 'git ls-files', 'git rev-parse', 'git cat-file',
-  'grep', 'rg', 'cat', 'head', 'tail', 'wc', 'ls', 'cut', 'tr', 'nl', 'file',
+// Prefix rules cannot constrain flags, so every command listed must be safe with ANY arguments: no
+// sed/awk/find/sort/uniq/file (write files or run commands), no rg (--pre runs a command), no git grep
+// (--open-files-in-pager runs one), no git log/show/diff (--output writes any file); git/gh only through
+// read subcommands. Prompt-injected code under review cannot modify the checkout, other files or remote
+// state through the allowlist.
+const RO_CMDS = ['git blame', 'git ls-files', 'git rev-parse', 'git cat-file',
+  'grep', 'cat', 'head', 'tail', 'wc', 'ls', 'cut', 'tr', 'nl',
   'gh search', 'gh issue list', 'gh issue view', 'gh pr list', 'gh pr view', 'gh label list'];
 const ARG_PROMPT_MAX = 96 * 1024; // one argv string is capped at 128KB on Linux
 

@@ -1258,7 +1258,15 @@ function cmdContinue(a) {
     return;
   }
   const so = JSON.parse(scan.options_json);
-  if (so.planFrom && !so.planAdopted) adoptPlan(scan.id);
+  if (so.planFrom && !so.planAdopted) {
+    // a batch follower reviews its leader's code set: wait until the leader's planning is over
+    if (!planSettled(getScan(so.planFrom))) {
+      out(`scan ${scan.id} waits for the plan of scan ${so.planFrom} — continue it once that scan has planned`);
+      out('NEXT ' + JSON.stringify({ cli: CLI, root: repoRoot(), scanId: scan.id, plan: false, workers: 0 }));
+      return;
+    }
+    adoptPlan(scan.id);
+  }
   const s1 = getScan(scan.id);
   const pk = JSON.parse(s1.options_json).replay ? reviveReplay(scan.id) : tx(() => pack(s1));
   const unplanned = !s1.plan_json && !so.noPlan && !so.planFrom && !so.replay;
@@ -1489,7 +1497,10 @@ function cmdClaim(a) {
     }
     // a batch follower whose leader has planned (or given up planning) takes that plan now
     const po = JSON.parse(pre.options_json);
-    if (po.planFrom && !po.planAdopted) adoptPlan(scanId);
+    if (po.planFrom && !po.planAdopted) {
+      if (!planSettled(getScan(po.planFrom))) { out(`NONE (waiting for the plan of scan ${po.planFrom})`); return; }
+      adoptPlan(scanId);
+    }
   }
   const got = tx((d) => {
     const scan = d.prepare('SELECT * FROM scans WHERE id=?').get(scanId);
@@ -2254,7 +2265,7 @@ Evidence: ${quote(r.evidence)}
 
 ## Steps
 1. Verify against ${base} (the worktree), not the scanned commit — line numbers and code may differ. Read the code
-   paths, check guards, caller contracts and git history/comments for intent (\`git log -S\`/\`-L\`). If feasible,
+   paths, check guards, caller contracts and git history/comments for intent (\`git blame -L\`). If feasible,
    write a minimal test that demonstrates it and run it. Decide: REAL, PARTIALLY REAL (say which part), or NOT REAL.
 2. Search for existing reports, open and closed: \`gh search issues --repo ${repo} "<keywords>" --state all\` and
    \`gh search prs --repo ${repo} "<keywords>" --state all\` with several keyword variants (function names, symptoms,
@@ -3226,10 +3237,15 @@ function cmdScans(a) {
     }
     tx(() => {
       const del = (sql, ...p) => d.prepare(sql).run(...p);
+      const groups = new Set();
       for (const f of drop) {
+        const g = d.prepare('SELECT group_id FROM dupe_groups WHERE finding_id=?').get(f.id);
+        if (g) groups.add(g.group_id);
         for (const t of ['seen', 'dupe_groups', 'match_candidates', 'filings']) del(`DELETE FROM ${t} WHERE finding_id=?`, f.id);
         del('DELETE FROM findings WHERE id=?', f.id);
       }
+      // groups that lost members: re-pick the primary, drop the ones left with a single finding
+      for (const g of groups) cleanupGroup(g);
       // findings other scans also reported keep their rows; this scan's own reports of them go
       if (keep.length) del(`DELETE FROM seen WHERE scan_id=? AND finding_id NOT IN (${keep.map(() => '?').join(',')})`, s.id, ...keep.map((f) => f.id));
       else del('DELETE FROM seen WHERE scan_id=?', s.id);
