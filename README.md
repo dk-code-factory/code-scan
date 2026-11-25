@@ -50,10 +50,10 @@ agents are read-only: they get the code and reply with JSON.
 |---|---|---|---|
 | claude | `claude` | `claude -p --output-format json`, read-only tool allowlist | tokens + reported USD |
 | codex | `codex` | `codex exec --json --sandbox read-only` | tokens (priced from the list below) |
-| gemini | `gemini` | `gemini -p -o json --approval-mode=yolo` | tokens |
+| gemini | `gemini` | `gemini -p -o json`, read-only tool allowlist | tokens |
 | agy | `agy` | `agy -p --output-format json` | tokens |
 | copilot | `copilot` | `copilot -p --output-format=json`, read-only shell allowlist, writes denied | none reported |
-| cursor | `cursor-agent` / `agent` | `-p --output-format json -f` | tokens if reported |
+| cursor | `cursor-agent` / `agent` | `-p --output-format json` | tokens if reported |
 | opencode | `opencode` | `opencode run --format json`, edits denied, read-only bash allowlist | tokens + reported USD |
 
 Which runner a scan uses: `--runner <name>` or `--model <runner>:<model>` (e.g. `codex:gpt-6.2-sol`,

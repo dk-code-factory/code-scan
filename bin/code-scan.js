@@ -1156,7 +1156,7 @@ function cmdClaim(a) {
   for (const it of items) {
     const abs = path.join(repoRoot(), it.path);
     const rng = it.slice !== undefined ? ` lines ${it.start}-${it.end} (slice ${it.slice}; overlap with neighbours is intentional)` : '';
-    const how = worktreeMatches(it.path, blobs.get(it.path)) ? abs : `git -C ${repoRoot()} show ${scan.commit_sha}:${it.path} | cat -n  (working tree differs from scanned commit)`;
+    const how = worktreeMatches(it.path, blobs.get(it.path)) ? abs : `git -C ${shq(repoRoot())} show ${shq(`${scan.commit_sha}:${it.path}`)} | cat -n  (working tree differs from scanned commit)`;
     out(`- ${it.path}${rng}\n    read: ${how}`);
   }
   out('== SUBMIT (once per file/slice above, as soon as you finish it) ==');
@@ -1755,6 +1755,8 @@ function cmdCalibrate(a) {
 // new bug, and records the outcome here. Everything the agent needs is in the prompt.
 
 // finding text was written by a model that read possibly untrusted code: hand it over as quoted data
+/** POSIX single-quoted shell word. */
+function shq(t) { return `'${String(t).replace(/'/g, `'\\''`)}'`; }
 function quoteData(t) { return String(t || '(none)').replace(/```/g, "'''"); }
 
 function cmdVerifyPrompt(a) {
@@ -1962,8 +1964,10 @@ function transcriptSpendUsd(scan) {
     const c = get.get(p);
     if (c && c.size === size) { if (c.scan_key === key) total += c.usd; continue; }
     // ownership is decided once, from the task at the top of the file
-    if (c && c.scan_key !== key) continue; // not ours; its owner reads it when asked
-    let belongs = c ? true : null;
+    // scan_key NULL: the head did not show an owner yet (file still short); decide again now
+    const decided = c && c.scan_key !== null;
+    if (decided && c.scan_key !== key) continue; // not ours; its owner reads it when asked
+    let belongs = decided ? true : null;
     let from = c && belongs ? c.size : 0;
     let usd = c && belongs ? c.usd : 0;
     let lastId = c && belongs ? c.last_id : null;
@@ -1977,7 +1981,8 @@ function transcriptSpendUsd(scan) {
         const ownerKey = m ? `${m[2]}|${m[1] ? path.resolve(m[1]) : ''}|${m[3]}` : null;
         belongs = ownerKey === key;
         // another scan's agent: remember its owner (usage is counted when that scan asks)
-        if (!belongs) { put.run(p, ownerKey ? 0 : size, ownerKey, 0, null); continue; }
+        // ownerless with a full head: never a code-scan agent (''); shorter: undecided (NULL), retried as it grows
+        if (!belongs) { put.run(p, ownerKey ? 0 : size, ownerKey ?? (head.length >= 20000 ? '' : null), 0, null); continue; }
       }
       const buf = Buffer.alloc(size - from);
       fs.readSync(fd, buf, 0, buf.length, from);
@@ -3601,7 +3606,7 @@ async function runPlanner(scan, ctx) {
 function detachSelf(logPath) {
   let argv = process.argv.slice(2);
   while (argv[0] === '-C') argv = argv.slice(2);
-  argv = argv.filter((x) => x !== '--detach');
+  argv = argv.filter((x) => x !== '--detach' && !x.startsWith('--detach='));
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
   const fd = fs.openSync(logPath, 'a');
   const child = spawn(process.execPath, [CLI, ...argv], { cwd: process.cwd(), detached: true, stdio: ['ignore', fd, fd], env: process.env });
@@ -3834,6 +3839,8 @@ function cmdInstall(a) {
   const man = path.join(dir, INSTALL_MANIFEST);
   let prev = [];
   try { prev = JSON.parse(fs.readFileSync(man, 'utf8')).skills || []; } catch (e) { /* first install */ }
+  // the manifest may come from an untrusted repo (--project): only ever delete our own skill dirs
+  prev = (Array.isArray(prev) ? prev : []).filter((s) => typeof s === 'string' && /^code-scan-[a-z0-9-]+$/.test(s));
   for (const s of prev) fs.rmSync(path.join(dir, s), { recursive: true, force: true });
   if (a.f.uninstall) {
     fs.rmSync(man, { force: true });
