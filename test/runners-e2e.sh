@@ -52,6 +52,9 @@ for r in claude codex gemini agy copilot cursor opencode; do
 done
 has "$(grep '^codex ' "$FAKE_LOG" | head -1)" '--sandbox read-only' && ok codex-read-only || bad codex-read-only
 has "$(grep '^claude ' "$FAKE_LOG" | head -1)" '--disallowedTools Edit,Write' && ok claude-read-only || bad claude-read-only
+# prefix allowlists: no tool with an option that writes files or runs programs (prompt injection)
+ro=$(node -e 'const r=require(process.argv[1]).RUNNERS.claude.argv({});console.log(r[r.indexOf("--allowedTools")+1])' "$HERE/bin/lib/runners.js")
+has "$ro" 'Bash(grep:\*)' && ! grep -qE 'Bash\((git (log|show|grep|diff)|sed|uniq|find|awk|rg|sort|gh api)[ :]' <<<"$ro" && ok ro-allowlist || bad "ro-allowlist: $ro"
 has "$(grep '^copilot ' "$FAKE_LOG" | head -1)" '--deny-tool write' && ok copilot-read-only || bad copilot-read-only
 
 # --- invalid reply → one fix-up agent, then stored

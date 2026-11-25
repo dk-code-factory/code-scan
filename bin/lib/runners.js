@@ -15,11 +15,13 @@ const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
 // Read-only shell command prefixes reviewers use; `gh` search/view for issue lookup during triage.
-// Allowlists match by prefix, so whole tools that can write or run other programs are left out
-// (find -delete/-exec, awk system(), sed -i, rg --pre, sort -o, git push/reset, gh api/pr merge):
-// code under review may carry prompt injection. Only codex enforces read-only with an OS sandbox.
-const RO_CMDS = ['git log', 'git show', 'git blame', 'git grep', 'git ls-files', 'git rev-parse', 'git cat-file',
-  'grep', 'sed -n', 'cat', 'head', 'tail', 'wc', 'ls', 'uniq', 'cut', 'nl',
+// Allowlists match by prefix and any arguments may follow, so a tool is listed only if no option
+// of it writes a file or runs a program: code under review may carry prompt injection. Left out:
+// find -delete/-exec, awk system(), sed w/e (even under -n), rg --pre, sort -o, uniq IN OUT,
+// git log/show --output=FILE, git grep -O<cmd>, git push/reset, gh api/pr merge.
+// Only codex enforces read-only with an OS sandbox.
+const RO_CMDS = ['git blame', 'git ls-files', 'git rev-parse', 'git cat-file',
+  'grep', 'cat', 'head', 'tail', 'wc', 'ls', 'cut', 'nl',
   'gh search', 'gh issue list', 'gh issue view', 'gh pr list', 'gh pr view', 'gh label list'];
 const ARG_PROMPT_MAX = 96 * 1024; // one argv string is capped at 128KB on Linux
 
