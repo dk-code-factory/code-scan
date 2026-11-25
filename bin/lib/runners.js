@@ -14,8 +14,12 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
-// read-only shell commands reviewers use; `gh` for issue search during triage
-const RO_CMDS = ['git', 'grep', 'rg', 'sed', 'cat', 'head', 'tail', 'wc', 'ls', 'find', 'awk', 'sort', 'uniq', 'cut', 'tr', 'nl', 'file', 'gh'];
+// Read-only shell command prefixes reviewers may run; `gh` read subcommands for issue search during triage.
+// No sed/awk/find/sort/uniq (they can write files or run commands), and git/gh only through read subcommands,
+// so prompt-injected code under review cannot modify the checkout or remote state through the allowlist.
+const RO_CMDS = ['git log', 'git show', 'git diff', 'git blame', 'git grep', 'git ls-files', 'git rev-parse', 'git cat-file',
+  'grep', 'rg', 'cat', 'head', 'tail', 'wc', 'ls', 'cut', 'tr', 'nl', 'file',
+  'gh search', 'gh issue list', 'gh issue view', 'gh pr list', 'gh pr view', 'gh label list'];
 const ARG_PROMPT_MAX = 96 * 1024; // one argv string is capped at 128KB on Linux
 
 /** Extra CLI arguments: the list a review profile froze (o.extra), else CODESCAN_<RUNNER>_ARGS. */
@@ -343,7 +347,11 @@ function extractJson(text) {
     let depth = 0, inStr = false;
     for (let i = end; i >= 0; i--) {
       const ch = s[i];
-      if (ch === '"' && s[i - 1] !== '\\') inStr = !inStr;
+      if (ch === '"') {
+        let bs = 0;
+        while (i - 1 - bs >= 0 && s[i - 1 - bs] === '\\') bs++;
+        if (bs % 2 === 0) inStr = !inStr; // an even run of backslashes escapes itself, not the quote
+      }
       if (inStr) continue;
       if (ch === c) depth++;
       else if (ch === open && --depth === 0) {
@@ -367,16 +375,20 @@ function runAgent({ runner, model, prompt, cwd, full = false, extra, timeoutMs =
   const r = RUNNERS[runner];
   const bin = binOf(runner);
   if (!r || !bin) return Promise.resolve({ ok: false, error: `${runner} CLI not found`, exit: null, ms: 0 });
-  let p = prompt, promptFile = null;
+  let p = prompt, promptFile = null, ownDir = null;
   if (!r.stdin && Buffer.byteLength(p) > ARG_PROMPT_MAX) {
     // too long for one argv string: hand it over as a file the agent reads first
-    const dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), 'code-scan-'));
+    const dir = tmpDir || (ownDir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-scan-')));
     fs.mkdirSync(dir, { recursive: true });
     const f = path.join(dir, `prompt-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`);
     fs.writeFileSync(f, prompt);
     promptFile = f;
     p = `Read the file ${f} completely (it is long; read all of it) and follow the instructions in it exactly. Your final reply is what that file asks for.`;
   }
+  const cleanup = () => {
+    if (promptFile) { try { fs.unlinkSync(promptFile); } catch (e) { /* already gone */ } }
+    if (ownDir) { try { fs.rmSync(ownDir, { recursive: true, force: true }); } catch (e) { /* already gone */ } }
+  };
   const o = { prompt: p, model, cwd, full, extra };
   const args = r.argv(o);
   const env = { ...process.env, ...(r.env ? r.env(o) : {}) };
@@ -386,6 +398,7 @@ function runAgent({ runner, model, prompt, cwd, full = false, extra, timeoutMs =
     try {
       child = spawn(bin, args, { cwd, env, detached: true, stdio: [r.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
     } catch (e) {
+      cleanup();
       res({ ok: false, error: e.message, exit: null, ms: 0 });
       return;
     }
@@ -405,7 +418,7 @@ function runAgent({ runner, model, prompt, cwd, full = false, extra, timeoutMs =
       finished = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
-      if (promptFile) { try { fs.unlinkSync(promptFile); } catch (e) { /* already gone */ } }
+      cleanup();
       live.delete(child);
       const stdout = Buffer.concat(so).toString('utf8');
       const stderr = Buffer.concat(se).toString('utf8');

@@ -134,5 +134,9 @@ mkdir -p "$W/skills2/code-scan-scan"; o=$(B install --dir "$W/skills2" 2>&1); ha
 o=$(B install --dir "$W/skills"); has "$o" 'installed 12' && ok install-idempotent || bad install-idempotent
 o=$(B install --dir "$W/skills" --uninstall); [ ! -e "$W/skills/code-scan-scan" ] && has "$o" 'removed 12' && ok uninstall || bad "uninstall: $o"
 
+# extractJson: a string ending in an escaped backslash must not flip string tracking
+o=$(node -e 'const {extractJson}=require(process.argv[1]); console.log(JSON.stringify(extractJson(process.argv[2])))' "$HERE/bin/lib/runners.js" 'reply: {"a":"x\\\\","b":{"c":1}} done')
+[ "$o" = '{"a":"x\\\\","b":{"c":1}}' ] && ok extract-json-escaped-backslash || bad "extract-json-escaped-backslash: $o"
+
 echo ---
 [ $FAILS -eq 0 ] && echo "ALL PASS" || { echo "$FAILS FAILED"; exit 1; }

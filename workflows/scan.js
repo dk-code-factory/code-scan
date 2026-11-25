@@ -8,7 +8,9 @@ export const meta = {
   ],
 }
 
-const CLI = `${args.home ? `CODESCAN_HOME=${args.home} ` : ''}node ${args.cli} -C ${args.root}`
+// shell word: bare when plainly safe, single-quoted otherwise (same rule as the CLI's own command lines)
+const shw = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
+const CLI = `${args.home ? `CODESCAN_HOME=${shw(args.home)} ` : ''}node ${shw(args.cli)} -C ${shw(args.root)}`
 
 const PLAN_PROMPT = `You plan a repository bug scan. Run:
   ${CLI} plan-context ${args.scanId}

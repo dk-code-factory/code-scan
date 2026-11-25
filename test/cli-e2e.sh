@@ -62,6 +62,10 @@ check "apply-plan rejects bad glob" bash -c "! node '$HERE/bin/code-scan.js' app
 has "$(B files --path tools/gen/)" 'plan: generated' && ok plan-exclude || bad plan-exclude
 has "$(B claim 1)" 'SUBSYSTEM FOCUS' && ok claim-priority-unit || bad claim-priority-unit
 
+# --- continue must not re-queue a chunk an in-flight reviewer still holds after a plain stop
+B stop >/dev/null
+o=$(B continue 2>&1); has "$o" 'still claimed by in-flight reviewers' && ok continue-waits-for-inflight || bad "continue-waits-for-inflight: $o"
+
 # --- simulated dead worker then continue
 B stop --now >/dev/null
 [ "$(B claim 1)" = NONE ] && ok stop-blocks-claims || bad stop-blocks-claims
@@ -119,6 +123,14 @@ B confirm 2 --set unchecked >/dev/null; [ "$(B query --confirmation unchecked | 
 # --- dupes
 has "$(B dupes)" '1 duplicate group' && ok dupes || bad "dupes: $(B dupes)"
 [ "$(B query --primary-only --triage all | head -1)" = '3 finding(s)' ] && ok primary-only || bad primary-only
+# merging one member of a 2-member group away must not leave a 1-member group behind (on a copy of the store)
+rm -rf "$W/state-dm"; cp -r "$W/state" "$W/state-dm"
+DM() { CODESCAN_HOME=$W/state-dm B "$@"; }
+gm=$(DM sql "select finding_id from dupe_groups order by finding_id limit 1" | tail -1)
+nx=$(DM sql "select id from findings where id not in (select finding_id from dupe_groups) order by id limit 1" | tail -1)
+DM dupes merge "$gm" "$nx" >/dev/null
+[ "$(DM sql "select count(*) from (select group_id from dupe_groups group by group_id having count(*) < 2 or sum(is_primary) <> 1)" | tail -1)" = 0 ] \
+  && ok dupes-merge-cleans-old-group || bad "dupes-merge-cleans-old-group: $(DM sql 'select * from dupe_groups')"
 
 # --- trackers: marker autolink, match, link, jira import
 kv=$(B query --path src/store/kv.go --format json | python3 -c 'import json,sys; r=json.load(sys.stdin)[0]; print(r["id"])')
@@ -265,6 +277,10 @@ o2=$(B claim --inline "$sid2"); has "$o2" 'in ONE turn' && has "$o2" "Read $W/re
 fresh; B restart --profile net40 --force >/dev/null; sid=$(sidof)
 o=$(B claim --inline "$sid"); c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$o")
 v=$(B submit "$sid" "$c" <<<'{"src/nope.c": []}' 2>&1); has "$v" 'not in chunk' && ok batch-rejects-unknown || bad "batch-rejects-unknown: $v"
+# a later file rejected: nothing of the batch is recorded (all or nothing)
+v=$(B submit "$sid" "$c" <<<'{"src/net/buf.c": [{"line":1,"severity":"high","type":"leak","category":"memory-safety","title":"atomic probe"}], "src/net/buf.h": [{"line":1,"severity":"bogus","category":"x","title":"y"}]}' 2>&1)
+[ "$(B sql "select count(*) from findings where title='atomic probe'" | tail -1)" = 0 ] && [ "$(B sql "select state from files where scan_id=$sid and path='src/net/buf.c'" | tail -1)" != reviewed ] \
+  && ok batch-submit-atomic || bad "batch-submit-atomic: $v"
 v=$(B submit "$sid" "$c" <<<'{"src/net/buf.c": [{"line":1,"severity":"high","type":"leak","category":"memory-safety","title":"batch finding"}], "src/net/buf.h": []}')
 has "$(B status --scan "$sid")" '\[done\]' && has "$(B query --text 'batch finding' --triage all)" 'buf.c' && ok batch-submit || bad "batch-submit: $v"
 has "$(B query --type leak --triage all)" 'batch finding' && ok type-explicit || bad type-explicit

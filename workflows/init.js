@@ -10,7 +10,9 @@ export const meta = {
 
 // args: { cli, root, home?, initId, runs: [{ calId, model, scanId, workers }] }
 // Self-contained (no nested workflow): each model runs its own rounds, all models in parallel.
-const CLI = `${args.home ? `CODESCAN_HOME=${args.home} ` : ''}node ${args.cli} -C ${args.root}`
+// shell word: bare when plainly safe, single-quoted otherwise (same rule as the CLI's own command lines)
+const shw = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
+const CLI = `${args.home ? `CODESCAN_HOME=${shw(args.home)} ` : ''}node ${shw(args.cli)} -C ${shw(args.root)}`
 const WORKER_SCHEMA = {
   type: 'object',
   properties: { chunk: { type: ['integer', 'null'] }, files: { type: 'integer' }, findings: { type: 'integer' } },
