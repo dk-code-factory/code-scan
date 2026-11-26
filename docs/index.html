@@ -11,7 +11,7 @@
 <main>
 <header class="hero">
   <h1>code-scan</h1>
-  <p class="lede">Repository-wide bug scanning with parallel reviewer agents from Claude Code, Codex, Gemini, Copilot, Cursor or OpenCode.
+  <p class="lede">Repository-wide bug scanning with parallel reviewer agents from Claude Code, Codex, Gemini, Antigravity, Copilot, Cursor or OpenCode.
     This page shows how the reviewer models have performed on real repositories and which to pick.</p>
   <p class="muted">Data snapshot: <span id="generated">…</span> · <a href="https://github.com/dk-code-factory/code-scan">GitHub</a> ·
     <a href="https://github.com/dk-code-factory/code-scan#readme">README</a></p>
@@ -51,16 +51,16 @@ git clone https://github.com/dk-code-factory/code-scan &amp;&amp; node code-scan
 <div class="rec"><strong>Default for full scans: Codex <code>gpt-6.1-sol</code>.</strong>
 <p>On every repository where it ran next to a Claude model on the same code it found the largest severity-weighted share of issues
 (gocql 0.76 vs Fable 0.43; seastar 0.81 vs Opus 0.30; scylla-rust-driver 0.59 vs Fable 0.55), at $0.27–0.52 per 100KB —
-about a seventh of Fable's price on the same 2.7MB of Rust. Its findings held up in triage (≥ 0.99 confirmed), but that triage was
-also done by Codex, so treat that figure as an upper bound.</p></div>
+about a seventh of Fable's price on the same 2.7MB of Rust. Auto-triage confirmed ≥ 0.99 of its findings, but that triage was
+also done by Codex and rejected almost nothing (4 false positives in 1,623 Codex verdicts), so treat that figure as an upper bound.</p></div>
 
 <div class="rec"><strong>Best Claude reviewer: Opus 5.5 at 20KB chunks.</strong>
 <p>Found all 7 known bugs on the gocql benchmark at $1.19/100KB and topped the calibration sample of the private Go project (0.74).
-Full scans cost $0.38–0.73/100KB with 0.81–0.97 precision after triage. Use it when you want a Claude-only pipeline or as the second
+Full scans cost $0.38–0.73/100KB with 0.81–1.00 precision after triage. Use it when you want a Claude-only pipeline or as the second
 opinion next to Codex.</p></div>
 
 <div class="rec"><strong>Fable 5.2: strongest on small samples, most expensive at scale.</strong>
-<p>Best quality on the seastar and gocql calibration samples (0.65, 0.49), but $1.93/100KB on a full scan — four to seven times Codex or Opus.
+<p>Best quality on the seastar and gocql calibration samples (0.65, 0.49), but $1.93/100KB on the full scylla-rust-driver scan — about seven times Codex and five times Opus on the same repository.
 Worth it for a focused scan of a critical subsystem (<code>--only</code>), not for a whole large repo.</p></div>
 
 <div class="rec"><strong>Sonnet 5.5: cheap but inconsistent. Haiku 5.5: don't use for review.</strong>
@@ -81,9 +81,9 @@ Haiku found 2 of 7, scored 0.00–0.32 and had rounds fail because reviewers lef
 <section id="pick-chunk">
 <h2>How to pick a chunk size</h2>
 <div class="rec"><strong>Let <code>init</code> calibrate it — and expect 20–40KB.</strong>
-<p>Review quality falls off sharply once a reviewer gets too much code at once. Across the calibration curves below, the best size was
-20KB or 40KB in most runs, and every model lost a third or more of its quality past its knee (Fable on seastar: 0.78 at 40KB → 0.39 at 60KB).
-A few repos with large files tolerated 90KB (cpp-rs-driver, nodejs-rs-driver with Opus). Calibration costs $1–9 per model and is reused by every later scan.</p></div>
+<p>Review quality falls off sharply once a reviewer gets too much code at once. Across the 12 calibration curves below, the best-scoring size was
+20KB or 40KB in 9, and in 8 quality fell by a quarter or more one step past it (Fable on seastar: 0.78 at 40KB → 0.39 at 60KB).
+Only one run peaked above 60KB: Opus on cpp-rs-driver, at 90KB. Calibration costs $1–5 per model for Sonnet and Opus, $7–15 for Fable, and is reused by every later scan.</p></div>
 </section>
 
 <section id="bench">
@@ -130,7 +130,7 @@ Share = severity-weighted share of every distinct issue either scan found. Preci
   <li>All numbers come from local code-scan stores (<code>~/.cache/code-scan</code>) via <code>npm run site</code> (<code>bin/site-export.js</code>), which runs the
     tool's own <code>scans</code>, <code>compare</code>, <code>init report</code> and <code>calibrate report</code> on copies of the stores. Only counts, sizes,
     models and dollars are exported; private repositories are anonymized.</li>
-  <li>Price is list price of every token of every reviewer agent (preamble, coordination turns, re-reads), not just the code. Scans whose transcripts are gone show no price.</li>
+  <li>Price is list price of every token of every reviewer agent (preamble, coordination turns, re-reads), not just the code. Scans whose transcripts are gone or incomplete show no price.</li>
   <li>Precision counts only triaged findings. Most triage was done by Codex auto-triage, which may favour Codex findings.</li>
   <li>Each comparison is one run; model sampling varies between runs.</li>
 </ul>
