@@ -158,11 +158,15 @@ function exportStore(key) {
     });
   }
 
+  const studies = (CONFIG.effortStudies || []).filter((x) => x.store === key);
+  const studyIds = new Set(studies.flatMap((x) => x.scans));
+
   // head-to-head: every pair of scans of one repo with different profiles
   for (const b of byRepo.values()) {
     for (let i = 0; i < b.scans.length; i++) for (let j = i + 1; j < b.scans.length; j++) {
       const A = b.scans[i], B = b.scans[j];
       if (A.model === B.model && A.effort === B.effort) continue;
+      if (studyIds.has(A.id) && studyIds.has(B.id)) continue; // compared all at once below
       const o = cli(st, cwd, key, ['compare', String(A.id), String(B.id), '--json', '--list', 'none']);
       if (!o) continue;
       const c = JSON.parse(o);
@@ -204,6 +208,39 @@ function exportStore(key) {
     bucket(calCommitRepo(cal.commit_sha), null).curves.push({ id: cal.id, model: cal.model, effort: cal.effort || null, init: cal.init_id, resultKb: cal.result_kb, status: cal.status, decision: cal.decision, rounds });
   }
 
+  // effort studies: the same code reviewed by each model at several effort levels, all compared at once
+  const effortStudies = [];
+  for (const sd of studies) {
+    const o = cli(st, cwd, key, ['compare', ...sd.scans.map(String), '--json', '--list', 'none']);
+    if (!o) continue;
+    const c = JSON.parse(o);
+    const all = [...byRepo.values()].flatMap((b) => b.scans);
+    const clusters = c.clusters || [];
+    const sevW = { critical: 4, high: 3, medium: 2, low: 1 };
+    const rows = c.scans.map((x) => {
+      const sc = all.find((y) => y.id === x.id) || {};
+      const tok = q(db, `SELECT COUNT(*) agents, SUM(input_tokens) i, SUM(output_tokens) o, SUM(cache_read) cr, SUM(cache_write) cw, SUM(1 - ok) failed,
+        SUM((julianday(ended) - julianday(started)) * 86400) secs FROM agent_runs WHERE scan_id=? AND kind='review'`, x.id)[0] || {};
+      const mine = clusters.filter((k) => k.seenBy[x.id]);
+      // severity-weighted share of the confirmed issues any effort level found: recall against the pooled truth
+      const realW = clusters.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
+      const gotW = mine.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
+      return {
+        id: x.id, model: sc.model || x.model, effort: sc.effort, findings: x.findings, unique: x.unique, share: round(x.share),
+        confirmed: x.confirmed, falsePositive: x.falsePositive, untriaged: x.findings - x.confirmed - x.falsePositive,
+        precision: round(x.precision), confirmedRecall: realW ? round(gotW / realW) : null,
+        highPlus: mine.filter((k) => k.severity === 'critical' || k.severity === 'high').length,
+        usd: sc.usd, usdPer100Kb: sc.usdPer100Kb, usdPerConfirmed: sc.usd && x.confirmed ? round(sc.usd / x.confirmed) : null,
+        agents: tok.agents || 0, failedAgents: tok.failed || 0, outputTokens: tok.o || null, inputTokens: (tok.i || 0) + (tok.cr || 0) + (tok.cw || 0) || null,
+        agentMinutes: tok.secs ? round(tok.secs / 60, 1) : null,
+      };
+    });
+    const repo = repoOf(sd.scans[0]);
+    effortStudies.push({ repo, title: sd.title || null, basisKb: Math.round(c.basis.bytes / 1024), basisFiles: c.basis.files, issues: clusters.length,
+      confirmedIssues: clusters.filter((k) => k.confirmed).length, triagedBy: sd.triagedBy || null, rows });
+  }
+  for (const e of effortStudies) bucket(e.repo, null).efforts = (bucket(e.repo, null).efforts || []).concat(e);
+
   // auto-triage: verdict mix and price per finding, by triage model
   for (const t of q(db, 'SELECT * FROM triage_runs')) {
     const v = Object.fromEntries(q(db, 'SELECT verdict, COUNT(*) n FROM triage_results WHERE run_id=? GROUP BY verdict', t.id).map((x) => [x.verdict, x.n]));
@@ -227,20 +264,21 @@ function main() {
   for (const key of keys) {
     log(`store ${key}`);
     for (const b of exportStore(key)) {
-      if (!b.scans.length && !b.inits.length && !b.curves.length && !b.triage.length) continue;
+      if (!b.scans.length && !(b.efforts || []).length && !b.inits.length && !b.curves.length && !b.triage.length) continue;
       const k = b.repo || `?${key}`;
       if (!merged.has(k)) merged.set(k, { repo: b.repo, lang: b.lang, scans: [], compares: [], inits: [], curves: [], triage: [] });
       const m = merged.get(k);
       m.lang = m.lang || b.lang;
       for (const f of ['scans', 'compares', 'inits', 'curves', 'triage']) m[f].push(...b[f]);
+      if (b.efforts) m.efforts = (m.efforts || []).concat(b.efforts);
     }
   }
   const repos = [...merged.values()].map((m) => {
     const d = displayName(m.repo, m.lang);
     return { name: d.name, public: d.public, url: d.public ? `https://github.com/${m.repo}` : null, lang: m.lang,
-      scans: m.scans, compares: m.compares, inits: m.inits, curves: m.curves, triage: m.triage };
+      scans: m.scans, compares: m.compares, inits: m.inits, curves: m.curves, triage: m.triage, efforts: m.efforts || [] };
   }).sort((a, b) => (b.public - a.public) || a.name.localeCompare(b.name));
-  const data = { generated: new Date().toISOString().slice(0, 10), bench: CONFIG.bench || null, efforts: CONFIG.efforts || null, repos };
+  const data = { generated: new Date().toISOString().slice(0, 10), bench: CONFIG.bench || null, repos };
   fs.writeFileSync(OUT, JSON.stringify(data, null, 1) + '\n');
   fs.rmSync(TMP, { recursive: true, force: true });
   log(`wrote ${path.relative(process.cwd(), OUT)}: ${repos.length} repos, ${repos.reduce((s, r) => s + r.scans.length, 0)} scans, ${repos.reduce((s, r) => s + r.inits.length, 0)} inits, ${repos.reduce((s, r) => s + r.curves.length, 0)} curves`);

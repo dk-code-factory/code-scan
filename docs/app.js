@@ -181,10 +181,52 @@
     tri.map((t) => `<tr><td>${repoLink(t.repo)}</td><td>${t.model ? withEffort(t.model, t.effort) : '<span class="muted">manual</span>'}</td><td>${t.findings}</td><td>${t.verdicts.real || 0}</td><td>${t.verdicts.false_positive || 0}</td><td>${t.verdicts.wontfix || 0}</td><td>${t.verdicts.unsure || 0}</td><td>${t.severityChanged}</td><td>${t.usdPerFinding === null ? '–' : '$' + t.usdPerFinding.toFixed(3)}</td></tr>`).join('');
 
   // ---------- effort
-  const E = data.efforts;
-  if (!E) {
-    const x = tri.filter((t) => t.effort);
-    $('effort').innerHTML = `<p class="muted">A full effort-level comparison is in progress. So far: Codex triage at <code>xhigh</code> cost
-      ${x.length ? '$' + x[0].usdPerFinding.toFixed(3) : '–'} per finding against ~$0.05 at the default, with the same verdict mix.</p>`;
-  } else window.renderEffort && window.renderEffort(E, { $, esc, f2, usd, kb, sw, withEffort, modelInfo, svgEl, bindTip, nice, scatter });
+  (function () {
+    const studies = data.repos.flatMap((r) => (r.efforts || []).map((e) => ({ ...e, repo: r })));
+    const host = $('effort-body');
+    if (!studies.length) { host.innerHTML = '<p class="muted">No effort study yet.</p>'; return; }
+    const ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    for (const st of studies) {
+      const rows = st.rows.slice().sort((a, b) => modelInfo(a.model).name.localeCompare(modelInfo(b.model).name) || ORDER.indexOf(a.effort) - ORDER.indexOf(b.effort));
+      const sec = document.createElement('div');
+      sec.innerHTML = `<h3>${repoLink(st.repo)} <span class="muted">— ${kb(st.basisKb)} in ${st.basisFiles} files, every scan on the same commit, plan and 40KB chunks;
+        ${st.issues} distinct issues, ${st.confirmedIssues} confirmed${st.triagedBy ? ' by ' + esc(st.triagedBy) : ''}</span></h3>`;
+      // recall of confirmed issues vs whole-scan price, one line per model through its effort levels
+      const fig = document.createElement('figure');
+      const chart = document.createElement('div'); chart.className = 'chart';
+      const W = 640, H = 300, L = 44, R = 30, T = 12, B = 36;
+      const pts = rows.filter((r) => r.usd !== null && r.confirmedRecall !== null);
+      const xMax = nice(Math.max(...pts.map((p) => p.usd)) * 1.1);
+      const X = (v) => L + (v / xMax) * (W - L - R), Y = (v) => T + (1 - v) * (H - T - B);
+      const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'recall of confirmed issues vs price by effort level' });
+      for (let i = 0; i <= 4; i++) {
+        svgEl('line', { x1: L, x2: W - R, y1: Y(i / 4), y2: Y(i / 4), class: 'grid' }, svg);
+        svgEl('text', { x: L - 6, y: Y(i / 4) + 4, 'text-anchor': 'end' }, svg).textContent = (i / 4).toFixed(2);
+        svgEl('text', { x: X((xMax * i) / 4), y: H - B + 16, 'text-anchor': 'middle' }, svg).textContent = '$' + ((xMax * i) / 4).toFixed(0);
+      }
+      svgEl('text', { x: (L + W - R) / 2, y: H - 4, 'text-anchor': 'middle' }, svg).textContent = 'whole-scan price ($)';
+      const models = [...new Set(pts.map((p) => p.model))];
+      for (const m of models) {
+        const ps = pts.filter((p) => p.model === m).sort((a, b) => ORDER.indexOf(a.effort) - ORDER.indexOf(b.effort));
+        svgEl('polyline', { points: ps.map((p) => `${X(p.usd)},${Y(p.confirmedRecall)}`).join(' '), fill: 'none', stroke: modelInfo(m).color, 'stroke-width': 2 }, svg);
+        for (const p of ps) {
+          svgEl('circle', { cx: X(p.usd), cy: Y(p.confirmedRecall), r: 5, fill: modelInfo(m).color, stroke: 'var(--surface-1)', 'stroke-width': 2 }, svg);
+          svgEl('text', { x: X(p.usd) + 8, y: Y(p.confirmedRecall) - 6, class: 'lbl' }, svg).textContent = p.effort;
+          bindTip(svgEl('circle', { cx: X(p.usd), cy: Y(p.confirmedRecall), r: 14, class: 'hit' }, svg),
+            `<b>${esc(modelInfo(m).name)} ${esc(p.effort)}</b><br>recall ${f2(p.confirmedRecall)} · ${p.confirmed} confirmed, ${p.falsePositive} false pos.<br>${usd(p.usd)} · ${usd(p.usdPer100Kb)}/100KB`);
+        }
+      }
+      chart.appendChild(svg);
+      fig.appendChild(chart);
+      const cap = document.createElement('figcaption');
+      cap.innerHTML = `<div class="legend">${models.map((m) => `<span>${sw(m)}</span>`).join('')}</div>Recall = severity-weighted share of all confirmed issues found by any of these scans. Up and left is better.`;
+      fig.appendChild(cap);
+      sec.appendChild(fig);
+      const tw = document.createElement('div'); tw.className = 'table-wrap';
+      tw.innerHTML = `<table><tr><th>model</th><th>effort</th><th>findings</th><th>confirmed</th><th>false pos.</th><th>precision</th><th>recall</th><th>only this one</th><th>high+</th><th>$</th><th>$/100KB</th><th>$/confirmed</th><th>output tokens</th><th>agent min</th></tr>` +
+        rows.map((r) => `<tr><td>${sw(r.model)}</td><td>${esc(r.effort || '–')}</td><td>${r.findings}</td><td>${r.confirmed}</td><td>${r.falsePositive}</td><td>${f2(r.precision)}</td><td><b>${f2(r.confirmedRecall)}</b></td><td>${r.unique}</td><td>${r.highPlus}</td><td>${usd(r.usd)}</td><td>${usd(r.usdPer100Kb)}</td><td>${usd(r.usdPerConfirmed)}</td><td>${r.outputTokens ? (r.outputTokens / 1e6).toFixed(2) + 'M' : '–'}</td><td>${r.agentMinutes ?? '–'}</td></tr>`).join('') + '</table>';
+      sec.appendChild(tw);
+      host.appendChild(sec);
+    }
+  })();
 })();
