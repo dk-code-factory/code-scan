@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>code-scan model guide</title>
+<meta name="description" content="How reviewer models perform in code-scan on real repositories: quality, false positives, price, chunk size — and which to pick.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+<header class="hero">
+  <h1>code-scan</h1>
+  <p class="lede">Repository-wide bug scanning with parallel reviewer agents from Claude Code, Codex, Gemini, Copilot, Cursor or OpenCode.
+    This page shows how the reviewer models have performed on real repositories and which to pick.</p>
+  <p class="muted">Data snapshot: <span id="generated">…</span> · <a href="https://github.com/dk-code-factory/code-scan">GitHub</a> ·
+    <a href="https://github.com/dk-code-factory/code-scan#readme">README</a></p>
+  <nav class="toc">
+    <a href="#install">Install</a>
+    <a href="#pick-model">How to pick a model</a>
+    <a href="#pick-effort">How to pick an effort level</a>
+    <a href="#pick-chunk">How to pick a chunk size</a>
+    <a href="#bench">Known-bug benchmark</a>
+    <a href="#h2h">Head-to-head scans</a>
+    <a href="#scans">All full scans</a>
+    <a href="#calibration">Calibration curves</a>
+    <a href="#triage">Auto-triage</a>
+    <a href="#method">Method</a>
+  </nav>
+</header>
+
+<section id="install">
+<h2>Install</h2>
+<pre><code># Claude Code
+/plugin marketplace add dk-code-factory/code-scan
+/plugin install code-scan@code-scan
+
+# Codex CLI
+codex plugin marketplace add dk-code-factory/code-scan
+codex plugin add code-scan@code-scan
+
+# Any Agent Skills host
+git clone https://github.com/dk-code-factory/code-scan &amp;&amp; node code-scan/bin/code-scan.js install</code></pre>
+<p>Then run <code>/code-scan:init</code> once per repository: it benchmarks models on a sample of that repo and picks a chunk size for each.</p>
+</section>
+
+<section id="pick-model">
+<h2>How to pick a model</h2>
+<div class="cards" id="headline"></div>
+
+<div class="rec"><strong>Default for full scans: Codex <code>gpt-6.1-sol</code>.</strong>
+<p>On every repository where it ran next to a Claude model on the same code it found the largest severity-weighted share of issues
+(gocql 0.76 vs Fable 0.43; seastar 0.81 vs Opus 0.30; scylla-rust-driver 0.59 vs Fable 0.55), at $0.27–0.52 per 100KB —
+about a seventh of Fable's price on the same 2.7MB of Rust. Its findings held up in triage (≥ 0.99 confirmed), but that triage was
+also done by Codex, so treat that figure as an upper bound.</p></div>
+
+<div class="rec"><strong>Best Claude reviewer: Opus 5.5 at 20KB chunks.</strong>
+<p>Found all 7 known bugs on the gocql benchmark at $1.19/100KB and topped the calibration sample of the private Go project (0.74).
+Full scans cost $0.38–0.73/100KB with 0.81–0.97 precision after triage. Use it when you want a Claude-only pipeline or as the second
+opinion next to Codex.</p></div>
+
+<div class="rec"><strong>Fable 5.2: strongest on small samples, most expensive at scale.</strong>
+<p>Best quality on the seastar and gocql calibration samples (0.65, 0.49), but $1.93/100KB on a full scan — four to seven times Codex or Opus.
+Worth it for a focused scan of a critical subsystem (<code>--only</code>), not for a whole large repo.</p></div>
+
+<div class="rec"><strong>Sonnet 5.5: cheap but inconsistent. Haiku 5.5: don't use for review.</strong>
+<p>Sonnet ranged from 0.68 (private Go) to 0.09 (seastar C++) on calibration samples, and found 4 of 7 known gocql bugs.
+Haiku found 2 of 7, scored 0.00–0.32 and had rounds fail because reviewers left files unsubmitted.</p></div>
+
+<div class="rec"><strong>For critical repos, run two models side by side.</strong>
+<p>Overlap between models is small: of the issues Codex and Fable found on gocql only 25 were found by both, on scylla-rust-driver only 12.
+<code>start --profile codex-default,opus-default</code> runs both on the same commit and plan; <code>compare</code> shows what only one found.</p></div>
+</section>
+
+<section id="pick-effort">
+<h2>How to pick an effort level</h2>
+<div id="effort"></div>
+</section>
+
+<section id="pick-chunk">
+<h2>How to pick a chunk size</h2>
+<div class="rec"><strong>Let <code>init</code> calibrate it — and expect 20–40KB.</strong>
+<p>Review quality falls off sharply once a reviewer gets too much code at once. Across the calibration curves below, the best size was
+20KB or 40KB in most runs, and every model lost a third or more of its quality past its knee (Fable on seastar: 0.78 at 40KB → 0.39 at 60KB).
+A few repos with large files tolerated 90KB (cpp-rs-driver, nodejs-rs-driver with Opus). Calibration costs $1–9 per model and is reused by every later scan.</p></div>
+</section>
+
+<section id="bench">
+<h2>Known-bug benchmark</h2>
+<p id="bench-desc" class="muted"></p>
+<figure><div class="chart" id="bench-chart"></div>
+<figcaption>Quality (severity-weighted share of all distinct issues any model found) against all-in price. Up and left is better.</figcaption></figure>
+<div class="table-wrap"><table id="bench-table"></table></div>
+</section>
+
+<section id="h2h">
+<h2>Head-to-head scans</h2>
+<p class="muted">Two full scans of the same repository by different models, compared only on files both reviewed with identical content (<code>code-scan.js compare</code>).
+Share = severity-weighted share of every distinct issue either scan found. Precision = confirmed / (confirmed + false positive) among triaged findings.</p>
+<div id="h2h-body"></div>
+</section>
+
+<section id="scans">
+<h2>All full scans</h2>
+<figure><div class="chart" id="cost-chart"></div>
+<figcaption>Review price per 100KB of code, every full scan with a known cost. Price is list price of every token of every reviewer agent.</figcaption></figure>
+<div class="table-wrap"><table id="scan-table"></table></div>
+</section>
+
+<section id="calibration">
+<h2>Calibration curves</h2>
+<p class="muted">Score per chunk size within one model's calibration (share of the distinct issues that model found at any size). One sample per size: differences under ~0.15 are noise.</p>
+<div class="legend" id="cal-legend"></div>
+<div class="multiples" id="cal-charts"></div>
+<h3>Cross-model init results</h3>
+<p class="muted">Each model at its own calibrated chunk size; quality is the share of all distinct issues found by any model on that sample.</p>
+<div id="init-body"></div>
+</section>
+
+<section id="triage">
+<h2>Auto-triage</h2>
+<p class="muted">Agents re-check each finding against the checkout and mark it real, false positive, won't fix or unsure.</p>
+<div class="table-wrap"><table id="triage-table"></table></div>
+</section>
+
+<section id="method">
+<h2>Method</h2>
+<ul>
+  <li>All numbers come from local code-scan stores (<code>~/.cache/code-scan</code>) via <code>npm run site</code> (<code>bin/site-export.js</code>), which runs the
+    tool's own <code>scans</code>, <code>compare</code>, <code>init report</code> and <code>calibrate report</code> on copies of the stores. Only counts, sizes,
+    models and dollars are exported; private repositories are anonymized.</li>
+  <li>Price is list price of every token of every reviewer agent (preamble, coordination turns, re-reads), not just the code. Scans whose transcripts are gone show no price.</li>
+  <li>Precision counts only triaged findings. Most triage was done by Codex auto-triage, which may favour Codex findings.</li>
+  <li>Each comparison is one run; model sampling varies between runs.</li>
+</ul>
+</section>
+
+<footer>code-scan · MIT · generated from <a href="data.json">data.json</a></footer>
+</main>
+<div class="tip" id="tip"></div>
+<script src="app.js"></script>
+</body>
+</html>
