@@ -267,7 +267,7 @@ function pathMatcher(spec) {
 const BOOL_FLAGS = new Set(['reclaim', 'close', 'no-dismissed', 'all-versions', 'retired', 'include-tests', 'force', 'no-plan', 'replan', 'now', 'all',
   'latest', 'stale', 'no-stale', 'reported', 'unreported', 'primary-only', 'new',
   'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules', 'recheck',
-  'detach', 'reply', 'full', 'uninstall', 'user', 'project']);
+  'detach', 'reply', 'full', 'uninstall', 'user', 'project', 'matrix']);
 const MULTI_FLAGS = new Set(['include', 'exclude', 'only', 'force-path', 'path', 'severity',
   'category', 'triage', 'confirmation', 'sort', 'label']);
 
@@ -387,6 +387,11 @@ function db() {
   const calCols = DB.prepare('PRAGMA table_info(calibrations)').all().map((c) => c.name);
   if (!calCols.includes('init_id')) DB.exec('ALTER TABLE calibrations ADD COLUMN init_id INTEGER');
   if (!calCols.includes('single')) DB.exec('ALTER TABLE calibrations ADD COLUMN single INTEGER NOT NULL DEFAULT 0');
+  // init candidates: reasoning effort, the init's options, search stage, and how the candidate was added
+  for (const col of ['effort', 'init_opts', 'stage', 'role']) {
+    if (calCols.includes(col)) continue;
+    try { DB.exec(`ALTER TABLE calibrations ADD COLUMN ${col} TEXT`); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  }
   if (!DB.prepare('PRAGMA table_info(findings)').all().some((c) => c.name === 'gone_scan')) {
     DB.exec('ALTER TABLE findings ADD COLUMN gone_scan INTEGER');
   }
@@ -624,8 +629,10 @@ function specFromFlags(f) {
   let r;
   try { r = RN.resolve({ flagRunner: f.runner, flagModel: model }); } catch (e) { die(e.message); }
   if (!r.model || !RN.splitModel(r.model).model) die(`--model ${f.model}: name the model, not just the runner (e.g. ${r.runner}:<model>)`);
-  const cal = cfgGet(`chunk_kb:${modelId(r.model)}`);
-  const effErr = RN.effortError(r.runner, f.effort);
+  // --model default also takes the effort picked at init, unless --effort is given
+  const effort = f.effort !== undefined ? f.effort : f.model === 'default' ? cfgGet('default_effort') || undefined : undefined;
+  const cal = (effort && cfgGet(chunkKey(modelId(r.model), effort))) || cfgGet(chunkKey(modelId(r.model)));
+  const effErr = RN.effortError(r.runner, effort);
   if (effErr) die(effErr);
   if (f['chunk-kb'] !== undefined && !(Number(f['chunk-kb']) > 0)) die('--chunk-kb must be a positive number (KB)');
   const spec = {
@@ -635,7 +642,7 @@ function specFromFlags(f) {
     runner: r.runner,
     model: modelId(r.model),
     // absent unless set, so profiles registered without it keep their hash
-    effort: f.effort ? String(f.effort) : undefined,
+    effort: effort ? String(effort) : undefined,
     runnerArgs: f['runner-args'] !== undefined ? String(f['runner-args']).split(/\s+/).filter(Boolean) : RN.extraArgs(r.runner),
     chunkKb: f['chunk-kb'] !== undefined ? Number(f['chunk-kb']) : cal ? Number(cal) : DEFAULT_CHUNK_KB,
     scope: { only: scopeList(f.only), include: scopeList(f.include), exclude: scopeList(f.exclude), includeTests: !!f['include-tests'] },
@@ -934,9 +941,19 @@ function pack(scan) {
   d.prepare("UPDATE chunks SET state='void' WHERE scan_id=? AND state IN ('pending','claimed')").run(scan.id);
   d.prepare("UPDATE files SET state='pending', slices_done='[]' WHERE scan_id=? AND state IN ('in_progress','partial')").run(scan.id);
   const files = d.prepare("SELECT * FROM files WHERE scan_id=? AND state IN ('pending','partial') ORDER BY path").all(scan.id);
+  // a file is never split (older state may carry slice bookkeeping; drop it)
+  const setSlices = d.prepare('UPDATE files SET slices_json=? WHERE scan_id=? AND path=?');
+  for (const f of files) if (f.slices_json) setSlices.run(null, scan.id, f.path);
+  const chunks = packPlan(files, budget, plan);
+  const ins = d.prepare("INSERT INTO chunks(scan_id,ord,unit,items_json,bytes,state) VALUES(?,?,?,?,?,'pending')");
+  chunks.forEach((c, i) => ins.run(scan.id, i, c.unit, JSON.stringify(c.items), c.bytes));
+  return { chunks: chunks.length, files: files.length, bytes: chunks.reduce((s, c) => s + c.bytes, 0) };
+}
+
+/** Chunks for `files` ({path, bytes, unit}, sorted by path) at `budget` bytes: pure, no database. */
+function packPlan(files, budget, plan) {
   const unitMeta = new Map((plan && plan.units || []).map((u) => [u.name, u]));
   const groups = (plan && plan.groups || []).map((g) => pathMatcher(g));
-  const setSlices = d.prepare('UPDATE files SET slices_json=? WHERE scan_id=? AND path=?');
   const atoms = new Map();
   const addAtom = (key, unit, dir, item) => {
     let a = atoms.get(key);
@@ -947,8 +964,7 @@ function pack(scan) {
   for (const f of files) {
     const dir = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '.';
     // a file is never split: one file is always reviewed whole by one agent. A file larger than the
-    // budget becomes a chunk of its own. (Older state may carry slice bookkeeping; drop it.)
-    if (f.slices_json) setSlices.run(null, scan.id, f.path);
+    // budget becomes a chunk of its own.
     if (f.bytes > budget) { addAtom(`whole|${f.path}`, f.unit, dir, { path: f.path, bytes: f.bytes }); continue; }
     const gi = groups.findIndex((m) => m(f.path));
     const key = gi >= 0 ? `g${gi}|${f.unit}` : `${dir}|${stemKey(f.path)}`;
@@ -982,9 +998,7 @@ function pack(scan) {
   }
   if (cur) chunks.push(cur);
   chunks.sort((a, b) => prio(b.unit) - prio(a.unit) || b.bytes - a.bytes);
-  const ins = d.prepare("INSERT INTO chunks(scan_id,ord,unit,items_json,bytes,state) VALUES(?,?,?,?,?,'pending')");
-  chunks.forEach((c, i) => ins.run(scan.id, i, c.unit, JSON.stringify(c.items), c.bytes));
-  return { chunks: chunks.length, files: files.length, bytes: chunks.reduce((s, c) => s + c.bytes, 0) };
+  return chunks;
 }
 
 function pendingChunks(scanId) {
@@ -1896,7 +1910,7 @@ function calRound(cal, sizeKb) {
       VALUES(?,?,?,?,'active','cal',?,?,?)`).run(cal.commit_sha, prof.name, prof.hash, JSON.stringify(opts), cal.id, now(), now());
     const sid = Number(r.lastInsertRowid);
     const ins = d.prepare(`INSERT INTO files(scan_id,path,blob_sha,mode,bytes,lang,unit,state) VALUES(?,?,?,?,?,?,?,'pending')`);
-    for (const t of JSON.parse(cal.sample_json)) ins.run(sid, t.path, t.sha, t.mode, t.size, LANG[extOf(t.path)] || null, defaultUnit(t.path));
+    for (const t of sampleFiles(cal)) ins.run(sid, t.path, t.sha, t.mode, t.size, LANG[extOf(t.path)] || null, defaultUnit(t.path));
     const pk = pack(getScan(sid));
     return { scanId: sid, workers: pk.chunks };
   });
@@ -1975,35 +1989,429 @@ function calLine(cal, round) {
 
 // ---------------------------------------------------------------- repo init
 //
-// Initialization picks the reviewer model for a repo: every candidate model is calibrated on the same
-// sample, then compared on quality (share of all distinct issues found by any model, severity
-// weighted) and price (dollars per 100KB reviewed at its own best chunk size). The user picks a
-// model; scans then use it with that model's chunk size.
+// Initialization picks the reviewer model, reasoning effort and chunk size for a repo. Every candidate
+// (model × effort) reviews the same sample, made of two batches that match the two chunk shapes a scan
+// produces: A, the repo's biggest files (a file is never split, so each is a chunk of its own whatever
+// the chunk size), and B, small files of one area (packed several to a chunk — the only shape the chunk
+// size changes). Quality is the severity-weighted share of all distinct issues any candidate found in a
+// batch; a candidate's score at a size weights its A and B scores by how much of this repo's code is in
+// files bigger than that size. Price is all-in dollars per 100KB, weighted the same way.
+//
+// The search is staged so it costs about one calibration per model: every candidate is screened at two
+// sizes (medium and medium×2.25), the effort bracket (lowest, middle, highest level) is refined by one
+// level where it matters, dominated candidates are pruned, and only the survivors (at most 3) search for
+// their chunk size. --matrix keeps every effort level and every candidate; --sizes replaces the search
+// with a fixed list of sizes that every candidate runs.
 
 const MODEL_IDS = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5', fable: 'claude-fable-5-2' };
 const INIT_DEFAULT_MODELS = 'opus,sonnet,haiku,fable';
+const INIT_BIG_KB = 160;
+const INIT_SMALL_KB = 160;
+const INIT_KEEP = 3;
 function modelId(x) {
   if (!x) return x;
   const s = String(x).replace(/^claude:/, '');
   return MODEL_IDS[s] || s;
 }
+const growKb = (s) => Math.round(s * 1.5);
+/** Config key of a calibrated chunk size: per model, or per model and effort. */
+function chunkKey(model, effort) { return effort ? `chunk_kb:${model}@${effort}` : `chunk_kb:${model}`; }
+function candLabel(c) { return `${c.model}${c.effort ? ` ${c.effort}` : ''}`; }
+
+/** Files of a calibration sample: all of it, or one init batch ('a' biggest files, 'b' small files). */
+function sampleFiles(cal, batch) {
+  const s = JSON.parse(cal.sample_json);
+  if (Array.isArray(s)) return batch ? [] : s;
+  return batch ? (s[batch] || []) : [...(s.a || []), ...(s.b || [])];
+}
+const batchBytes = (cal, batch) => sampleFiles(cal, batch).reduce((x, t) => x + t.size, 0);
 
 const sampleLinesCache = new Map();
-function sampleLines(cal) {
-  if (!sampleLinesCache.has(cal.id)) {
+function sampleLines(cal, batch) {
+  const key = `${cal.id}|${batch || ''}`;
+  if (!sampleLinesCache.has(key)) {
     let n = 0;
-    for (const t of JSON.parse(cal.sample_json)) n += (catBlob(t.sha).match(/\n/g) || []).length;
-    sampleLinesCache.set(cal.id, n);
+    for (const t of sampleFiles(cal, batch)) n += (catBlob(t.sha).match(/\n/g) || []).length;
+    sampleLinesCache.set(key, n);
   }
-  return sampleLinesCache.get(cal.id);
+  return sampleLinesCache.get(key);
 }
 
 function initCals(initId) {
   return db().prepare('SELECT * FROM calibrations WHERE init_id=? ORDER BY id').all(initId);
 }
 
-/** Cross-model comparison for one init: rows sorted by quality, plus a recommendation. */
+/** The two init batches: A = biggest files (largest first, up to bigKb; the first is always taken),
+ *  B = small files of the one unit closest to smallKb from above (path order, so it packs like a scan would). */
+function initSample(commit, opts, { bigKb, smallKb, mediumKb }) {
+  const only = pathMatcher(opts.only);
+  const tree = lsTree(commit).filter((t) => !only || only(t.path));
+  const code0 = tree.filter((t) => classifyPath(t.path, t.mode, t.size, opts).code);
+  const ling = linguistFlags(commit, code0.map((t) => t.path));
+  const code = code0.filter((t) => !ling.has(t.path));
+  if (!code.length) die('no code files to calibrate on');
+  const row = (t) => ({ path: t.path, sha: t.sha, mode: t.mode, size: t.size });
+  const a = [];
+  let aBytes = 0;
+  for (const t of [...code].sort((x, y) => y.size - x.size || x.path.localeCompare(y.path))) {
+    if (t.size < mediumKb * 1024 || (a.length && aBytes >= bigKb * 1024)) break;
+    a.push(row(t)); aBytes += t.size;
+  }
+  // small: at most a quarter of the medium chunk (several share a chunk at every size searched);
+  // a repo without any falls back to everything under the medium size that is not in A
+  const inA = new Set(a.map((t) => t.path));
+  const unitsUnder = (max) => {
+    const byUnit = new Map();
+    for (const t of code) {
+      if (!t.size || t.size > max || inA.has(t.path)) continue;
+      const u = defaultUnit(t.path);
+      if (!byUnit.has(u)) byUnit.set(u, { unit: u, bytes: 0, files: [] });
+      const e = byUnit.get(u); e.bytes += t.size; e.files.push(t);
+    }
+    return [...byUnit.values()];
+  };
+  let units = unitsUnder(Math.max(MIN_CHUNK_KB, mediumKb / 4) * 1024);
+  if (!units.length) units = unitsUnder(mediumKb * 1024 - 1);
+  const target = smallKb * 1024;
+  const unit = units.filter((u) => u.bytes >= target).sort((x, y) => x.bytes - y.bytes || x.unit.localeCompare(y.unit))[0] ||
+    units.sort((x, y) => y.bytes - x.bytes || x.unit.localeCompare(y.unit))[0];
+  const b = [];
+  let bBytes = 0;
+  if (unit) {
+    for (const t of unit.files.sort((x, y) => x.path.localeCompare(y.path))) {
+      if (bBytes >= target) break;
+      b.push(row(t)); bBytes += t.size;
+    }
+  }
+  // the repo's code sizes above the smallest chunk size: the weight of solo-file chunks at any size
+  if (!a.length && !b.length) die('no code files to calibrate on');
+  const repo = { bytes: code.reduce((x, t) => x + t.size, 0), big: code.filter((t) => t.size > MIN_CHUNK_KB * 1024).map((t) => t.size) };
+  return { a, b, aBytes, bBytes, unit: unit ? unit.unit : null, repo };
+}
+
+/** Weights of the two batches at a chunk size: share of the repo's code in files bigger than it. */
+function initWeights(cal, sizeKb) {
+  const s = JSON.parse(cal.sample_json);
+  if (!s.a.length) return { a: 0, b: 1 };
+  if (!s.b.length) return { a: 1, b: 0 };
+  const over = s.repo.big.filter((n) => n > sizeKb * 1024).reduce((x, y) => x + y, 0);
+  const a = s.repo.bytes ? Math.min(1, over / s.repo.bytes) : 0;
+  return { a, b: 1 - a };
+}
+
+/** How batch A packs at a size: equal layouts review identically, so one round serves them all. */
+function aLayout(cal, sizeKb) {
+  const files = sampleFiles(cal, 'a').map((t) => ({ path: t.path, bytes: t.size, unit: defaultUnit(t.path) }))
+    .sort((x, y) => x.path.localeCompare(y.path));
+  return packPlan(files, Math.max(MIN_CHUNK_KB, sizeKb) * 1024, null).map((c) => c.items.map((i) => i.path).join('+')).sort().join('|');
+}
+
+function initRound(cal, batch, sizeKb) {
+  const d = db();
+  const opts = { chunkKb: sizeKb, noPlan: true, model: cal.model, effort: cal.effort || undefined, batch, chunkSource: 'calibration' };
+  if (batch === 'a') opts.layout = aLayout(cal, sizeKb);
+  const prof = resolvePrompt(cal.profile_name);
+  return tx(() => {
+    const r = d.prepare(`INSERT INTO scans(commit_sha,profile_name,profile_hash,options_json,status,kind,cal_id,created,updated)
+      VALUES(?,?,?,?,'active','cal',?,?,?)`).run(cal.commit_sha, prof.name, prof.hash, JSON.stringify(opts), cal.id, now(), now());
+    const sid = Number(r.lastInsertRowid);
+    const ins = d.prepare(`INSERT INTO files(scan_id,path,blob_sha,mode,bytes,lang,unit,state) VALUES(?,?,?,?,?,?,?,'pending')`);
+    for (const t of sampleFiles(cal, batch)) ins.run(sid, t.path, t.sha, t.mode, t.size, LANG[extOf(t.path)] || null, defaultUnit(t.path));
+    const pk = pack(getScan(sid));
+    return { scanId: sid, workers: pk.chunks };
+  });
+}
+
+function initRounds(cal) {
+  return db().prepare("SELECT id, options_json, status, workflow_task FROM scans WHERE kind='cal' AND cal_id=? ORDER BY id").all(cal.id)
+    .map((r) => {
+      const o = JSON.parse(r.options_json);
+      return { id: r.id, cal, batch: o.batch, size: o.chunkKb, layout: o.layout || null, status: r.status, retried: r.workflow_task === 'retried' };
+    });
+}
+
+/** Per-round quality: each batch's findings of every candidate clustered into distinct issues. */
+function initScores(cals) {
+  const d = db();
+  const rounds = cals.flatMap(initRounds);
+  const round = new Map();
+  const issues = {};
+  for (const batch of ['a', 'b']) {
+    const done = rounds.filter((r) => r.batch === batch && r.status === 'done');
+    const all = [];
+    for (const r of done) for (const f of d.prepare('SELECT * FROM cal_findings WHERE scan_id=?').all(r.id)) all.push({ ...f, rid: r.id });
+    const cid = clusterFindings(all);
+    const w = new Map();
+    all.forEach((f, i) => w.set(cid[i], Math.max(w.get(cid[i]) || 0, SEV_RANK[f.severity] || 1)));
+    const totalW = [...w.values()].reduce((x, y) => x + y, 0);
+    for (const r of done) {
+      const mine = new Set(all.map((f, i) => (f.rid === r.id ? cid[i] : null)).filter((x) => x !== null));
+      const got = [...mine].reduce((x, c) => x + w.get(c), 0);
+      round.set(r.id, { q: totalW ? got / totalW : 1, findings: all.filter((f) => f.rid === r.id) });
+    }
+    issues[batch] = w.size;
+  }
+  return { rounds, round, issues };
+}
+
+/** Rounds a candidate needs at a size: B at that size, A only when its layout is new. */
+function initNeeds(cal, sizeKb) {
+  const s = JSON.parse(cal.sample_json);
+  const w = initWeights(cal, sizeKb);
+  const need = [];
+  if (s.a.length && w.a > 0) need.push({ batch: 'a', layout: aLayout(cal, sizeKb) });
+  if (s.b.length && w.b > 0) need.push({ batch: 'b' });
+  return need;
+}
+const sameRound = (r, cal, n, sizeKb) => r.cal.id === cal.id && r.batch === n.batch && (n.batch === 'a' ? r.layout === n.layout : r.size === sizeKb);
+
+/** Combined quality and price of a candidate at a size, or null while a round it needs is not done. */
+function initPoint(cal, sizeKb, sc, withUsd) {
+  const w = initWeights(cal, sizeKb);
+  const got = {};
+  for (const n of initNeeds(cal, sizeKb)) {
+    const rs = sc.rounds.filter((r) => sameRound(r, cal, n, sizeKb) && r.status === 'done');
+    if (!rs.length) return null;
+    got[n.batch] = rs[rs.length - 1];
+  }
+  const q = (b) => (got[b] ? sc.round.get(got[b].id).q : 0);
+  const p = { size: sizeKb, wA: w.a, qa: got.a ? q('a') : null, qb: got.b ? q('b') : null, q: w.a * q('a') + w.b * q('b'),
+    rounds: Object.values(got), findings: Object.values(got).reduce((x, r) => x + sc.round.get(r.id).findings.length, 0) };
+  if (withUsd) {
+    const usd = (b) => (got[b] ? scanSpendUsd(getScan(got[b].id)) : 0);
+    const ua = usd('a'), ub = usd('b');
+    const kA = batchBytes(cal, 'a') / 1024, kB = batchBytes(cal, 'b') / 1024;
+    const lA = got.a ? sampleLines(cal, 'a') : 0, lB = got.b ? sampleLines(cal, 'b') : 0;
+    p.usd100 = 100 * ((got.a && kA ? w.a * ua / kA : 0) + (got.b && kB ? w.b * ub / kB : 0));
+    p.usdKloc = 1000 * ((lA ? w.a * ua / lA : 0) + (lB ? w.b * ub / lB : 0));
+  }
+  return p;
+}
+
+/** Measured points of a candidate, by size. */
+function initPoints(cal, sc, withUsd) {
+  const sizes = [...new Set(sc.rounds.filter((r) => r.cal.id === cal.id).map((r) => r.size))].sort((x, y) => x - y);
+  return sizes.map((s) => initPoint(cal, s, sc, withUsd)).filter(Boolean);
+}
+
+/** Make sure the rounds a candidate needs at a size exist; new ones go to `run`. Returns an error when they keep failing. */
+function initEnsure(cal, sizeKb, sc, run) {
+  for (const n of initNeeds(cal, sizeKb)) {
+    const same = sc.rounds.filter((r) => sameRound(r, cal, n, sizeKb));
+    if (same.some((r) => r.status === 'done' || r.status === 'active')) continue;
+    if (same.filter((r) => r.status === 'failed').length >= 2) return `batch ${n.batch.toUpperCase()} rounds at ${sizeKb}KB failed twice — reviewers did not run`;
+    const r = initRound(cal, n.batch, sizeKb);
+    sc.rounds.push({ id: r.scanId, cal, batch: n.batch, size: sizeKb, layout: n.layout || null, status: 'active', retried: false });
+    run.push(r.scanId);
+  }
+  return null;
+}
+
+function initAddCal(base, effort, role, stage) {
+  const d = db();
+  const r = d.prepare(`INSERT INTO calibrations(model,profile_name,commit_sha,sample_json,sample_bytes,medium_kb,status,init_id,single,effort,init_opts,stage,role,created,updated)
+    VALUES(?,?,?,?,?,?,'running',?,?,?,?,?,?,?,?)`).run(base.model, base.profile_name, base.commit_sha, base.sample_json, base.sample_bytes, base.medium_kb,
+    base.init_id, base.single, effort || null, base.init_opts, stage, role, now(), now());
+  return d.prepare('SELECT * FROM calibrations WHERE id=?').get(r.lastInsertRowid);
+}
+function initSetCal(cal, fields) {
+  const keys = Object.keys(fields);
+  db().prepare(`UPDATE calibrations SET ${keys.map((k) => `${k}=?`).join(', ')}, updated=? WHERE id=?`).run(...keys.map((k) => fields[k]), now(), cal.id);
+}
+
+/** Effort refine: per model, add the level between the adjacent bracket pair whose quality differs most (by more than CAL_DELTA at either screen size). */
+function initRefine(cals, sc, io) {
+  const notes = [];
+  const byModel = new Map();
+  for (const c of cals.filter((x) => x.role === 'bracket' && x.status === 'running')) {
+    if (!byModel.has(c.model)) byModel.set(c.model, []);
+    byModel.get(c.model).push(c);
+  }
+  for (const [model, list] of byModel) {
+    const levels = (RN.EFFORT[RN.splitModel(model).runner] || {}).levels;
+    if (!levels) continue;
+    const have = new Set(cals.filter((c) => c.model === model).map((c) => c.effort));
+    list.sort((x, y) => levels.indexOf(x.effort) - levels.indexOf(y.effort));
+    let pick = null;
+    for (let i = 0; i + 1 < list.length; i++) {
+      const li = levels.indexOf(list[i].effort), lj = levels.indexOf(list[i + 1].effort);
+      if (lj - li < 2) continue;
+      let gap = 0;
+      for (const s of io.screen) {
+        const p = initPoint(list[i], s, sc), q = initPoint(list[i + 1], s, sc);
+        if (p && q) gap = Math.max(gap, Math.abs(p.q - q.q));
+      }
+      if (gap > CAL_DELTA && (!pick || gap > pick.gap)) pick = { gap, level: levels[Math.floor((li + lj) / 2)], from: list[i].effort, to: list[i + 1].effort };
+    }
+    if (pick && !have.has(pick.level)) {
+      initAddCal(list[0], pick.level, 'refine', 'refined');
+      notes.push(`${model}: ${pick.from} → ${pick.to} differ by ${pick.gap.toFixed(2)}; adding effort ${pick.level}`);
+    } else notes.push(`${model}: no effort gap above ${CAL_DELTA} — no refine level`);
+  }
+  for (const c of cals.filter((x) => x.stage === 'screen')) initSetCal(c, { stage: 'refined' });
+  return notes;
+}
+
+/** Prune after screening: keep candidates with a non-dominated point near the best quality, at most io.keep. */
+function initPrune(cals, sc, io) {
+  const live = cals.filter((c) => c.status === 'running');
+  if (io.matrix || io.fixed) {
+    for (const c of live) initSetCal(c, { stage: 'search' });
+    return [];
+  }
+  const pts = [];
+  for (const c of live) for (const s of io.screen) { const p = initPoint(c, s, sc, true); if (p) pts.push({ c, ...p }); }
+  if (!pts.length) return [];
+  const bestQ = Math.max(...pts.map((p) => p.q));
+  const floor = 0.9 * bestQ - CAL_DELTA;
+  const dominated = (p) => pts.some((o) => o.c.id !== p.c.id && o.q >= p.q && o.usd100 <= p.usd100 && (o.q > p.q || o.usd100 < p.usd100));
+  const good = pts.filter((p) => p.q >= floor && !dominated(p));
+  const cheapest = new Map();
+  for (const p of good) { const e = cheapest.get(p.c.id); if (!e || p.usd100 < e.usd100) cheapest.set(p.c.id, p); }
+  const top = [...good].sort((x, y) => y.q - x.q || x.usd100 - y.usd100)[0];
+  const order = [top.c.id, ...[...cheapest.values()].sort((x, y) => x.usd100 - y.usd100).map((p) => p.c.id).filter((id) => id !== top.c.id)];
+  const keep = new Set(order.slice(0, io.keep));
+  const notes = [];
+  for (const c of live) {
+    if (keep.has(c.id)) { initSetCal(c, { stage: 'search' }); continue; }
+    const mine = pts.filter((p) => p.c.id === c.id);
+    const q = mine.length ? Math.max(...mine.map((p) => p.q)) : 0;
+    const why = cheapest.has(c.id) ? `outside the ${io.keep} kept` : q < floor ? `quality ${q.toFixed(2)} below ${floor.toFixed(2)} (best ${bestQ.toFixed(2)})` : 'dominated (another candidate is as good and cheaper)';
+    initSetCal(c, { status: 'pruned', decision: `pruned after screening: ${why}` });
+    notes.push(`pruned ${candLabel(c)}: ${why}`);
+  }
+  return notes;
+}
+
+/** Chunk size step for a surviving candidate: {next} or {done, why}. */
+function initDecideSize(cal, sc, io) {
+  const pts = initPoints(cal, sc, !!io.fixed);
+  const score = new Map(pts.map((p) => [p.size, p.q]));
+  if (io.fixed) {
+    const missing = io.sizes.find((s) => !score.has(s));
+    if (missing) return { next: missing };
+    const best = Math.max(...pts.map((p) => p.q));
+    const ok = pts.filter((p) => p.q >= best - CAL_DELTA).sort((x, y) => x.usd100 - y.usd100 || y.size - x.size)[0];
+    return { done: ok.size, why: `cheapest of ${io.sizes.join('/')}KB within ${CAL_DELTA} of its best quality` };
+  }
+  const medium = cal.medium_kb;
+  if (cal.single) return score.has(medium) ? { done: medium, why: 'batch B is under two medium chunks: no size search' } : { next: medium };
+  const maxKb = Math.max(medium, Math.floor((batchBytes(cal, 'b') || batchBytes(cal, 'a')) / 1024));
+  const upper = io.screen[io.screen.length - 1];
+  if (!score.has(medium)) return { next: medium };
+  if (!score.has(upper)) return { next: upper };
+  if (score.get(upper) >= score.get(medium) - CAL_DELTA) {
+    // holds up at the larger screen size: grow from there, never try smaller
+    let best = Math.max(...[...score.entries()].filter(([k]) => k <= upper).map(([, v]) => v));
+    let cur = upper;
+    for (;;) {
+      const n = growKb(cur);
+      if (n > maxKb) return { done: cur, why: `no degradation up to ${cur}KB (batch B limits further growth)` };
+      if (!score.has(n)) return { next: n };
+      if (score.get(n) < best - CAL_DELTA) return { done: cur, why: `quality dropped at ${n}KB (${score.get(n).toFixed(2)} vs best ${best.toFixed(2)})` };
+      best = Math.max(best, score.get(n));
+      cur = n;
+    }
+  }
+  return calDecide(score, medium, maxKb);
+}
+
+/**
+ * One decision step of an init: retry unfinished rounds once, then screen → refine → prune → size
+ * search, creating the rounds to run next. Pure function of the stored rounds plus frozen decisions
+ * (stage, pruned, done), so it can be called again after a crash.
+ */
+function initNext(initId) {
+  const d = db();
+  const notes = [];
+  let cals = initCals(initId);
+  const io = JSON.parse(cals[0].init_opts);
+  const retry = [];
+  for (const r of initScores(cals).rounds.filter((x) => x.status === 'active' && x.cal.status === 'running')) {
+    if (!r.retried) {
+      d.prepare("UPDATE scans SET workflow_task='retried' WHERE id=?").run(r.id);
+      const pk = tx(() => pack(getScan(r.id)));
+      if (pk.chunks) { retry.push(r.id); notes.push(`${candLabel(r.cal)}: batch ${r.batch.toUpperCase()} at ${r.size}KB incomplete; retrying ${pk.chunks} chunk(s)`); continue; }
+    }
+    setScanStatus(r.id, 'failed');
+  }
+  if (retry.length) return { run: retry, notes };
+  const run = [];
+  const fail = (c, why) => { initSetCal(c, { status: 'failed', decision: why }); notes.push(`${candLabel(c)} failed: ${why}`); };
+  for (let guard = 0; guard < 6 && !run.length; guard++) {
+    cals = initCals(initId);
+    const sc = initScores(cals);
+    const live = cals.filter((c) => c.status === 'running');
+    if (!live.length) break;
+    for (const c of live) {
+      for (const s of io.screen) { const err = initEnsure(c, s, sc, run); if (err) { fail(c, err); break; } }
+    }
+    if (run.length) break;
+    if (live.some((c) => c.stage === 'screen')) { notes.push(...initRefine(cals, sc, io)); continue; }
+    if (live.some((c) => c.stage === 'refined')) { notes.push(...initPrune(cals, sc, io)); continue; }
+    for (const c of live) {
+      const dec = initDecideSize(c, sc, io);
+      if (dec.done !== undefined) {
+        initSetCal(c, { status: 'done', result_kb: dec.done, decision: dec.why });
+        cfgSet(chunkKey(c.model, c.effort), dec.done);
+        notes.push(`${candLabel(c)}: ${dec.done}KB — ${dec.why}`);
+        continue;
+      }
+      const err = initEnsure(c, dec.next, sc, run);
+      if (err) fail(c, err);
+    }
+  }
+  return { run, notes };
+}
+
+function initNextLine(initId, ids) {
+  const d = db();
+  const rounds = ids.map((id) => {
+    const s = getScan(id);
+    const o = JSON.parse(s.options_json);
+    const cal = d.prepare('SELECT * FROM calibrations WHERE id=?').get(s.cal_id);
+    const r = { scanId: id, workers: Math.min(pendingChunks(id), MAX_WORKERS_PER_RUN), runner: RN.splitModel(cal.model).runner,
+      label: `${modelAlias(cal.model) || cal.model}${cal.effort ? ` ${cal.effort}` : ''} ${String(o.batch).toUpperCase()}${o.chunkKb}` };
+    if (modelAlias(cal.model)) r.model = modelAlias(cal.model);
+    if (cal.effort) r.effort = cal.effort;
+    return r;
+  });
+  const o = { cli: CLI, root: repoRoot(), initId, rounds };
+  if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
+  return `RUN ${cliPrefix()} init run ${initId} --detach\nNEXT ` + JSON.stringify(o);
+}
+
+/** Cross-candidate comparison for one init: rows sorted by quality, plus a recommendation. */
 function initCompare(initId, truth) {
+  const cals = initCals(initId);
+  if (!cals[0].init_opts) return initCompareLegacy(initId, truth);
+  const sc = initScores(cals);
+  const rows = cals.map((c) => {
+    const pts = initPoints(c, sc, true);
+    let p = c.result_kb ? pts.find((x) => x.size === c.result_kb) : null;
+    // not finished (pruned, failed, running): its best measured point
+    if (!p && pts.length) p = [...pts].sort((x, y) => y.q - x.q || x.usd100 - y.usd100)[0];
+    const usdAll = sc.rounds.filter((r) => r.cal.id === c.id).reduce((x, r) => x + scanSpendUsd(getScan(r.id)), 0);
+    const row = { model: c.model, effort: c.effort || null, status: c.status, chunkKb: p ? p.size : null, qa: p ? p.qa : null, qb: p ? p.qb : null,
+      quality: p ? p.q : 0, usdPer100Kb: p ? p.usd100 : 0, usdPerKloc: p ? p.usdKloc : 0, calibrationUsd: usdAll, findings: p ? p.findings : 0, decision: c.decision };
+    if (truth) {
+      const ids = [...new Set(truth.map((t) => t.id))];
+      const fs_ = p ? p.rounds.flatMap((r) => sc.round.get(r.id).findings) : [];
+      row.recall = ids.length ? ids.filter((id) => fs_.some((f) => truth.some((t) => t.id === id && f.path === t.path && linesNear(f, { line: t.start, end_line: t.end }, 2)))).length / ids.length : 0;
+    }
+    return row;
+  });
+  rows.sort((x, y) => y.quality - x.quality || x.usdPer100Kb - y.usdPer100Kb);
+  const done = rows.filter((r) => r.status === 'done' && r.chunkKb);
+  const pool = done.length ? done : rows.filter((r) => r.chunkKb);
+  const best = pool.length ? Math.max(...pool.map((r) => r.quality)) : 0;
+  // cheapest candidate within 10% of the best quality
+  const rec = pool.filter((r) => r.quality >= best * 0.9).sort((x, y) => x.usdPer100Kb - y.usdPer100Kb)[0] || null;
+  return { rows, rec, issues: sc.issues.a + sc.issues.b, batchIssues: sc.issues };
+}
+
+/** Comparison for an init made before batches and effort (one mixed sample, one candidate per model). */
+function initCompareLegacy(initId, truth) {
   const d = db();
   const cals = initCals(initId);
   const rounds = [];
@@ -2014,7 +2422,6 @@ function initCompare(initId, truth) {
   }
   const all = [];
   for (const r of rounds) for (const f of d.prepare('SELECT * FROM cal_findings WHERE scan_id=?').all(r.scanId)) all.push({ ...f, round: r });
-  // distinct issues across every model and size
   const cid = clusterFindings(all);
   const find = (i) => cid[i];
   const weight = new Map();
@@ -2022,7 +2429,6 @@ function initCompare(initId, truth) {
   const totalW = [...weight.values()].reduce((x, y) => x + y, 0) || 1;
   const rows = cals.map((c) => {
     const mine = rounds.filter((r) => r.cal.id === c.id);
-    // a calibration that did not finish is still scored at its best completed round
     let size = c.result_kb || null;
     if (!size && mine.length) {
       const sc = calScores(c).score;
@@ -2034,13 +2440,12 @@ function initCompare(initId, truth) {
     const quality = [...clusters].reduce((x, cl) => x + weight.get(cl), 0) / totalW;
     const usdAt = at.reduce((x, r) => x + scanSpendUsd(getScan(r.scanId)), 0) / Math.max(1, at.length);
     const usdAll = d.prepare("SELECT id FROM scans WHERE kind='cal' AND cal_id=?").all(c.id)
-      .reduce((x, r) => x + scanSpendUsd(getScan(r.id)), 0); // every round, failed ones included
-    // all-in: every token of every reviewer agent of the round (preamble, claims, re-reads, empty lanes)
+      .reduce((x, r) => x + scanSpendUsd(getScan(r.id)), 0);
     const per100 = c.sample_bytes ? usdAt / (c.sample_bytes / 1024) * 100 : 0;
     const lines = sampleLines(c);
     const perKloc = lines ? usdAt / lines * 1000 : 0;
-    const row = { model: c.model, status: c.status, chunkKb: size, quality, usdPer100Kb: per100, usdPerKloc: perKloc, calibrationUsd: usdAll,
-      findings: all.filter((f) => atIds.has(f.round.scanId)).length };
+    const row = { model: c.model, effort: null, status: c.status, chunkKb: size, qa: null, qb: null, quality, usdPer100Kb: per100, usdPerKloc: perKloc,
+      calibrationUsd: usdAll, findings: all.filter((f) => atIds.has(f.round.scanId)).length };
     if (truth) {
       const ids = [...new Set(truth.map((t) => t.id))];
       const fs_ = all.filter((f) => atIds.has(f.round.scanId));
@@ -2051,9 +2456,25 @@ function initCompare(initId, truth) {
   rows.sort((x, y) => y.quality - x.quality);
   const done = rows.filter((r) => r.chunkKb);
   const best = done.length ? done[0].quality : 0;
-  // cheapest model within 10% of the best quality
   const rec = done.filter((r) => r.quality >= best * 0.9).sort((x, y) => x.usdPer100Kb - y.usdPer100Kb)[0] || null;
-  return { rows, rec, issues: weight.size };
+  return { rows, rec, issues: weight.size, legacy: true };
+}
+
+/** Effort candidates of one model: [{effort, role}]. */
+function initEfforts(model, io, efforts) {
+  const runner = RN.splitModel(model).runner;
+  const ent = RN.EFFORT[runner];
+  if (efforts) {
+    if (!ent) return { list: [{ effort: null, role: 'fixed' }], note: `${model}: the ${runner} runner has no effort setting — one candidate` };
+    for (const e of efforts) { const err = RN.effortError(runner, e); if (err) die(`${model}: ${err}`); }
+    return { list: efforts.map((e) => ({ effort: e, role: 'fixed' })) };
+  }
+  if (!ent || !ent.levels) {
+    return { list: [{ effort: null, role: 'fixed' }], note: ent ? `${model}: ${runner} takes any effort name — pass --efforts to compare some` : null };
+  }
+  const lv = ent.levels;
+  if (io.matrix || lv.length < 3) return { list: lv.map((e) => ({ effort: e, role: io.matrix ? 'fixed' : 'bracket' })) };
+  return { list: [lv[0], lv[Math.floor((lv.length - 1) / 2)], lv[lv.length - 1]].map((e) => ({ effort: e, role: 'bracket' })) };
 }
 
 function cmdInit(a) {
@@ -2061,80 +2482,134 @@ function cmdInit(a) {
   if (sub === 'run') return cmdInitRun(a);
   const d = db();
   if (sub === 'start') {
-    const models = listFlag(a.f.models || INIT_DEFAULT_MODELS).map(modelId);
+    const models = [...new Set(listFlag(a.f.models || INIT_DEFAULT_MODELS).map(modelId))];
     const prof = promptFromFlags(a.f);
     const commit = git(['rev-parse', 'HEAD']).trim();
-    const sampleKb = Number(a.f['sample-kb'] || CAL_SAMPLE_KB);
     const medium = Number(a.f.medium || DEFAULT_CHUNK_KB);
-    const { pick, total } = calSample(commit, { includeTests: false, only: a.f.only }, sampleKb);
-    const single = total < 2 * medium * 1024 ? 1 : 0;
-    const initId = (d.prepare('SELECT MAX(init_id) m FROM calibrations').get().m || 0) + 1;
-    const sample = JSON.stringify(pick.map((t) => ({ path: t.path, sha: t.sha, mode: t.mode, size: t.size })));
-    const runs = [];
-    for (const model of models) {
-      d.prepare("UPDATE calibrations SET status='abandoned' WHERE model=? AND status='running'").run(model);
-      const r = d.prepare(`INSERT INTO calibrations(model,profile_name,commit_sha,sample_json,sample_bytes,medium_kb,status,init_id,single,created,updated)
-        VALUES(?,?,?,?,?,?,'running',?,?,?,?)`).run(model, prof.name, commit, sample, total, medium, initId, single, now(), now());
-      const cal = d.prepare('SELECT * FROM calibrations WHERE id=?').get(r.lastInsertRowid);
-      const round = calRound(cal, medium);
-      runs.push({ calId: cal.id, model: modelAlias(model), label: model, runner: RN.splitModel(model).runner, scanId: round.scanId, workers: round.workers });
+    if (!(medium >= MIN_CHUNK_KB)) die(`--medium must be at least ${MIN_CHUNK_KB} (KB)`);
+    const bigKb = Number(a.f['big-kb'] || a.f['sample-kb'] || INIT_BIG_KB);
+    const smallKb = Number(a.f['small-kb'] || a.f['sample-kb'] || INIT_SMALL_KB);
+    if (!(bigKb > 0) || !(smallKb > 0)) die('--big-kb / --small-kb must be positive (KB)');
+    let sizes = null;
+    if (a.f.sizes !== undefined) {
+      sizes = [...new Set(listFlag(a.f.sizes).map(Number))].sort((x, y) => x - y);
+      if (!sizes.length || sizes.some((s) => !(s >= MIN_CHUNK_KB))) die(`--sizes: chunk sizes in KB, each at least ${MIN_CHUNK_KB}`);
     }
-    const dirs = [...new Set(pick.map((t) => t.path.split('/').slice(0, -1).join('/') || '.'))];
-    out(`init ${initId}: ${models.length} model(s) [${models.join(', ')}] on one sample of ${pick.length} files, ${kb(total)} from ${dirs.slice(0, 4).join(', ')}${dirs.length > 4 ? ' …' : ''}`);
-    out(single ? `sample is under two ${medium}KB chunks: one round per model at ${medium}KB (no size search)` : `each model: ${medium}KB first, then smaller, then larger until quality drops`);
-    const o = { cli: CLI, root: repoRoot(), initId, runs };
-    if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
-    out(`RUN ${cliPrefix()} init run ${initId} --detach`);
-    out('NEXT ' + JSON.stringify(o));
+    const efforts = a.f.efforts !== undefined ? listFlag(a.f.efforts) : null;
+    if (a.f.efforts !== undefined && !(efforts && efforts.length)) die('--efforts: a comma-separated list of levels');
+    const smp = initSample(commit, { includeTests: false, only: a.f.only }, { bigKb, smallKb, mediumKb: medium });
+    const single = smp.bBytes < 2 * medium * 1024 ? 1 : 0;
+    const io = { matrix: !!a.f.matrix, fixed: !!sizes, sizes, keep: INIT_KEEP, medium, bigKb, smallKb,
+      screen: sizes || (single ? [medium] : [medium, growKb(growKb(medium))]) };
+    const plans = models.map((m) => ({ model: m, ...initEfforts(m, io, efforts) }));
+    io.refine = plans.some((p) => p.list.some((x) => x.role === 'bracket')) && !io.matrix;
+    const initId = (d.prepare('SELECT MAX(init_id) m FROM calibrations').get().m || 0) + 1;
+    const sample = JSON.stringify({ a: smp.a, b: smp.b, unit: smp.unit, repo: smp.repo });
+    tx(() => {
+      // a new init supersedes running ones, and standalone calibrations of the same models
+      d.prepare("UPDATE calibrations SET status='abandoned' WHERE status='running' AND init_id IS NOT NULL").run();
+      for (const m of models) d.prepare("UPDATE calibrations SET status='abandoned' WHERE status='running' AND init_id IS NULL AND model=?").run(m);
+      const base = { profile_name: prof.name, commit_sha: commit, sample_json: sample, sample_bytes: smp.aBytes + smp.bBytes, medium_kb: medium,
+        init_id: initId, single, init_opts: JSON.stringify(io) };
+      for (const p of plans) for (const x of p.list) initAddCal({ ...base, model: p.model }, x.effort, x.role, io.refine ? 'screen' : 'refined');
+    });
+    const { run, notes } = initNext(initId);
+    const cands = initCals(initId);
+    out(`init ${initId}: ${models.length} model(s), ${cands.length} candidate(s) [${cands.map(candLabel).join(', ')}]`);
+    out(`sample: A ${smp.a.length} biggest file(s) ${kb(smp.aBytes)}${smp.a.length ? ` (largest ${smp.a[0].path} ${kb(smp.a[0].size)})` : ' — no file of ' + medium + 'KB or more, skipped'}; ` +
+      `B ${smp.b.length} small file(s) ${kb(smp.bBytes)}${smp.unit ? ` in ${smp.unit}` : ''}`);
+    for (const p of plans) if (p.note) out(p.note);
+    for (const n of notes) out(n);
+    const agents = run.reduce((x, id) => x + pendingChunks(id), 0);
+    const how = io.fixed ? `every candidate runs ${sizes.join('/')}KB (no search)` : single ? `batch B is under two ${medium}KB chunks: one size, no search`
+      : `screen at ${io.screen.join('/')}KB${io.refine ? ', one effort refine level where it matters' : ''}${io.matrix ? ', every candidate kept' : `, then a size search for at most ${io.keep} survivors`}`;
+    out(`${how}; first step: ${run.length} round(s), ${agents} reviewer agent(s)`);
+    out(initNextLine(initId, run));
     return;
   }
   const initId = Number(a.pos[1]) || d.prepare('SELECT MAX(init_id) m FROM calibrations').get().m;
+  if (sub === 'next') {
+    if (!initId) die('no init yet — run `init start`');
+    const cals = initCals(initId);
+    if (!cals.length) die(`no init ${initId}`);
+    if (!cals[0].init_opts) die(`init ${initId} predates staged init — \`calibrate next <id>\` per model, or \`init start\` again`);
+    const { run, notes } = initNext(initId);
+    for (const n of notes) out(n);
+    if (run.length) {
+      out(`init ${initId}: ${run.length} round(s), ${run.reduce((x, id) => x + pendingChunks(id), 0)} reviewer agent(s)`);
+      out(initNextLine(initId, run));
+      return;
+    }
+    out(`DONE init ${initId}: ${initCals(initId).map((c) => `${candLabel(c)} ${c.status}${c.result_kb ? ` ${c.result_kb}KB` : ''}`).join('; ')} — \`init report\``);
+    return;
+  }
   if (sub === 'report') {
     if (!initId) die('no init yet — run `init start`');
-    if (!initCals(initId).length) die(`no init ${initId}`);
+    const cals = initCals(initId);
+    if (!cals.length) die(`no init ${initId}`);
     const truth = a.f.truth ? JSON.parse(fs.readFileSync(a.f.truth, 'utf8')) : null;
-    const { rows, rec, issues } = initCompare(initId, truth);
-    const cal0 = initCals(initId)[0];
-    out(`init ${initId}: ${kb(cal0.sample_bytes)} / ${sampleLines(cal0)} lines sample, ${issues} distinct issues found across all models and sizes`);
-    out(['model', 'chunk', 'quality', '$/100KB', '$/1kLOC', 'findings', ...(truth ? ['recall'] : []), 'calibration $', 'status'].join('\t'));
-    for (const r of rows) {
-      out([r.model, r.chunkKb ? `${r.chunkKb}KB` : '-', r.quality.toFixed(2), r.usdPer100Kb.toFixed(2), r.usdPerKloc.toFixed(3), r.findings,
+    const cmp = initCompare(initId, truth);
+    const c0 = cals[0];
+    if (cmp.legacy) out(`init ${initId}: ${kb(c0.sample_bytes)} / ${sampleLines(c0)} lines sample, ${cmp.issues} distinct issues found across all models and sizes`);
+    else {
+      const s = JSON.parse(c0.sample_json);
+      out(`init ${initId}: A ${s.a.length} biggest file(s) ${kb(batchBytes(c0, 'a'))} / ${sampleLines(c0, 'a')} lines, ${cmp.batchIssues.a} issues; ` +
+        `B ${s.b.length} small file(s) ${kb(batchBytes(c0, 'b'))} / ${sampleLines(c0, 'b')} lines${s.unit ? ` in ${s.unit}` : ''}, ${cmp.batchIssues.b} issues`);
+    }
+    const f2 = (v) => (v === null || v === undefined ? '-' : v.toFixed(2));
+    out(['model', 'effort', 'chunk', 'qA', 'qB', 'quality', '$/100KB', '$/1kLOC', 'findings', ...(truth ? ['recall'] : []), 'calibration $', 'status'].join('\t'));
+    for (const r of cmp.rows) {
+      out([r.model, r.effort || '-', r.chunkKb ? `${r.chunkKb}KB` : '-', f2(r.qa), f2(r.qb), r.quality.toFixed(2), r.usdPer100Kb.toFixed(2), r.usdPerKloc.toFixed(3), r.findings,
         ...(truth ? [r.recall.toFixed(2)] : []), r.calibrationUsd.toFixed(2), r.status].join('\t'));
     }
-    if (rec) out(`recommended: ${rec.model} (cheapest within 10% of the best quality) — \`init pick ${rec.model}\``);
-    out('quality = severity-weighted share of all distinct issues found by any model. Price = all tokens of every reviewer agent (preamble, coordination turns, re-reads, idle lanes) at the model\'s own chunk size, list price; a scan adds one planner agent and the session running it.');
+    if (cmp.rec) out(`recommended: ${candLabel(cmp.rec)} (cheapest within 10% of the best quality) — \`init pick ${cmp.rec.model}${cmp.rec.effort ? ` --effort ${cmp.rec.effort}` : ''}\``);
+    out(cmp.legacy
+      ? 'quality = severity-weighted share of all distinct issues found by any model. Price = all tokens of every reviewer agent (preamble, coordination turns, re-reads, idle lanes) at the model\'s own chunk size, list price; a scan adds one planner agent and the session running it.'
+      : 'qA/qB = severity-weighted share of all distinct issues any candidate found in batch A (biggest files) / B (small files); quality and price weight A by the share of this repo\'s code in files bigger than the chunk size. Price = all tokens of every reviewer agent at that chunk size, list price; a scan adds one planner agent and the session running it.');
     return;
   }
   if (sub === 'pick') {
-    const model = modelId(a.pos[1] || '');
-    if (!a.pos[1]) die('usage: init pick <model>');
-    const cal = d.prepare("SELECT * FROM calibrations WHERE model=? AND status='done' ORDER BY id DESC LIMIT 1").get(model);
+    if (!a.pos[1]) die('usage: init pick <model> [--effort e]');
+    const model = modelId(a.pos[1]);
+    const lastInit = d.prepare('SELECT MAX(init_id) m FROM calibrations WHERE model=?').get(model).m;
+    const cmp = lastInit ? initCompare(lastInit) : null;
+    let effort = a.f.effort !== undefined ? (String(a.f.effort) || null) : undefined;
+    if (effort === undefined) {
+      const mine = cmp ? cmp.rows.filter((r) => r.model === model && r.chunkKb) : [];
+      const efforts = [...new Set(mine.map((r) => r.effort || null))];
+      if (cmp && cmp.rec && cmp.rec.model === model) effort = cmp.rec.effort || null;
+      else if (efforts.length <= 1) effort = efforts.length ? efforts[0] : null;
+      else die(`${model} was benchmarked at several efforts (${efforts.map((e) => e || 'none').join(', ')}) — pass --effort <level>`);
+    }
+    if (effort) { const err = RN.effortError(RN.splitModel(model).runner, effort); if (err) die(err); }
+    const cal = d.prepare("SELECT * FROM calibrations WHERE model=? AND effort IS ? AND status='done' ORDER BY id DESC LIMIT 1").get(model, effort);
     let size = cal ? cal.result_kb : null;
     if (!size) {
       // calibration did not finish: use the size the latest init scored it at (what the report showed)
-      const lastInit = d.prepare('SELECT MAX(init_id) m FROM calibrations WHERE model=?').get(model).m;
-      const row = lastInit ? initCompare(lastInit).rows.find((r) => r.model === model) : null;
+      const row = cmp ? cmp.rows.find((r) => r.model === model && (r.effort || null) === effort) : null;
       size = row && row.chunkKb;
     }
-    if (!size && !a.f.force) die(`${model} has no calibration in this repo — run \`init start --models ${modelAlias(model)}\` (or --force to use the default chunk size)`);
+    if (!size && !a.f.force) die(`${model}${effort ? ` at effort ${effort}` : ''} has no calibration in this repo — run \`init start --models ${modelAlias(model) || model}${effort ? ` --efforts ${effort}` : ''}\` (or --force to use the default chunk size)`);
     cfgSet('default_model', model);
-    cfgSet(`chunk_kb:${model}`, size || DEFAULT_CHUNK_KB);
-    out(`default reviewer model: ${model}, chunk size ${size || DEFAULT_CHUNK_KB}KB`);
+    if (effort) cfgSet('default_effort', effort); else d.prepare("DELETE FROM config WHERE key='default_effort'").run();
+    cfgSet(chunkKey(model, effort), size || DEFAULT_CHUNK_KB);
+    out(`default reviewer model: ${model}${effort ? ` effort ${effort}` : ''}, chunk size ${size || DEFAULT_CHUNK_KB}KB`);
     // scans run registered profiles: the pick becomes (a new version of) the `default` profile
     const name = a.f.name || 'default';
-    const { spec, promptSource } = specFromFlags({ prompt: a.f.prompt || 'default', model, 'chunk-kb': size || DEFAULT_CHUNK_KB });
-    const { p, created } = registerSpec(validProfileName(name), spec, { promptSource, note: `init pick ${model}` });
+    const { spec, promptSource } = specFromFlags({ prompt: a.f.prompt || 'default', model, effort: effort || undefined, 'chunk-kb': size || DEFAULT_CHUNK_KB });
+    const { p, created } = registerSpec(validProfileName(name), spec, { promptSource, note: `init pick ${model}${effort ? ` --effort ${effort}` : ''}` });
     cfgSet('default_profile', name);
     out(`review profile ${profileLabel(p)} #${p.id} ${p.hash} ${created ? 'registered' : 'already registered'} — the default for \`start\``);
     return;
   }
   if (sub === 'status') {
     const m = cfgGet('default_model');
-    out(m ? `default reviewer model: ${m}, chunk size ${cfgGet(`chunk_kb:${m}`) || DEFAULT_CHUNK_KB}KB` : 'not initialized — no default reviewer model (run `init start`)');
-    if (initId) for (const c of initCals(initId)) out(`init ${initId}: ${c.model} [${c.status}]${c.result_kb ? ` → ${c.result_kb}KB` : ''}`);
+    const e = cfgGet('default_effort');
+    out(m ? `default reviewer model: ${m}${e ? ` effort ${e}` : ''}, chunk size ${cfgGet(chunkKey(m, e)) || cfgGet(chunkKey(m)) || DEFAULT_CHUNK_KB}KB` : 'not initialized — no default reviewer model (run `init start`)');
+    if (initId) for (const c of initCals(initId)) out(`init ${initId}: ${candLabel(c)} [${c.status}${c.status === 'running' && c.stage ? ` ${c.stage}` : ''}]${c.result_kb ? ` → ${c.result_kb}KB` : ''}${c.decision && c.status !== 'done' ? ` (${c.decision})` : ''}`);
     return;
   }
-  die('usage: init start [--models opus,sonnet,haiku,fable] [--only g] [--sample-kb 200] | init report [id] [--truth f] | init pick <model> | init status');
+  die('usage: init start [--models opus,sonnet,haiku,fable] [--efforts e1,e2] [--matrix] [--sizes 20,40,90] [--only g] [--big-kb 160] [--small-kb 160] [--medium 40] | init next [id] | init report [id] [--truth f] | init pick <model> [--effort e] | init status');
 }
 
 function cmdCalibrate(a) {
@@ -2211,6 +2686,7 @@ function cmdCalibrate(a) {
     return;
   }
   if (sub === 'next') {
+    if (cal.init_opts) die(`calibration ${cal.id} is a candidate of init ${cal.init_id} — \`init next ${cal.init_id}\``);
     if (cal.status !== 'running') { out(`DONE chunk_kb=${cal.result_kb} (${cal.status})`); return; }
     const last = d.prepare("SELECT * FROM scans WHERE kind='cal' AND cal_id=? ORDER BY id DESC LIMIT 1").get(cal.id);
     if (last && last.status !== 'done') {
@@ -4734,20 +5210,56 @@ async function cmdCalibrateRun(a) {
 
 async function cmdInitRun(a) {
   const initId = Number(a.pos[1]) || db().prepare('SELECT MAX(init_id) m FROM calibrations').get().m;
-  const cals = initId ? initCals(initId).filter((c) => c.status === 'running') : [];
+  const all = initId ? initCals(initId) : [];
+  const cals = all.filter((c) => c.status === 'running');
   if (!cals.length) die(initId ? `init ${initId} has nothing running — \`init report\`` : 'no init yet — `init start`');
-  const lanes = a.f.concurrency !== undefined ? parseConcurrency(a.f.concurrency) : 6;
+  const lanes = a.f.concurrency !== undefined ? parseConcurrency(a.f.concurrency) : 12;
   const missing = [...new Set(cals.map((c) => RN.splitModel(c.model).runner).filter((r) => !RN.binOf(r)))];
   if (missing.length) die(`not on PATH: ${missing.join(', ')} — install them or start init without those models`);
   if (a.f.detach) {
     const logPath = path.join(stateDir(), 'runs', `init-${initId}.log`);
-    out(`RUNNING init ${initId} (${cals.map((c) => c.model).join(', ')}): pid ${detachSelf(logPath)}, log ${logPath}; \`init report\` when done`);
+    out(`RUNNING init ${initId} (${cals.map(candLabel).join(', ')}): pid ${detachSelf(logPath)}, log ${logPath}; \`init report\` when done`);
     return;
   }
   onStopSignals();
-  await Promise.all(cals.map((c) => calRunLoop(c, lanes, c.model)));
+  if (!all[0].init_opts) {
+    // init made before batches and effort: one calibration loop per model
+    await Promise.all(cals.map((c) => calRunLoop(c, lanes, c.model)));
+  } else {
+    // rounds left from `init start` (or an interrupted run) first, then one decision step after each batch of rounds
+    let ids = cals.flatMap((c) => db().prepare("SELECT id FROM scans WHERE kind='cal' AND cal_id=? AND status='active'").all(c.id).map((r) => r.id))
+      .filter((id) => pendingChunks(id));
+    for (let step = 0; step < 16 && !STOPPING; step++) {
+      if (ids.length) await initRunRounds(ids, lanes);
+      if (STOPPING) break;
+      const n = self(['init', 'next', String(initId)]);
+      if (!n.ok) { log(`init next failed: ${n.err}`); break; }
+      const lines = n.out.trim().split('\n');
+      const last = lines[lines.length - 1];
+      for (const l of lines.slice(0, -1)) if (!/^RUN /.test(l)) log(l);
+      if (/^DONE/.test(last)) { log(last); break; }
+      if (!/^NEXT /.test(last)) { log(`unexpected: ${last}`); break; }
+      ids = JSON.parse(last.slice(5)).rounds.map((r) => r.scanId);
+    }
+  }
   const r = self(['init', 'report', String(initId)]);
   out(r.ok ? r.out.trimEnd() : r.err);
+}
+
+/** Review several init rounds at once, sharing `lanes` among them by size (each gets at least one). */
+async function initRunRounds(ids, lanes) {
+  const d = db();
+  const work = ids.map((id) => ({ id, n: pendingChunks(id) })).filter((x) => x.n);
+  const total = work.reduce((x, w) => x + w.n, 0);
+  await Promise.all(work.map((w) => {
+    const s = getScan(w.id);
+    const o = JSON.parse(s.options_json);
+    const cal = d.prepare('SELECT * FROM calibrations WHERE id=?').get(s.cal_id);
+    const ctx = { runner: RN.splitModel(cal.model).runner, model: cal.model, ...(cal.effort ? { effort: cal.effort } : {}) };
+    const k = Math.max(1, Math.min(w.n, Math.round(lanes * w.n / total)));
+    log(`${candLabel(cal)}: batch ${String(o.batch).toUpperCase()} at ${o.chunkKb}KB, ${w.n} chunk(s), ${k} lane(s)`);
+    return reviewLanes(w.id, ctx, k);
+  }));
 }
 
 async function atRunCmd(a) {
@@ -4925,7 +5437,10 @@ trackers:  tracker-sync gh [--repo o/r] [--state all] [--search q] | tracker-imp
            match [filters] [--tracker t] [--include-reported] [--top 3] | match show <id> | match export [--min-score 3] [--out f]
            link <id|ids|gN> <tracker> <key> [--url u] [--kind k] | unlink <id> [tracker] [key]
            issues-sync [--tracker gh:o/r]   (issue state → findings: closed completed = fixed, not planned = wontfix)
-init:      init start [--models opus,sonnet,haiku,fable] [--prompt p] [--only g] | init report [id] [--truth f] | init pick <model> [--name default] [--prompt p] | init status
+init:      init start [--models opus,sonnet,haiku,fable] [--efforts e1,e2] [--matrix] [--sizes 20,40,90] [--prompt p] [--only g] [--big-kb 160] [--small-kb 160]
+           init next [id] | init report [id] [--truth f] | init pick <model> [--effort e] [--name default] [--prompt p] | init status
+           (default: effort bracket lowest/middle/highest + one refine level, screen at 40/90KB, size search for ≤3 survivors;
+            --matrix: every effort level, no pruning; --sizes: every candidate runs exactly these sizes)
 calibrate: calibrate start --model m [--only g] [--sample-kb 200] [--medium 40] | calibrate report [id] [--truth f.json] | calibrate next [id] | calibrate status | calibrate set <m> <kb>
 verify:    verify-prompt <id> --repo owner/name --base <sha> --worktree <dir>   (prompt for a fresh verifying agent)
 auto-triage: auto-triage plan|start [ids|filters] [--group-size 5] [--recheck] [--repo owner/name] [--concurrency N] [--model m] [--effort e]

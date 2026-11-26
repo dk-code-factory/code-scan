@@ -135,6 +135,9 @@ o=$(B init start --models sonnet,codex:gpt-6.2-sol,gemini:gemini-3.1-pro-preview
 has "$o" '"runner":"codex"' && has "$o" 'init run' || bad "init-start: $o"
 o=$(B init run 2>&1)
 has "$o" 'claude-sonnet-5-5' && has "$o" 'codex:gpt-6.2-sol' && has "$o" 'gemini:gemini-3.1-pro-preview' && has "$o" 'recommended:' && ok init-run-mixed || bad "init-run-mixed: $o"
+# effort bracket per runner reaches the agent CLIs; gemini has no effort setting, so one candidate
+grep -q -- '--effort max' "$FAKE_LOG" && grep -q 'model_reasoning_effort="minimal"' "$FAKE_LOG" && has "$o" 'claude-sonnet-5-5	low' \
+  && [ "$(B sql "select count(*) from calibrations where model like 'gemini:%' and init_id is not null" | tail -1)" = 1 ] && ok init-run-effort || bad "init-run-effort: $o"
 
 # --- run-prompt
 echo 'PING' > "$W/p.md"
