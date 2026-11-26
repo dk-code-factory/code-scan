@@ -172,9 +172,10 @@ function exportStore(key) {
       const c = JSON.parse(o);
       if (!c.basis || c.basis.bytes < (CONFIG.minScanKb || 100) * 1024) continue;
       const clusters = c.clusters || [];
+      const sevBy = (id) => { const o = {}; for (const k of clusters) { const v = k.seenBy[id]; if (v) o[v.severity] = (o[v.severity] || 0) + 1; } return o; };
       b.compares.push({
         store: key, basisKb: Math.round(c.basis.bytes / 1024), basisFiles: c.basis.files, both: clusters.filter((x) => Object.keys(x.seenBy).length > 1).length,
-        scans: c.scans.map((x) => ({ id: x.id, model: x.model, findings: x.findings, unique: x.unique, share: round(x.share), confirmed: x.confirmed, falsePositive: x.falsePositive, precision: round(x.precision) })),
+        scans: c.scans.map((x) => ({ id: x.id, model: x.model, findings: x.findings, severity: sevBy(x.id), unique: x.unique, share: round(x.share), confirmed: x.confirmed, falsePositive: x.falsePositive, precision: round(x.precision) })),
       });
     }
   }
@@ -222,11 +223,13 @@ function exportStore(key) {
       const tok = q(db, `SELECT COUNT(*) agents, SUM(input_tokens) i, SUM(output_tokens) o, SUM(cache_read) cr, SUM(cache_write) cw, SUM(1 - ok) failed,
         SUM((julianday(ended) - julianday(started)) * 86400) secs FROM agent_runs WHERE scan_id=? AND kind='review'`, x.id)[0] || {};
       const mine = clusters.filter((k) => k.seenBy[x.id]);
+      const severity = {};
+      for (const k of mine) { const v = k.seenBy[x.id].severity; severity[v] = (severity[v] || 0) + 1; }
       // severity-weighted share of the confirmed issues any effort level found: recall against the pooled truth
       const realW = clusters.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
       const gotW = mine.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
       return {
-        id: x.id, model: sc.model || x.model, effort: sc.effort, findings: x.findings, unique: x.unique, share: round(x.share),
+        id: x.id, model: sc.model || x.model, effort: sc.effort, findings: x.findings, severity, unique: x.unique, share: round(x.share),
         confirmed: x.confirmed, falsePositive: x.falsePositive, untriaged: x.findings - x.confirmed - x.falsePositive,
         precision: round(x.precision), confirmedRecall: realW ? round(gotW / realW) : null,
         highPlus: mine.filter((k) => k.severity === 'critical' || k.severity === 'high').length,

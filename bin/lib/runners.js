@@ -80,16 +80,35 @@ const num = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
  */
 const EFFORT = {
   claude: { levels: ['low', 'medium', 'high', 'xhigh', 'max'], args: (e) => ['--effort', e] },
-  codex: { levels: ['minimal', 'low', 'medium', 'high', 'xhigh'], args: (e) => ['-c', `model_reasoning_effort="${e}"`] },
+  codex: { levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'], args: (e) => ['-c', `model_reasoning_effort="${e}"`] },
   opencode: { levels: null, args: (e) => ['--variant', e] },
 };
-/** Error text when `effort` is not usable with `runner`, else null. */
-function effortError(runner, effort) {
+/** Effort levels a codex model supports, from the CLI's own model catalog; null when it is not listed. */
+function codexModelLevels(model) {
+  if (!model) return null;
+  try {
+    const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    const cat = JSON.parse(fs.readFileSync(path.join(home, 'models_cache.json'), 'utf8'));
+    const m = (cat.models || cat || []).find((x) => (x.slug || x.id) === model);
+    const lv = m && (m.supported_reasoning_levels || []).map((x) => x.effort || x).filter((x) => typeof x === 'string');
+    return lv && lv.length ? lv : null;
+  } catch (e) { return null; }
+}
+/** Effort levels `runner` accepts, narrowed to what `model` supports when the CLI says (null = any string). */
+function effortLevels(runner, model) {
+  const e = EFFORT[runner];
+  if (!e || !e.levels) return null;
+  const bare = model ? splitModel(model).model : null;
+  return (runner === 'codex' && codexModelLevels(bare)) || e.levels;
+}
+/** Error text when `effort` is not usable with `runner` (and `model`, when given), else null. */
+function effortError(runner, effort, model) {
   if (effort === undefined || effort === null || effort === '') return null;
   const e = EFFORT[runner];
   if (!e) return `the ${runner} runner has no reasoning-effort setting (supported: ${Object.keys(EFFORT).join(', ')})`;
   if (!/^[\w-]+$/.test(String(effort))) return `--effort ${effort}: not a level name`;
-  if (e.levels && !e.levels.includes(String(effort))) return `--effort ${effort}: ${runner} accepts ${e.levels.join(', ')}`;
+  const lv = effortLevels(runner, model);
+  if (lv && !lv.includes(String(effort))) return `--effort ${effort}: ${model ? splitModel(model).model || runner : runner} accepts ${lv.join(', ')}`;
   return null;
 }
 const effortArgs = (runner, o) => (o.effort && EFFORT[runner] ? EFFORT[runner].args(String(o.effort)) : []);
@@ -501,4 +520,4 @@ function defaultModel(name) {
   return null;
 }
 
-module.exports = { EFFORT, effortError, stdinFd, spawnSyncIn, extraArgs, defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, resolve, extractJson, runAgent, killAll };
+module.exports = { EFFORT, effortLevels, effortError, stdinFd, spawnSyncIn, extraArgs, defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, resolve, extractJson, runAgent, killAll };

@@ -11,7 +11,7 @@
   "260fd1a6c41a": { "repo": "scylladb/scylla-rust-driver" },
   "380e18d07793": { "repo": "scylladb/cpp-rs-driver" },
   "46a20fe34c54": { "repo": "scylladb/scylla-rust-driver" },
-  "50eebf10e6ec": { "repo": "scylladb/nodejs-rs-driver" },
+  "50eebf10e6ec": { "repo": "scylladb/nodejs-rs-driver", "excludeScans": [7, 8, 9, 10, 11, 12, 13, 14, 15, 16] },
   "57b5acdc3cd5": { "repo": "scylladb/csharp-driver" },
   "b6300366a39d": { "repo": "private-1" },
   "bbf2b5b8b2f9": { "repo": "scylladb/seastar", "scans": { "14": "scylladb/scylladb" } },
