@@ -146,7 +146,8 @@ function exportStore(key) {
     const tri = Object.fromEntries(q(db, 'SELECT f.triage t, COUNT(*) n FROM seen x JOIN findings f ON f.id=x.finding_id WHERE x.scan_id=? GROUP BY 1', r.id).map((x) => [x.t, x.n]));
     const conf_ = (tri.confirmed || 0) + (tri.fixed || 0) + (tri.wontfix || 0), fp = tri.false_positive || 0;
     const runs = q(db, "SELECT runner, SUM(usd) u, COUNT(*) n FROM agent_runs WHERE scan_id=? GROUP BY runner", r.id);
-    const u = usd.get(r.id) || 0;
+    // noPrice: scans whose spend record is known to be incomplete (lost transcripts) show no price
+    const u = (cfg.noPrice || []).map(Number).includes(r.id) ? 0 : usd.get(r.id) || 0;
     const ms = Date.parse(s.updated) - Date.parse(s.created);
     const repo = repoOf(r.id);
     const lang = langOf(r.id);

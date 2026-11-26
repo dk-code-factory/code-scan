@@ -182,7 +182,7 @@
   // ---------- triage
   const tri = data.repos.flatMap((r) => r.triage.map((t) => ({ ...t, repo: r })));
   $('triage-table').innerHTML = `<tr><th>repository</th><th>triage model</th><th>findings</th><th>real</th><th>false pos.</th><th>won't fix</th><th>unsure</th><th>severity changed</th><th>$/finding</th></tr>` +
-    tri.map((t) => `<tr><td>${repoLink(t.repo)}</td><td>${t.model ? withEffort(t.model, t.effort) : '<span class="muted">manual</span>'}</td><td>${t.findings}</td><td>${t.verdicts.real || 0}</td><td>${t.verdicts.false_positive || 0}</td><td>${t.verdicts.wontfix || 0}</td><td>${t.verdicts.unsure || 0}</td><td>${t.severityChanged}</td><td>${t.usdPerFinding === null ? '–' : '$' + t.usdPerFinding.toFixed(3)}</td></tr>`).join('');
+    tri.map((t) => `<tr><td>${repoLink(t.repo)}</td><td>${t.model ? withEffort(t.model, t.effort) : '<span class="muted">not recorded</span>'}</td><td>${t.findings}</td><td>${t.verdicts.real || 0}</td><td>${t.verdicts.false_positive || 0}</td><td>${t.verdicts.wontfix || 0}</td><td>${t.verdicts.unsure || 0}</td><td>${t.severityChanged}</td><td>${t.usdPerFinding === null ? '–' : '$' + t.usdPerFinding.toFixed(3)}</td></tr>`).join('');
 
   // ---------- effort
   (function () {
