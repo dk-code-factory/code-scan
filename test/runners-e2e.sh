@@ -107,6 +107,20 @@ grep '^codex ' "$FAKE_LOG" | grep -q -- '--frozen-arg' && ok runner-args-frozen 
 has "$(B scans show 2)" 'runner: gemini fake-gemini 1.0.0' && ok run-record || bad "run-record: $(B scans show 2)"
 has "$(B compare 1 2)" 'compare 2 scans' && ok compare-runners || bad compare-runners
 
+# --- reasoning effort: frozen in a profile, passed to the runner CLI and to Workflow agents
+export CODESCAN_HOME=$W/state-effort
+o=$(B profile register ef-gm --prompt security --model gemini:m1 --effort high 2>&1); has "$o" 'no reasoning-effort setting' && ok effort-unsupported || bad "effort-unsupported: $o"
+o=$(B profile register ef-cx --prompt security --model codex:m1 --effort max 2>&1); has "$o" 'codex accepts minimal' && ok effort-bad-level || bad "effort-bad-level: $o"
+P ef-cx --prompt security --model codex:m1 --effort xhigh --chunk-kb 8 --no-plan
+P ef-cl --prompt security --model opus --effort max --chunk-kb 8 --no-plan
+has "$(B profile show ef-cx)" 'effort=xhigh' && ok effort-profile-show || bad "effort-profile-show: $(B profile show ef-cx)"
+o=$(B start --profile ef-cl); has "$o" '"effort":"max"' && ok effort-workflow-next || bad "effort-workflow-next: $o"
+B stop --all --close >/dev/null 2>&1
+o=$(B start --profile ef-cx --new); : > "$FAKE_LOG"; B run "$(Q "SELECT MAX(id) FROM scans")" >/dev/null 2>&1
+grep '^codex ' "$FAKE_LOG" | grep -q 'model_reasoning_effort="xhigh"' && ok effort-codex-argv || bad "effort-codex-argv: $(grep '^codex ' "$FAKE_LOG" | head -1)"
+o=$(B auto-triage start --group-size 5 --runner claude --effort low); has "$o" '"effort":"low"' && ok effort-triage-next || bad "effort-triage-next: $o"
+o=$(B auto-triage start --group-size 5 --recheck --runner codex --effort max 2>&1); has "$o" 'codex accepts' && ok effort-triage-bad || bad "effort-triage-bad: $o"
+
 # --- auto-triage through a runner
 export CODESCAN_HOME=$W/state-codex
 o=$(B auto-triage start --group-size 1 --runner cursor); has "$o" 'RUN .*auto-triage run 1' && has "$o" '"runner":"cursor"' || bad "at-start: $o"

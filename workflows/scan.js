@@ -60,6 +60,7 @@ if (args.plan) {
     label: 'planner',
     agentType: args.plannerType || 'code-scan:planner',
     ...(args.model ? { model: args.model } : {}),
+    ...(args.effort ? { effort: args.effort } : {}),
     phase: 'Plan',
     schema: { type: 'object', properties: { chunks: { type: 'integer' }, notes: { type: 'string' } }, required: ['chunks'] },
   })
@@ -72,7 +73,7 @@ if (args.plan) {
 // crossed limit costs at most one short agent per lane instead of one per remaining chunk.
 // `follow`: further scans of the same batch (other review profiles, possibly other models) that
 // adopted this scan's plan; their lanes run alongside, each with its own model.
-const scans = [{ scanId: args.scanId, workers, model: args.model, lanes: args.lanes }, ...(args.follow || [])]
+const scans = [{ scanId: args.scanId, workers, model: args.model, effort: args.effort, lanes: args.lanes }, ...(args.follow || [])]
   .filter((x) => x.workers > 0)
 if (!scans.length) return { chunks_reviewed: 0, files: 0, findings: 0, failed_agents: 0 }
 phase('Review')
@@ -80,12 +81,12 @@ let started = 0
 const results = []
 await parallel(scans.flatMap((sc) => {
   const lanes = Math.max(1, Math.min(sc.workers, sc.lanes || 10, 900))
-  log(`scan ${sc.scanId}: ${sc.workers} chunk(s) in ${lanes} lane(s)${sc.model ? ` on ${sc.model}` : ''}`)
+  log(`scan ${sc.scanId}: ${sc.workers} chunk(s) in ${lanes} lane(s)${sc.model ? ` on ${sc.model}` : ''}${sc.effort ? ` (effort ${sc.effort})` : ''}`)
   return Array.from({ length: lanes }, () => async () => {
     let failures = 0
     while (started < 900) {
       const n = ++started
-      const r = await run(workerPrompt(sc.scanId), { label: `scan ${sc.scanId} review ${n}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: args.agentType || 'code-scan:reviewer', ...(sc.model ? { model: sc.model } : {}) })
+      const r = await run(workerPrompt(sc.scanId), { label: `scan ${sc.scanId} review ${n}`, phase: 'Review', schema: WORKER_SCHEMA, agentType: args.agentType || 'code-scan:reviewer', ...(sc.model ? { model: sc.model } : {}), ...(sc.effort ? { effort: sc.effort } : {}) })
       results.push(r)
       if (!r) { if (++failures >= 2) break; continue }
       failures = 0

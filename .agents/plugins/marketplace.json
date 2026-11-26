@@ -1,0 +1,20 @@
+{
+  "name": "code-scan",
+  "interface": {
+    "displayName": "code-scan"
+  },
+  "plugins": [
+    {
+      "name": "code-scan",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

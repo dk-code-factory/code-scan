@@ -9,7 +9,9 @@ description: Manage code-scan review profiles — the registered, versioned spec
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
-If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+If the plugin root above was not filled in by your agent CLI (Codex, Copilot, …), the plugin root is the directory two levels above this SKILL.md: use its absolute path wherever this file says `${CLAUDE_PLUGIN_ROOT}`.
+
+**Codex:** `$CS` writes its store under `~/.cache/code-scan` and starts agent CLIs that need the network, so the Codex sandbox blocks it. Run every `$CS` command outside the sandbox: request escalation (`sandbox_permissions: "require_escalated"`, proposing the prefix rule `["node", "<plugin root>/bin/code-scan.js"]` so the user approves it once). If escalation is unavailable (approval policy `never`, e.g. `codex exec`), do not work around it: tell the user to rerun Codex with `--sandbox danger-full-access` (or approvals on).
 
 A scan only runs a **registered review profile**: an immutable spec of everything that shapes the
 review — the prompt text (frozen copy), the reviewer instructions of the plugin version that
@@ -31,6 +33,9 @@ Refs everywhere: `name` (latest version), `name@2`, `#12`, or a hash prefix.
 2. `$CS profile register <name> --prompt <prompt> | --prompt-file <f> --model <model> [flags]`
    - `--model`: `opus`/`sonnet`/`haiku`/`fable`, `codex:<model>`, `gemini:<model>`, `agy:`, `copilot:`,
      `cursor:`, `opencode:<provider/model>`; `default` = the model picked at init.
+   - `--effort <level>` — reasoning effort, part of the profile ("high effort", "think harder" → `high`/`xhigh`):
+     claude `low|medium|high|xhigh|max`, codex `minimal|low|medium|high|xhigh`, opencode any `--variant`;
+     other runners have none. Omitted = the CLI's own default.
    - `--chunk-kb N` (default: this repo's calibration for that model, else 40), `--only <dir/|glob>`,
      `--include <glob>`, `--exclude <glob>`, `--include-tests`, `--no-plan`, `--no-dismissed`,
      `--runner-args "…"` (default: `CODESCAN_<RUNNER>_ARGS` at registration), `--note "…"`.

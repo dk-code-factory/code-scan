@@ -25,6 +25,30 @@ const RO_CMDS = ['git blame', 'git ls-files', 'git rev-parse', 'git cat-file',
   'gh search', 'gh issue list', 'gh issue view', 'gh pr list', 'gh pr view', 'gh label list'];
 const ARG_PROMPT_MAX = 96 * 1024; // one argv string is capped at 128KB on Linux
 
+/**
+ * A child's stdin as a file descriptor holding `data`, instead of a pipe. Under the Codex CLI sandbox
+ * (seccomp) a child given stdin through a Node pipe (`input:` or `child.stdin.end()`) never sees EOF,
+ * so `git check-attr --stdin` and agent CLIs reading their prompt from stdin hang forever. The file is
+ * unlinked at once; the open fd keeps it readable until close().
+ */
+function stdinFd(data) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-scan-in-'));
+  const f = path.join(dir, 'stdin');
+  fs.writeFileSync(f, data ?? '', { mode: 0o600 });
+  const fd = fs.openSync(f, 'r');
+  fs.rmSync(dir, { recursive: true, force: true });
+  let open = true;
+  return { fd, close() { if (open) { open = false; try { fs.closeSync(fd); } catch (e) { /* closed */ } } } };
+}
+
+/** spawnSync with `opts.input` delivered through stdinFd (see there). */
+function spawnSyncIn(cmd, args, opts = {}) {
+  const { input, ...rest } = opts;
+  if (input === undefined) return spawnSync(cmd, args, rest);
+  const s = stdinFd(input);
+  try { return spawnSync(cmd, args, { ...rest, stdio: [s.fd, 'pipe', 'pipe'] }); } finally { s.close(); }
+}
+
 /** Extra CLI arguments: the list a review profile froze (o.extra), else CODESCAN_<RUNNER>_ARGS. */
 function extraArgs(name, o) {
   if (o && Array.isArray(o.extra)) return o.extra;
@@ -50,10 +74,30 @@ function firstJson(s) {
 }
 const num = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
 
+/**
+ * Reasoning effort per runner: the levels its CLI accepts (null = any string, passed through) and the
+ * arguments that set it. Runners without an entry have no effort control.
+ */
+const EFFORT = {
+  claude: { levels: ['low', 'medium', 'high', 'xhigh', 'max'], args: (e) => ['--effort', e] },
+  codex: { levels: ['minimal', 'low', 'medium', 'high', 'xhigh'], args: (e) => ['-c', `model_reasoning_effort="${e}"`] },
+  opencode: { levels: null, args: (e) => ['--variant', e] },
+};
+/** Error text when `effort` is not usable with `runner`, else null. */
+function effortError(runner, effort) {
+  if (effort === undefined || effort === null || effort === '') return null;
+  const e = EFFORT[runner];
+  if (!e) return `the ${runner} runner has no reasoning-effort setting (supported: ${Object.keys(EFFORT).join(', ')})`;
+  if (!/^[\w-]+$/.test(String(effort))) return `--effort ${effort}: not a level name`;
+  if (e.levels && !e.levels.includes(String(effort))) return `--effort ${effort}: ${runner} accepts ${e.levels.join(', ')}`;
+  return null;
+}
+const effortArgs = (runner, o) => (o.effort && EFFORT[runner] ? EFFORT[runner].args(String(o.effort)) : []);
+
 const RUNNERS = {
   claude: {
     bins: ['claude'], vendor: 'anthropic', stdin: true,
-    argv: (o) => ['-p', '--output-format', 'json', ...(o.model ? ['--model', o.model] : []),
+    argv: (o) => ['-p', '--output-format', 'json', ...(o.model ? ['--model', o.model] : []), ...effortArgs('claude', o),
       ...(o.full ? ['--dangerously-skip-permissions']
         : ['--allowedTools', ['Read', 'Grep', 'Glob', ...RO_CMDS.map((c) => `Bash(${c}:*)`)].join(','),
           '--disallowedTools', 'Edit,Write,NotebookEdit']),
@@ -74,9 +118,14 @@ const RUNNERS = {
   },
   codex: {
     bins: ['codex'], vendor: 'openai', stdin: true,
-    argv: (o) => ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-C', o.cwd,
-      ...(o.full ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--sandbox', 'read-only']),
-      ...(o.model ? ['-m', o.model] : []), ...extraArgs('codex', o), '-'],
+    argv: (o) => {
+      const extra = extraArgs('codex', o);
+      // codex rejects a repeated --sandbox: a sandbox given in the extra args replaces the read-only default
+      const ownSandbox = extra.some((x) => /^(-s|--sandbox|--sandbox=.*|--dangerously-bypass-approvals-and-sandbox|--yolo)$/.test(x));
+      return ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-C', o.cwd,
+        ...(o.full ? ['--dangerously-bypass-approvals-and-sandbox'] : ownSandbox ? [] : ['--sandbox', 'read-only']),
+        ...(o.model ? ['-m', o.model] : []), ...effortArgs('codex', o), ...extra, '-'];
+    },
     parse(stdout) {
       let text = '', err = null;
       const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -176,7 +225,7 @@ const RUNNERS = {
   },
   opencode: {
     bins: ['opencode'], vendor: null, stdin: false,
-    argv: (o) => ['run', '--format', 'json', '--dir', o.cwd, ...(o.model ? ['-m', o.model] : []), ...extraArgs('opencode', o), o.prompt],
+    argv: (o) => ['run', '--format', 'json', '--dir', o.cwd, ...(o.model ? ['-m', o.model] : []), ...effortArgs('opencode', o), ...extraArgs('opencode', o), o.prompt],
     env: (o) => (o.full ? {} : { OPENCODE_PERMISSION: JSON.stringify({ edit: 'deny', webfetch: 'deny', bash: Object.fromEntries([...RO_CMDS.map((c) => [`${c} *`, 'allow']), ['*', 'deny']]) }) }),
     parse(stdout) {
       let text = '', cost = 0, sawCost = false, err = null;
@@ -374,7 +423,7 @@ function killAll(sig = 'SIGTERM') {
 /**
  * Run one agent. Resolves (never rejects) with {ok, text, usage, costUsd, model, exit, error, ms, pid}.
  */
-function runAgent({ runner, model, prompt, cwd, full = false, extra, timeoutMs = 45 * 60 * 1000, tmpDir, onSpawn }) {
+function runAgent({ runner, model, effort, prompt, cwd, full = false, extra, timeoutMs = 45 * 60 * 1000, tmpDir, onSpawn }) {
   const r = RUNNERS[runner];
   const bin = binOf(runner);
   if (!r || !bin) return Promise.resolve({ ok: false, error: `${runner} CLI not found`, exit: null, ms: 0 });
@@ -392,15 +441,17 @@ function runAgent({ runner, model, prompt, cwd, full = false, extra, timeoutMs =
     if (promptFile) { try { fs.unlinkSync(promptFile); } catch (e) { /* already gone */ } }
     if (ownDir) { try { fs.rmSync(ownDir, { recursive: true, force: true }); } catch (e) { /* already gone */ } }
   };
-  const o = { prompt: p, model, cwd, full, extra };
+  const o = { prompt: p, model, effort, cwd, full, extra };
   const args = r.argv(o);
   const env = { ...process.env, ...(r.env ? r.env(o) : {}) };
   const t0 = Date.now();
   return new Promise((res) => {
-    let child;
+    let child, sin = null;
     try {
-      child = spawn(bin, args, { cwd, env, detached: true, stdio: [r.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+      sin = r.stdin ? stdinFd(prompt) : null;
+      child = spawn(bin, args, { cwd, env, detached: true, stdio: [sin ? sin.fd : 'ignore', 'pipe', 'pipe'] });
     } catch (e) {
+      if (sin) sin.close();
       cleanup();
       res({ ok: false, error: e.message, exit: null, ms: 0 });
       return;
@@ -410,7 +461,7 @@ function runAgent({ runner, model, prompt, cwd, full = false, extra, timeoutMs =
     const so = [], se = [];
     child.stdout.on('data', (b) => so.push(b));
     child.stderr.on('data', (b) => { se.push(b); if (se.length > 200) se.splice(0, se.length - 200); });
-    if (r.stdin) { child.stdin.on('error', () => {}); child.stdin.end(prompt); }
+    if (sin) sin.close(); // the child has its own copy of the fd
     const kill = (sig) => { try { process.kill(-child.pid, sig); } catch (e) { try { child.kill(sig); } catch (e2) { /* gone */ } } };
     let killTimer = null;
     // SIGTERM, then SIGKILL if the group (or a child holding our pipes) ignores it
@@ -450,4 +501,4 @@ function defaultModel(name) {
   return null;
 }
 
-module.exports = { extraArgs, defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, resolve, extractJson, runAgent, killAll };
+module.exports = { EFFORT, effortError, stdinFd, spawnSyncIn, extraArgs, defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, resolve, extractJson, runAgent, killAll };
