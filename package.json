@@ -7,5 +7,5 @@
   "bin": { "code-scan": "bin/code-scan.js" },
   "engines": { "node": ">=22.5" },
   "files": ["bin/", "skills/", "agents/", "prompts/", "profiles/", "templates/", "workflows/", "gemini-extension.json", ".claude-plugin/", ".codex-plugin/", ".agents/plugins/"],
-  "scripts": { "test": "bash test/cli-e2e.sh && bash test/runners-e2e.sh" }
+  "scripts": { "test": "bash test/cli-e2e.sh && bash test/runners-e2e.sh", "site": "node bin/site-export.js" }
 }

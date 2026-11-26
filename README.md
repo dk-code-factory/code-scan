@@ -93,6 +93,14 @@ Reasoning effort: `profile register --effort <level>` (frozen into the profile) 
 `-c model_reasoning_effort=minimal|low|medium|high|xhigh`, opencode `--variant <any>`; Workflow agents get it as
 their `effort`. Other runners have no effort setting.
 
+## Model performance
+
+https://dk-code-factory.github.io/code-scan/ compares reviewer models on real repositories (quality, false positives,
+price, chunk size) and recommends which to pick. The data is exported from local stores with `npm run site`
+(`bin/site-export.js`: runs `scans`, `compare`, `init report` and `calibrate report` on copies of
+`~/.cache/code-scan/*`, exports only aggregates, anonymizes repos not listed as public in `docs/site-config.json`);
+pushing `docs/` to `main` publishes it.
+
 ## Skills
 
 - `/code-scan:init` — benchmark reviewer models and reasoning efforts on two batches of the repo's code

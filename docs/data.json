@@ -1,0 +1,1266 @@
+{
+ "generated": "2026-11-26",
+ "bench": {
+  "repo": "scylladb/gocql",
+  "commit": "bf2fcd6",
+  "sampleKb": 107,
+  "lines": 4630,
+  "knownBugs": 7,
+  "distinctIssues": 20,
+  "date": "2026-11-23",
+  "rows": [
+   {
+    "model": "claude-opus-5-5",
+    "chunkKb": 20,
+    "bugsFound": 7,
+    "quality": 0.5,
+    "usdPer100Kb": 1.19,
+    "usdPer1kLoc": 0.27,
+    "calibrationUsd": 3.55
+   },
+   {
+    "model": "claude-fable-5-2",
+    "chunkKb": 90,
+    "bugsFound": 6,
+    "quality": 0.44,
+    "usdPer100Kb": 1.6,
+    "usdPer1kLoc": 0.37,
+    "calibrationUsd": 7.51,
+    "note": "7/7 at 20KB, $2.31/100KB"
+   },
+   {
+    "model": "claude-sonnet-5-5",
+    "chunkKb": 20,
+    "bugsFound": 4,
+    "quality": 0.42,
+    "usdPer100Kb": 0.41,
+    "usdPer1kLoc": 0.095,
+    "calibrationUsd": 1.38
+   },
+   {
+    "model": "claude-haiku-5-5",
+    "chunkKb": 40,
+    "bugsFound": 2,
+    "quality": 0.22,
+    "usdPer100Kb": 0.04,
+    "usdPer1kLoc": 0.009,
+    "calibrationUsd": 0.14,
+    "note": "rounds failed: reviewers left files unsubmitted"
+   }
+  ]
+ },
+ "efforts": null,
+ "repos": [
+  {
+   "name": "scylladb/cpp-rs-driver",
+   "public": true,
+   "url": "https://github.com/scylladb/cpp-rs-driver",
+   "lang": "rust",
+   "scans": [
+    {
+     "id": 1,
+     "store": "380e18d07793",
+     "profile": "legacy-default@1 1eca7d73d569",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 90,
+     "commit": "abfe5413b672",
+     "files": 86,
+     "kb": 1262,
+     "findings": 20,
+     "severity": {
+      "high": 3,
+      "low": 4,
+      "medium": 13
+     },
+     "triage": {
+      "confirmed": 12,
+      "false_positive": 2,
+      "open": 4,
+      "wontfix": 2
+     },
+     "triaged": 16,
+     "precision": 0.88,
+     "usd": null,
+     "usdPer100Kb": null,
+     "hours": 0.1
+    }
+   ],
+   "compares": [],
+   "inits": [],
+   "curves": [
+    {
+     "id": 1,
+     "model": "claude-opus-5-5",
+     "effort": null,
+     "init": null,
+     "resultKb": 90,
+     "status": "done",
+     "decision": "quality dropped at 135KB (0.57 vs best 0.86)",
+     "rounds": [
+      {
+       "kb": 20,
+       "score": 0.57,
+       "findings": 2
+      },
+      {
+       "kb": 40,
+       "score": 0.57,
+       "findings": 2
+      },
+      {
+       "kb": 60,
+       "score": 0.71,
+       "findings": 3
+      },
+      {
+       "kb": 90,
+       "score": 0.86,
+       "findings": 3
+      },
+      {
+       "kb": 135,
+       "score": 0.57,
+       "findings": 2
+      }
+     ]
+    }
+   ],
+   "triage": []
+  },
+  {
+   "name": "scylladb/csharp-driver",
+   "public": true,
+   "url": "https://github.com/scylladb/csharp-driver",
+   "lang": "c#",
+   "scans": [
+    {
+     "id": 1,
+     "store": "57b5acdc3cd5",
+     "profile": "legacy-default@1 072595edb275",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 40,
+     "commit": "b25bae3a551b",
+     "files": 624,
+     "kb": 2672,
+     "findings": 97,
+     "severity": {
+      "high": 7,
+      "low": 35,
+      "medium": 55
+     },
+     "triage": {
+      "confirmed": 49,
+      "false_positive": 12,
+      "fixed": 1,
+      "open": 35
+     },
+     "triaged": 62,
+     "precision": 0.81,
+     "usd": null,
+     "usdPer100Kb": null,
+     "hours": 0.1
+    }
+   ],
+   "compares": [],
+   "inits": [],
+   "curves": [
+    {
+     "id": 1,
+     "model": "claude-opus-5-5",
+     "effort": null,
+     "init": null,
+     "resultKb": 40,
+     "status": "done",
+     "decision": "quality dropped at 60KB (0.56 vs best 0.78)",
+     "rounds": [
+      {
+       "kb": 20,
+       "score": 0.78,
+       "findings": 5
+      },
+      {
+       "kb": 40,
+       "score": 0.67,
+       "findings": 3
+      },
+      {
+       "kb": 60,
+       "score": 0.56,
+       "findings": 3
+      }
+     ]
+    }
+   ],
+   "triage": []
+  },
+  {
+   "name": "scylladb/gocql",
+   "public": true,
+   "url": "https://github.com/scylladb/gocql",
+   "lang": "go",
+   "scans": [
+    {
+     "id": 26,
+     "store": "11d69edb81cc",
+     "profile": "codex-sol-default@1 3ca05f4d905a",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": null,
+     "chunkKb": 40,
+     "commit": "d84373f31922",
+     "files": 167,
+     "kb": 1409,
+     "findings": 99,
+     "severity": {
+      "critical": 4,
+      "high": 51,
+      "low": 1,
+      "medium": 43
+     },
+     "triage": {
+      "confirmed": 97,
+      "false_positive": 1,
+      "wontfix": 1
+     },
+     "triaged": 99,
+     "precision": 0.99,
+     "usd": 7.37,
+     "usdPer100Kb": 0.52,
+     "hours": 0.1
+    },
+    {
+     "id": 25,
+     "store": "11d69edb81cc",
+     "profile": "legacy-default@1 a263cfeb0668",
+     "model": "claude-fable-5-2",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 40,
+     "commit": "d84373f31922",
+     "files": 167,
+     "kb": 1409,
+     "findings": 73,
+     "severity": {
+      "high": 8,
+      "low": 31,
+      "medium": 34
+     },
+     "triage": {
+      "confirmed": 66,
+      "false_positive": 6,
+      "wontfix": 1
+     },
+     "triaged": 73,
+     "precision": 0.92,
+     "usd": null,
+     "usdPer100Kb": null,
+     "hours": 0.1
+    }
+   ],
+   "compares": [
+    {
+     "store": "11d69edb81cc",
+     "basisKb": 1409,
+     "basisFiles": 167,
+     "both": 25,
+     "scans": [
+      {
+       "id": 26,
+       "model": "codex:gpt-6.1-sol",
+       "findings": 99,
+       "unique": 74,
+       "share": 0.76,
+       "confirmed": 98,
+       "falsePositive": 1,
+       "precision": 0.99
+      },
+      {
+       "id": 25,
+       "model": "claude-fable-5-2",
+       "findings": 72,
+       "unique": 47,
+       "share": 0.43,
+       "confirmed": 66,
+       "falsePositive": 6,
+       "precision": 0.92
+      }
+     ]
+    }
+   ],
+   "inits": [
+    {
+     "id": 4,
+     "sampleKb": 255,
+     "issues": 27,
+     "created": "2026-11-23",
+     "rows": [
+      {
+       "model": "claude-fable-5-2",
+       "effort": null,
+       "chunkKb": 40,
+       "quality": 0.49,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": null,
+       "usdPer1kLoc": null,
+       "findings": 13,
+       "calibrationUsd": null,
+       "status": "done"
+      },
+      {
+       "model": "claude-opus-5-5",
+       "effort": null,
+       "chunkKb": 20,
+       "quality": 0.29,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": null,
+       "usdPer1kLoc": null,
+       "findings": 7,
+       "calibrationUsd": null,
+       "status": "done"
+      },
+      {
+       "model": "claude-sonnet-5-5",
+       "effort": null,
+       "chunkKb": 60,
+       "quality": 0.24,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": null,
+       "usdPer1kLoc": null,
+       "findings": 7,
+       "calibrationUsd": null,
+       "status": "done"
+      }
+     ]
+    }
+   ],
+   "curves": [
+    {
+     "id": 13,
+     "model": "claude-opus-5-5",
+     "effort": null,
+     "init": 4,
+     "resultKb": 20,
+     "status": "done",
+     "decision": "10KB was no better than 20KB",
+     "rounds": [
+      {
+       "kb": 10,
+       "score": 0.3,
+       "findings": 4
+      },
+      {
+       "kb": 20,
+       "score": 0.75,
+       "findings": 7
+      },
+      {
+       "kb": 40,
+       "score": 0.55,
+       "findings": 6
+      }
+     ]
+    },
+    {
+     "id": 14,
+     "model": "claude-sonnet-5-5",
+     "effort": null,
+     "init": 4,
+     "resultKb": 60,
+     "status": "done",
+     "decision": "quality dropped at 90KB (0.38 vs best 0.69)",
+     "rounds": [
+      {
+       "kb": 10,
+       "score": 0.31,
+       "findings": 3
+      },
+      {
+       "kb": 20,
+       "score": 0.31,
+       "findings": 2
+      },
+      {
+       "kb": 40,
+       "score": 0.23,
+       "findings": 2
+      },
+      {
+       "kb": 60,
+       "score": 0.69,
+       "findings": 7
+      },
+      {
+       "kb": 90,
+       "score": 0.38,
+       "findings": 4
+      }
+     ]
+    },
+    {
+     "id": 15,
+     "model": "claude-fable-5-2",
+     "effort": null,
+     "init": 4,
+     "resultKb": 40,
+     "status": "done",
+     "decision": "quality dropped at 60KB (0.47 vs best 0.63)",
+     "rounds": [
+      {
+       "kb": 20,
+       "score": 0.63,
+       "findings": 12
+      },
+      {
+       "kb": 40,
+       "score": 0.63,
+       "findings": 13
+      },
+      {
+       "kb": 60,
+       "score": 0.47,
+       "findings": 9
+      }
+     ]
+    }
+   ],
+   "triage": [
+    {
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": null,
+     "groupSize": 5,
+     "findings": 111,
+     "verdicts": {
+      "false_positive": 1,
+      "real": 109,
+      "wontfix": 1
+     },
+     "severityChanged": 42,
+     "usd": 5.54,
+     "usdPerFinding": 0.05
+    }
+   ]
+  },
+  {
+   "name": "scylladb/java-driver",
+   "public": true,
+   "url": "https://github.com/scylladb/java-driver",
+   "lang": "java",
+   "scans": [
+    {
+     "id": 1,
+     "store": "0c9c06d303a8",
+     "profile": "legacy-default@1 e602c43e4fbf",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 135,
+     "commit": "fd66ba76ab68",
+     "files": 1047,
+     "kb": 5144,
+     "findings": 69,
+     "severity": {
+      "high": 5,
+      "low": 25,
+      "medium": 39
+     },
+     "triage": {
+      "confirmed": 41,
+      "false_positive": 3,
+      "open": 25
+     },
+     "triaged": 44,
+     "precision": 0.93,
+     "usd": 19.48,
+     "usdPer100Kb": 0.38,
+     "hours": 0.9
+    }
+   ],
+   "compares": [],
+   "inits": [],
+   "curves": [],
+   "triage": []
+  },
+  {
+   "name": "scylladb/nodejs-rs-driver",
+   "public": true,
+   "url": "https://github.com/scylladb/nodejs-rs-driver",
+   "lang": "ts",
+   "scans": [
+    {
+     "id": 1,
+     "store": "50eebf10e6ec",
+     "profile": "legacy-default@1 072595edb275",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 41,
+     "severity": {
+      "high": 13,
+      "low": 12,
+      "medium": 16
+     },
+     "triage": {
+      "confirmed": 27,
+      "false_positive": 1,
+      "open": 12,
+      "wontfix": 1
+     },
+     "triaged": 29,
+     "precision": 0.97,
+     "usd": null,
+     "usdPer100Kb": null,
+     "hours": 0.1
+    }
+   ],
+   "compares": [],
+   "inits": [],
+   "curves": [
+    {
+     "id": 1,
+     "model": "claude-opus-5-5",
+     "effort": null,
+     "init": null,
+     "resultKb": 90,
+     "status": "done",
+     "decision": "quality dropped at 135KB (0.23 vs best 0.64)",
+     "rounds": [
+      {
+       "kb": 20,
+       "score": 0.5,
+       "findings": 5
+      },
+      {
+       "kb": 40,
+       "score": 0.64,
+       "findings": 7
+      },
+      {
+       "kb": 60,
+       "score": 0.5,
+       "findings": 6
+      },
+      {
+       "kb": 90,
+       "score": 0.5,
+       "findings": 5
+      },
+      {
+       "kb": 135,
+       "score": 0.23,
+       "findings": 3
+      }
+     ]
+    }
+   ],
+   "triage": []
+  },
+  {
+   "name": "scylladb/scylla-rust-driver",
+   "public": true,
+   "url": "https://github.com/scylladb/scylla-rust-driver",
+   "lang": "rust",
+   "scans": [
+    {
+     "id": 2,
+     "store": "260fd1a6c41a",
+     "profile": "legacy-default@2 3a103d010090",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 20,
+     "commit": "f5333589f4b0",
+     "files": 133,
+     "kb": 2424,
+     "findings": 52,
+     "severity": {
+      "high": 6,
+      "low": 34,
+      "medium": 12
+     },
+     "triage": {
+      "confirmed": 12,
+      "false_positive": 1,
+      "fixed": 5,
+      "open": 34
+     },
+     "triaged": 18,
+     "precision": 0.94,
+     "usd": 9.7,
+     "usdPer100Kb": 0.4,
+     "hours": 0.1
+    },
+    {
+     "id": 2,
+     "store": "46a20fe34c54",
+     "profile": "codex-sol-default@1 3ca05f4d905a",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": null,
+     "chunkKb": 40,
+     "commit": "edcbab6d4835",
+     "files": 133,
+     "kb": 2720,
+     "findings": 47,
+     "severity": {
+      "critical": 7,
+      "high": 15,
+      "medium": 25
+     },
+     "triage": {
+      "confirmed": 46,
+      "wontfix": 1
+     },
+     "triaged": 47,
+     "precision": 1,
+     "usd": 7.25,
+     "usdPer100Kb": 0.27,
+     "hours": 0.1
+    },
+    {
+     "id": 1,
+     "store": "46a20fe34c54",
+     "profile": "fable-default@1 9d1ff8103fa8",
+     "model": "claude-fable-5-2",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 40,
+     "commit": "edcbab6d4835",
+     "files": 133,
+     "kb": 2720,
+     "findings": 63,
+     "severity": {
+      "high": 7,
+      "low": 30,
+      "medium": 26
+     },
+     "triage": {
+      "confirmed": 59,
+      "false_positive": 1,
+      "wontfix": 3
+     },
+     "triaged": 63,
+     "precision": 0.98,
+     "usd": 52.44,
+     "usdPer100Kb": 1.93,
+     "hours": 0.1
+    }
+   ],
+   "compares": [
+    {
+     "store": "46a20fe34c54",
+     "basisKb": 2720,
+     "basisFiles": 133,
+     "both": 12,
+     "scans": [
+      {
+       "id": 2,
+       "model": "codex:gpt-6.1-sol",
+       "findings": 47,
+       "unique": 35,
+       "share": 0.59,
+       "confirmed": 47,
+       "falsePositive": 0,
+       "precision": 1
+      },
+      {
+       "id": 1,
+       "model": "claude-fable-5-2",
+       "findings": 63,
+       "unique": 51,
+       "share": 0.55,
+       "confirmed": 62,
+       "falsePositive": 1,
+       "precision": 0.98
+      }
+     ]
+    }
+   ],
+   "inits": [],
+   "curves": [],
+   "triage": [
+    {
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": null,
+     "groupSize": 5,
+     "findings": 98,
+     "verdicts": {
+      "false_positive": 1,
+      "real": 93,
+      "wontfix": 4
+     },
+     "severityChanged": 23,
+     "usd": 4.61,
+     "usdPerFinding": 0.047
+    }
+   ]
+  },
+  {
+   "name": "scylladb/scylladb",
+   "public": true,
+   "url": "https://github.com/scylladb/scylladb",
+   "lang": "c++",
+   "scans": [
+    {
+     "id": 14,
+     "store": "bbf2b5b8b2f9",
+     "profile": "legacy-default@1 3a103d010090",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 20,
+     "commit": "2e6c4df557ac",
+     "files": 1807,
+     "kb": 21406,
+     "findings": 289,
+     "severity": {
+      "critical": 3,
+      "high": 38,
+      "low": 121,
+      "medium": 127
+     },
+     "triage": {
+      "confirmed": 161,
+      "false_positive": 6,
+      "open": 121,
+      "wontfix": 1
+     },
+     "triaged": 168,
+     "precision": 0.96,
+     "usd": null,
+     "usdPer100Kb": null,
+     "hours": 4.5
+    },
+    {
+     "id": 1,
+     "store": "scylladb-codex-sol",
+     "profile": "codex-sol@1 3ca05f4d905a",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": null,
+     "chunkKb": 40,
+     "commit": "c381b0628d3e",
+     "files": 1901,
+     "kb": 22320,
+     "findings": 733,
+     "severity": {
+      "critical": 52,
+      "high": 384,
+      "low": 10,
+      "medium": 287
+     },
+     "triage": {
+      "confirmed": 727,
+      "false_positive": 2,
+      "open": 3,
+      "wontfix": 1
+     },
+     "triaged": 730,
+     "precision": 1,
+     "usd": 101.66,
+     "usdPer100Kb": 0.46,
+     "hours": 1.7
+    }
+   ],
+   "compares": [],
+   "inits": [],
+   "curves": [],
+   "triage": [
+    {
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": null,
+     "groupSize": 5,
+     "findings": 733,
+     "verdicts": {
+      "false_positive": 2,
+      "real": 727,
+      "unsure": 3,
+      "wontfix": 1
+     },
+     "severityChanged": 233,
+     "usd": 40.09,
+     "usdPerFinding": 0.055
+    }
+   ]
+  },
+  {
+   "name": "scylladb/seastar",
+   "public": true,
+   "url": "https://github.com/scylladb/seastar",
+   "lang": "c++",
+   "scans": [
+    {
+     "id": 15,
+     "store": "bbf2b5b8b2f9",
+     "profile": "codex-sol@1 3ca05f4d905a",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": null,
+     "chunkKb": 40,
+     "commit": "e2b0882376ec",
+     "files": 384,
+     "kb": 3990,
+     "findings": 297,
+     "severity": {
+      "critical": 19,
+      "high": 171,
+      "low": 2,
+      "medium": 105
+     },
+     "triage": {
+      "confirmed": 295,
+      "wontfix": 2
+     },
+     "triaged": 297,
+     "precision": 1,
+     "usd": 19.19,
+     "usdPer100Kb": 0.48,
+     "hours": 0.4
+    },
+    {
+     "id": 1,
+     "store": "bbf2b5b8b2f9",
+     "profile": "legacy-default@1 3a103d010090",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 20,
+     "commit": "f55dc7ebed59",
+     "files": 363,
+     "kb": 3706,
+     "findings": 144,
+     "severity": {
+      "critical": 7,
+      "high": 13,
+      "low": 50,
+      "medium": 74
+     },
+     "triage": {
+      "confirmed": 84,
+      "false_positive": 7,
+      "fixed": 5,
+      "open": 47,
+      "wontfix": 1
+     },
+     "triaged": 97,
+     "precision": 0.93,
+     "usd": 20.5,
+     "usdPer100Kb": 0.55,
+     "hours": 0.2
+    }
+   ],
+   "compares": [
+    {
+     "store": "bbf2b5b8b2f9",
+     "basisKb": 439,
+     "basisFiles": 126,
+     "both": 5,
+     "scans": [
+      {
+       "id": 15,
+       "model": "codex:gpt-6.1-sol",
+       "findings": 42,
+       "unique": 37,
+       "share": 0.81,
+       "confirmed": 42,
+       "falsePositive": 0,
+       "precision": 1
+      },
+      {
+       "id": 1,
+       "model": "claude-opus-5-5",
+       "findings": 19,
+       "unique": 14,
+       "share": 0.3,
+       "confirmed": 13,
+       "falsePositive": 0,
+       "precision": 1
+      }
+     ]
+    }
+   ],
+   "inits": [
+    {
+     "id": 1,
+     "sampleKb": 224,
+     "issues": 14,
+     "created": "2026-11-24",
+     "rows": [
+      {
+       "model": "claude-fable-5-2",
+       "effort": null,
+       "chunkKb": 40,
+       "quality": 0.65,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": 1.3,
+       "usdPer1kLoc": 0.436,
+       "findings": 9,
+       "calibrationUsd": 8.66,
+       "status": "done"
+      },
+      {
+       "model": "claude-opus-5-5",
+       "effort": null,
+       "chunkKb": 20,
+       "quality": 0.48,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": 0.62,
+       "usdPer1kLoc": 0.21,
+       "findings": 6,
+       "calibrationUsd": 3.96,
+       "status": "done"
+      },
+      {
+       "model": "claude-sonnet-5-5",
+       "effort": null,
+       "chunkKb": 60,
+       "quality": 0.09,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": 0.21,
+       "usdPer1kLoc": 0.071,
+       "findings": 1,
+       "calibrationUsd": 1.94,
+       "status": "done"
+      },
+      {
+       "model": "claude-haiku-5-5",
+       "effort": null,
+       "chunkKb": null,
+       "quality": 0,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": null,
+       "usdPer1kLoc": null,
+       "findings": 0,
+       "calibrationUsd": 0.14,
+       "status": "failed"
+      }
+     ]
+    }
+   ],
+   "curves": [
+    {
+     "id": 1,
+     "model": "claude-opus-5-5",
+     "effort": null,
+     "init": 1,
+     "resultKb": 20,
+     "status": "done",
+     "decision": "10KB was no better than 20KB",
+     "rounds": [
+      {
+       "kb": 10,
+       "score": 0.58,
+       "findings": 4
+      },
+      {
+       "kb": 20,
+       "score": 0.83,
+       "findings": 6
+      },
+      {
+       "kb": 40,
+       "score": 0.5,
+       "findings": 4
+      }
+     ]
+    },
+    {
+     "id": 4,
+     "model": "claude-fable-5-2",
+     "effort": null,
+     "init": 1,
+     "resultKb": 40,
+     "status": "done",
+     "decision": "quality dropped at 60KB (0.39 vs best 0.78)",
+     "rounds": [
+      {
+       "kb": 20,
+       "score": 0.72,
+       "findings": 9
+      },
+      {
+       "kb": 40,
+       "score": 0.78,
+       "findings": 9
+      },
+      {
+       "kb": 60,
+       "score": 0.39,
+       "findings": 5
+      }
+     ]
+    }
+   ],
+   "triage": [
+    {
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": null,
+     "groupSize": 5,
+     "findings": 284,
+     "verdicts": {
+      "real": 284
+     },
+     "severityChanged": 91,
+     "usd": 12.98,
+     "usdPerFinding": 0.046
+    },
+    {
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "xhigh",
+     "groupSize": 3,
+     "findings": 106,
+     "verdicts": {
+      "real": 104,
+      "wontfix": 2
+     },
+     "severityChanged": 12,
+     "usd": 9.95,
+     "usdPerFinding": 0.094
+    }
+   ]
+  },
+  {
+   "name": "private project A (go)",
+   "public": false,
+   "url": null,
+   "lang": "go",
+   "scans": [
+    {
+     "id": 1,
+     "store": "b6300366a39d",
+     "profile": "legacy-default@1 3a103d010090",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": null,
+     "chunkKb": 20,
+     "commit": "77e11c1885f7",
+     "files": 2032,
+     "kb": 9835,
+     "findings": 374,
+     "severity": {
+      "high": 6,
+      "low": 189,
+      "medium": 179
+     },
+     "triage": {
+      "confirmed": 23,
+      "open": 351
+     },
+     "triaged": 23,
+     "precision": 1,
+     "usd": 71.4,
+     "usdPer100Kb": 0.73,
+     "hours": 2.3
+    }
+   ],
+   "compares": [],
+   "inits": [
+    {
+     "id": 1,
+     "sampleKb": 200,
+     "issues": 37,
+     "created": "2026-11-24",
+     "rows": [
+      {
+       "model": "claude-opus-5-5",
+       "effort": null,
+       "chunkKb": 20,
+       "quality": 0.74,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": 0.81,
+       "usdPer1kLoc": 0.467,
+       "findings": 26,
+       "calibrationUsd": 4.75,
+       "status": "done"
+      },
+      {
+       "model": "claude-sonnet-5-5",
+       "effort": null,
+       "chunkKb": 20,
+       "quality": 0.68,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": 0.31,
+       "usdPer1kLoc": 0.178,
+       "findings": 22,
+       "calibrationUsd": 1.83,
+       "status": "done"
+      },
+      {
+       "model": "claude-fable-5-2",
+       "effort": null,
+       "chunkKb": 40,
+       "quality": 0.43,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": 1.51,
+       "usdPer1kLoc": 0.876,
+       "findings": 19,
+       "calibrationUsd": 14.71,
+       "status": "done"
+      },
+      {
+       "model": "claude-haiku-5-5",
+       "effort": null,
+       "chunkKb": 40,
+       "quality": 0.32,
+       "qA": null,
+       "qB": null,
+       "usdPer100Kb": 0.02,
+       "usdPer1kLoc": 0.013,
+       "findings": 11,
+       "calibrationUsd": 0.13,
+       "status": "done"
+      }
+     ]
+    }
+   ],
+   "curves": [
+    {
+     "id": 1,
+     "model": "claude-opus-5-5",
+     "effort": null,
+     "init": 1,
+     "resultKb": 20,
+     "status": "done",
+     "decision": "10KB was no better than 20KB",
+     "rounds": [
+      {
+       "kb": 10,
+       "score": 0.84,
+       "findings": 24
+      },
+      {
+       "kb": 20,
+       "score": 0.88,
+       "findings": 26
+      },
+      {
+       "kb": 40,
+       "score": 0.56,
+       "findings": 15
+      }
+     ]
+    },
+    {
+     "id": 2,
+     "model": "claude-sonnet-5-5",
+     "effort": null,
+     "init": 1,
+     "resultKb": 20,
+     "status": "done",
+     "decision": "10KB was no better than 20KB",
+     "rounds": [
+      {
+       "kb": 10,
+       "score": 0.9,
+       "findings": 22
+      },
+      {
+       "kb": 20,
+       "score": 0.88,
+       "findings": 22
+      },
+      {
+       "kb": 40,
+       "score": 0.45,
+       "findings": 13
+      }
+     ]
+    },
+    {
+     "id": 3,
+     "model": "claude-haiku-5-5",
+     "effort": null,
+     "init": 1,
+     "resultKb": 40,
+     "status": "done",
+     "decision": "quality dropped at 60KB (0.41 vs best 0.88)",
+     "rounds": [
+      {
+       "kb": 20,
+       "score": 0.47,
+       "findings": 5
+      },
+      {
+       "kb": 40,
+       "score": 0.88,
+       "findings": 11
+      },
+      {
+       "kb": 60,
+       "score": 0.41,
+       "findings": 6
+      }
+     ]
+    },
+    {
+     "id": 4,
+     "model": "claude-fable-5-2",
+     "effort": null,
+     "init": 1,
+     "resultKb": 40,
+     "status": "done",
+     "decision": "quality dropped at 60KB (0.55 vs best 0.79)",
+     "rounds": [
+      {
+       "kb": 10,
+       "score": 0.76,
+       "findings": 21
+      },
+      {
+       "kb": 20,
+       "score": 0.79,
+       "findings": 23
+      },
+      {
+       "kb": 40,
+       "score": 0.66,
+       "findings": 19
+      },
+      {
+       "kb": 60,
+       "score": 0.55,
+       "findings": 15
+      }
+     ]
+    }
+   ],
+   "triage": [
+    {
+     "model": null,
+     "runner": null,
+     "effort": null,
+     "groupSize": 5,
+     "findings": 23,
+     "verdicts": {
+      "real": 23
+     },
+     "severityChanged": 17,
+     "usd": null,
+     "usdPerFinding": null
+    }
+   ]
+  }
+ ]
+}
