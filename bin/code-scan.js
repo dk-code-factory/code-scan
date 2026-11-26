@@ -632,7 +632,7 @@ function specFromFlags(f) {
   // --model default also takes the effort picked at init, unless --effort is given
   const effort = f.effort !== undefined ? f.effort : f.model === 'default' ? cfgGet('default_effort') || undefined : undefined;
   const cal = (effort && cfgGet(chunkKey(modelId(r.model), effort))) || cfgGet(chunkKey(modelId(r.model)));
-  const effErr = RN.effortError(r.runner, effort);
+  const effErr = RN.effortError(r.runner, effort, r.model);
   if (effErr) die(effErr);
   if (f['chunk-kb'] !== undefined && !(Number(f['chunk-kb']) > 0)) die('--chunk-kb must be a positive number (KB)');
   const spec = {
@@ -2228,7 +2228,7 @@ function initRefine(cals, sc, io) {
     byModel.get(c.model).push(c);
   }
   for (const [model, list] of byModel) {
-    const levels = (RN.EFFORT[RN.splitModel(model).runner] || {}).levels;
+    const levels = RN.effortLevels(RN.splitModel(model).runner, model);
     if (!levels) continue;
     const have = new Set(cals.filter((c) => c.model === model).map((c) => c.effort));
     list.sort((x, y) => levels.indexOf(x.effort) - levels.indexOf(y.effort));
@@ -2466,13 +2466,13 @@ function initEfforts(model, io, efforts) {
   const ent = RN.EFFORT[runner];
   if (efforts) {
     if (!ent) return { list: [{ effort: null, role: 'fixed' }], note: `${model}: the ${runner} runner has no effort setting — one candidate` };
-    for (const e of efforts) { const err = RN.effortError(runner, e); if (err) die(`${model}: ${err}`); }
+    for (const e of efforts) { const err = RN.effortError(runner, e, model); if (err) die(`${model}: ${err}`); }
     return { list: efforts.map((e) => ({ effort: e, role: 'fixed' })) };
   }
   if (!ent || !ent.levels) {
     return { list: [{ effort: null, role: 'fixed' }], note: ent ? `${model}: ${runner} takes any effort name — pass --efforts to compare some` : null };
   }
-  const lv = ent.levels;
+  const lv = RN.effortLevels(runner, model);
   if (io.matrix || lv.length < 3) return { list: lv.map((e) => ({ effort: e, role: io.matrix ? 'fixed' : 'bracket' })) };
   return { list: [lv[0], lv[Math.floor((lv.length - 1) / 2)], lv[lv.length - 1]].map((e) => ({ effort: e, role: 'bracket' })) };
 }
@@ -2581,7 +2581,7 @@ function cmdInit(a) {
       else if (efforts.length <= 1) effort = efforts.length ? efforts[0] : null;
       else die(`${model} was benchmarked at several efforts (${efforts.map((e) => e || 'none').join(', ')}) — pass --effort <level>`);
     }
-    if (effort) { const err = RN.effortError(RN.splitModel(model).runner, effort); if (err) die(err); }
+    if (effort) { const err = RN.effortError(RN.splitModel(model).runner, effort, model); if (err) die(err); }
     const cal = d.prepare("SELECT * FROM calibrations WHERE model=? AND effort IS ? AND status='done' ORDER BY id DESC LIMIT 1").get(model, effort);
     let size = cal ? cal.result_kb : null;
     if (!size) {
@@ -4688,7 +4688,7 @@ function atStart(a) {
   let rr;
   try { rr = RN.resolve({ flagRunner: a.f.runner, flagModel: a.f.model ? modelId(a.f.model) : null }); } catch (e) { die(e.message); }
   const model = rr.model ? modelId(rr.model) : null;
-  const effErr = rr.runner ? RN.effortError(rr.runner, a.f.effort) : null;
+  const effErr = rr.runner ? RN.effortError(rr.runner, a.f.effort, rr.model) : null;
   if (effErr) die(effErr);
   const run = tx((d) => {
     const r = d.prepare("INSERT INTO triage_runs(created,repo,group_size,model,lanes,status,runner,effort) VALUES(?,?,?,?,?,'active',?,?)")
@@ -4707,7 +4707,7 @@ function atContinue(a) {
   db().prepare("UPDATE triage_runs SET status='active' WHERE id=?").run(run.id);
   if (a.f.concurrency !== undefined) db().prepare('UPDATE triage_runs SET lanes=? WHERE id=?').run(parseConcurrency(a.f.concurrency), run.id);
   if (a.f.effort !== undefined) {
-    const effErr = RN.effortError(run.runner || 'claude', a.f.effort);
+    const effErr = RN.effortError(run.runner || 'claude', a.f.effort, run.model);
     if (effErr) die(effErr);
     db().prepare('UPDATE triage_runs SET effort=? WHERE id=?').run(a.f.effort ? String(a.f.effort) : null, run.id);
   }
@@ -5268,7 +5268,7 @@ async function atRunCmd(a) {
   const ctx = runnerFor(a.f, { model: run.model, runner: run.runner });
   if (ctx.runner !== run.runner || ctx.model !== run.model) db().prepare('UPDATE triage_runs SET runner=?, model=? WHERE id=?').run(ctx.runner, ctx.model, run.id);
   if (run.effort) {
-    const effErr = RN.effortError(ctx.runner, run.effort);
+    const effErr = RN.effortError(ctx.runner, run.effort, ctx.model);
     if (effErr) die(`auto-triage run ${run.id}: ${effErr} — \`auto-triage continue ${run.id} --effort <level>\` (empty to clear)`);
     ctx.effort = run.effort;
   }
@@ -5320,7 +5320,7 @@ async function cmdRunPrompt(a) {
   if (!file) die('usage: run-prompt <file> [--runner r] [--model m] [--effort e] [--full]');
   const prompt = fs.readFileSync(file, 'utf8');
   const ctx = runnerFor(a.f, {});
-  const effErr = RN.effortError(ctx.runner, a.f.effort);
+  const effErr = RN.effortError(ctx.runner, a.f.effort, ctx.model);
   if (effErr) die(effErr);
   if (a.f.effort) ctx.effort = String(a.f.effort);
   onStopSignals();

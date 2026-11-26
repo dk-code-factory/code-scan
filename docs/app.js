@@ -23,6 +23,10 @@
   };
   const sw = (m) => `<span class="swatch" style="background:${modelInfo(m).color}"></span>${esc(modelInfo(m).name)}`;
   const withEffort = (m, e) => sw(m) + (e ? ` <span class="muted">${esc(e)}</span>` : '');
+  // findings split by severity: total, then critical / high / medium / low
+  const SEVS = ['critical', 'high', 'medium', 'low'];
+  const sevTh = '<th>total</th><th>critical</th><th>high</th><th>medium</th><th>low</th>';
+  const sevTd = (total, sev) => `<td><b>${total ?? '–'}</b></td>` + SEVS.map((k) => `<td>${(sev && sev[k]) || 0}</td>`).join('');
   const repoLink = (r) => (r.url ? `<a href="${r.url}">${esc(r.name)}</a>` : esc(r.name));
 
   // ---------- tooltip
@@ -99,8 +103,8 @@
   for (const r of data.repos) for (const c of r.compares) {
     const scanOf = (id) => r.scans.find((s) => s.id === id && s.store === c.store) || {};
     h2h.push(`<h3>${repoLink(r)} <span class="muted">— ${kb(c.basisKb)} in ${c.basisFiles} files compared, ${c.both} issues found by both</span></h3>
-      <div class="table-wrap"><table><tr><th>model</th><th>findings</th><th>only this one</th><th>share</th><th>confirmed</th><th>false pos.</th><th>precision</th><th>whole scan $</th><th>$/100KB</th></tr>` +
-      c.scans.map((x) => { const s = scanOf(x.id); return `<tr><td>${withEffort(x.model, s.effort)}</td><td>${x.findings}</td><td>${x.unique}</td><td><b>${f2(x.share)}</b></td><td>${x.confirmed}</td><td>${x.falsePositive}</td><td>${f2(x.precision)}</td><td>${usd(s.usd)}</td><td>${usd(s.usdPer100Kb)}</td></tr>`; }).join('') +
+      <div class="table-wrap"><table><tr><th>model</th>${sevTh}<th>only this one</th><th>share</th><th>confirmed</th><th>false pos.</th><th>precision</th><th>whole scan $</th><th>$/100KB</th></tr>` +
+      c.scans.map((x) => { const s = scanOf(x.id); return `<tr><td>${withEffort(x.model, s.effort)}</td>${sevTd(x.findings, x.severity)}<td>${x.unique}</td><td><b>${f2(x.share)}</b></td><td>${x.confirmed}</td><td>${x.falsePositive}</td><td>${f2(x.precision)}</td><td>${usd(s.usd)}</td><td>${usd(s.usdPer100Kb)}</td></tr>`; }).join('') +
       '</table></div>');
   }
   $('h2h-body').innerHTML = h2h.join('') || '<p class="muted">No head-to-head scans yet.</p>';
@@ -129,9 +133,9 @@
     });
     $('cost-chart').appendChild(svg);
   })();
-  $('scan-table').innerHTML = `<tr><th>repository</th><th>model</th><th>code</th><th>files</th><th>findings</th><th>triaged</th><th>precision</th><th>$</th><th>$/100KB</th></tr>` +
+  $('scan-table').innerHTML = `<tr><th>repository</th><th>model</th><th>code</th><th>files</th>${sevTh}<th>triaged</th><th>precision</th><th>$</th><th>$/100KB</th></tr>` +
     allScans.sort((a, b) => a.repo.name.localeCompare(b.repo.name) || b.kb - a.kb).map((s) =>
-      `<tr><td>${repoLink(s.repo)}</td><td>${withEffort(s.model, s.effort)}</td><td>${kb(s.kb)}</td><td>${s.files}</td><td>${s.findings}</td><td>${s.triaged}</td><td>${f2(s.precision)}</td><td>${usd(s.usd)}</td><td>${usd(s.usdPer100Kb)}</td></tr>`).join('');
+      `<tr><td>${repoLink(s.repo)}</td><td>${withEffort(s.model, s.effort)}</td><td>${kb(s.kb)}</td><td>${s.files}</td>${sevTd(s.findings, s.severity)}<td>${s.triaged}</td><td>${f2(s.precision)}</td><td>${usd(s.usd)}</td><td>${usd(s.usdPer100Kb)}</td></tr>`).join('');
 
   // ---------- calibration small multiples
   (function () {
@@ -223,8 +227,8 @@
       fig.appendChild(cap);
       sec.appendChild(fig);
       const tw = document.createElement('div'); tw.className = 'table-wrap';
-      tw.innerHTML = `<table><tr><th>model</th><th>effort</th><th>findings</th><th>confirmed</th><th>false pos.</th><th>precision</th><th>recall</th><th>only this one</th><th>high+</th><th>$</th><th>$/100KB</th><th>$/confirmed</th><th>output tokens</th><th>agent min</th></tr>` +
-        rows.map((r) => `<tr><td>${sw(r.model)}</td><td>${esc(r.effort || '–')}</td><td>${r.findings}</td><td>${r.confirmed}</td><td>${r.falsePositive}</td><td>${f2(r.precision)}</td><td><b>${f2(r.confirmedRecall)}</b></td><td>${r.unique}</td><td>${r.highPlus}</td><td>${usd(r.usd)}</td><td>${usd(r.usdPer100Kb)}</td><td>${usd(r.usdPerConfirmed)}</td><td>${r.outputTokens ? (r.outputTokens / 1e6).toFixed(2) + 'M' : '–'}</td><td>${r.agentMinutes ?? '–'}</td></tr>`).join('') + '</table>';
+      tw.innerHTML = `<table><tr><th>model</th><th>effort</th>${sevTh}<th>confirmed</th><th>false pos.</th><th>precision</th><th>recall</th><th>only this one</th><th>$</th><th>$/100KB</th><th>$/confirmed</th><th>output tokens</th><th>agent min</th></tr>` +
+        rows.map((r) => `<tr><td>${sw(r.model)}</td><td>${esc(r.effort || '–')}</td>${sevTd(r.findings, r.severity)}<td>${r.confirmed}</td><td>${r.falsePositive}</td><td>${f2(r.precision)}</td><td><b>${f2(r.confirmedRecall)}</b></td><td>${r.unique}</td><td>${usd(r.usd)}</td><td>${usd(r.usdPer100Kb)}</td><td>${usd(r.usdPerConfirmed)}</td><td>${r.outputTokens ? (r.outputTokens / 1e6).toFixed(2) + 'M' : '–'}</td><td>${r.agentMinutes ?? '–'}</td></tr>`).join('') + '</table>';
       sec.appendChild(tw);
       host.appendChild(sec);
     }

@@ -49,7 +49,6 @@
    }
   ]
  },
- "efforts": null,
  "repos": [
   {
    "name": "scylladb/cpp-rs-driver",
@@ -127,7 +126,8 @@
      ]
     }
    ],
-   "triage": []
+   "triage": [],
+   "efforts": []
   },
   {
    "name": "scylladb/csharp-driver",
@@ -195,7 +195,8 @@
      ]
     }
    ],
-   "triage": []
+   "triage": [],
+   "efforts": []
   },
   {
    "name": "scylladb/gocql",
@@ -272,6 +273,12 @@
        "id": 26,
        "model": "codex:gpt-6.1-sol",
        "findings": 99,
+       "severity": {
+        "critical": 4,
+        "high": 51,
+        "medium": 43,
+        "low": 1
+       },
        "unique": 74,
        "share": 0.76,
        "confirmed": 98,
@@ -282,6 +289,11 @@
        "id": 25,
        "model": "claude-fable-5-2",
        "findings": 72,
+       "severity": {
+        "high": 8,
+        "medium": 34,
+        "low": 30
+       },
        "unique": 47,
        "share": 0.43,
        "confirmed": 66,
@@ -446,7 +458,8 @@
      "usd": 5.54,
      "usdPerFinding": 0.05
     }
-   ]
+   ],
+   "efforts": []
   },
   {
    "name": "scylladb/java-driver",
@@ -486,7 +499,8 @@
    "compares": [],
    "inits": [],
    "curves": [],
-   "triage": []
+   "triage": [],
+   "efforts": []
   },
   {
    "name": "scylladb/nodejs-rs-driver",
@@ -519,8 +533,8 @@
      },
      "triaged": 29,
      "precision": 0.97,
-     "usd": null,
-     "usdPer100Kb": null,
+     "usd": 0.25,
+     "usdPer100Kb": 0.02,
      "hours": 0.1
     }
    ],
@@ -564,7 +578,8 @@
      ]
     }
    ],
-   "triage": []
+   "triage": [],
+   "efforts": []
   },
   {
    "name": "scylladb/scylla-rust-driver",
@@ -668,6 +683,11 @@
        "id": 2,
        "model": "codex:gpt-6.1-sol",
        "findings": 47,
+       "severity": {
+        "critical": 7,
+        "high": 15,
+        "medium": 25
+       },
        "unique": 35,
        "share": 0.59,
        "confirmed": 47,
@@ -678,6 +698,11 @@
        "id": 1,
        "model": "claude-fable-5-2",
        "findings": 63,
+       "severity": {
+        "medium": 26,
+        "high": 7,
+        "low": 30
+       },
        "unique": 51,
        "share": 0.55,
        "confirmed": 62,
@@ -705,7 +730,8 @@
      "usd": 4.61,
      "usdPerFinding": 0.047
     }
-   ]
+   ],
+   "efforts": []
   },
   {
    "name": "scylladb/scylladb",
@@ -793,8 +819,35 @@
      "severityChanged": 233,
      "usd": 40.09,
      "usdPerFinding": 0.055
+    },
+    {
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "xhigh",
+     "groupSize": 3,
+     "findings": 81,
+     "verdicts": {
+      "real": 81
+     },
+     "severityChanged": 5,
+     "usd": 9.08,
+     "usdPerFinding": 0.112
+    },
+    {
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "xhigh",
+     "groupSize": 5,
+     "findings": 210,
+     "verdicts": {
+      "real": 210
+     },
+     "severityChanged": 33,
+     "usd": 14.94,
+     "usdPerFinding": 0.071
     }
-   ]
+   ],
+   "efforts": []
   },
   {
    "name": "scylladb/seastar",
@@ -873,6 +926,12 @@
        "id": 15,
        "model": "codex:gpt-6.1-sol",
        "findings": 42,
+       "severity": {
+        "critical": 2,
+        "high": 21,
+        "medium": 18,
+        "low": 1
+       },
        "unique": 37,
        "share": 0.81,
        "confirmed": 42,
@@ -883,6 +942,12 @@
        "id": 1,
        "model": "claude-opus-5-5",
        "findings": 19,
+       "severity": {
+        "critical": 2,
+        "medium": 8,
+        "high": 2,
+        "low": 7
+       },
        "unique": 14,
        "share": 0.3,
        "confirmed": 13,
@@ -1036,7 +1101,8 @@
      "usd": 9.95,
      "usdPerFinding": 0.094
     }
-   ]
+   ],
+   "efforts": []
   },
   {
    "name": "private project A (go)",
@@ -1260,7 +1326,8 @@
      "usd": null,
      "usdPerFinding": null
     }
-   ]
+   ],
+   "efforts": []
   }
  ]
 }

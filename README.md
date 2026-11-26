@@ -90,7 +90,8 @@ Extra arguments for one CLI: `CODESCAN_<RUNNER>_ARGS` (frozen into a review prof
 so triage agents can run `gh`); another binary: `CODESCAN_<RUNNER>_BIN`.
 Reasoning effort: `profile register --effort <level>` (frozen into the profile) and `auto-triage start|continue
 --effort <level>`, `run-prompt --effort <level>`: claude `--effort low|medium|high|xhigh|max`, codex
-`-c model_reasoning_effort=minimal|low|medium|high|xhigh`, opencode `--variant <any>`; Workflow agents get it as
+`-c model_reasoning_effort=minimal|low|medium|high|xhigh|max|ultra` (narrowed to what the model lists in Codex's
+`models_cache.json`, e.g. gpt-6.1-sol: low … ultra), opencode `--variant <any>`; Workflow agents get it as
 their `effort`. Other runners have no effort setting.
 
 ## Model performance
