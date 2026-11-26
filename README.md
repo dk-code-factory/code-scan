@@ -95,9 +95,9 @@ their `effort`. Other runners have no effort setting.
 
 ## Skills
 
-- `/code-scan:init` — benchmark reviewer models on a sample of the repo (quality, all-in $/100KB and
-  $/1k lines, best chunk size per model) and pick the model scans use. Runs automatically before the
-  first scan.
+- `/code-scan:init` — benchmark reviewer models and reasoning efforts on two batches of the repo's code
+  (its biggest files, and small files of one area) — quality, all-in $/100KB and $/1k lines, best chunk
+  size per model and effort — and pick what scans use. Runs automatically before the first scan.
 - `/code-scan:scan` — start, continue (same commit), restart (new HEAD; unchanged files skipped by
   content hash), repeat, stop. Runs one or several registered review profiles side by side.
 - `/code-scan:status` — progress, per-file state.
@@ -238,6 +238,20 @@ repo and model (`code-scan.js calibrate`, run automatically by `/code-scan:scan`
 scans a repo): a ~200KB sample is reviewed at the medium size, then half of it; if half is clearly
 better it keeps halving, otherwise it grows by 1.5x until recall falls more than 0.15 below the best
 seen. Recall of a round = severity-weighted share of all distinct issues found across rounds.
+
+`init` searches model × effort × chunk size in stages instead of the full grid. The sample is two
+batches matching the two chunk shapes a scan makes: **A**, the repo's biggest files (a file is never
+split, so each is a chunk of its own at any size — only model and effort change how it is reviewed), and
+**B**, small files of one area (packed several to a chunk — the shape the chunk size acts on). Each
+candidate's score at a size is `wA·qA + wB·qB`, where `wA` is the share of the repo's code in files bigger
+than that size; price is weighted the same way. Stages: every candidate is screened at 40KB and 90KB;
+for runners with effort levels the default candidates are the lowest, middle and highest level, and one
+level between the adjacent pair that differs most is added when the gap exceeds 0.15; candidates with no
+non-dominated screen point near the best quality are pruned (at most 3 survive); survivors search for
+their size — growing from 90KB when they hold up there, otherwise as above. An A round is reused for
+every size at which batch A packs the same way. `--efforts` fixes the effort list, `--matrix` runs every
+effort level and prunes nothing, `--sizes` replaces the search with fixed sizes (`--matrix --sizes …` is
+the full grid).
 
 The medium default (40KB) comes from a calibration of claude-opus-5-5 on gocql (202KB sample of
 the driver's Go code): 80KB → 0.46, 40KB → 0.71, 20KB → 0.56. Calibration cost there: 29 agents,

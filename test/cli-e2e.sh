@@ -359,24 +359,32 @@ B calibrate start --model ghost --sample-kb 40 --medium 16 >/dev/null
 r=""; for i in 1 2 3 4 5 6; do r=$(B calibrate next | tail -1); has "$r" '^DONE' && break; done
 has "$r" 'calibration failed' && has "$(B calibrate status)" 'ghost \[failed\]' && ok calibrate-gives-up || bad "calibrate-gives-up: $r"
 
-# --- init: two simulated models of different quality on one sample; user picks; scans use it
-o=$(B init start --models good-model,weak-model --sample-kb 40 --medium 16)
-has "$o" 'init 1: 2 model(s)' && ok init-start || bad "init-start: $o"
-for cal in $(B sql "select id from calibrations where init_id=1 order by id" | tail -n +2); do
-  model=$(B sql "select model from calibrations where id=$cal" | tail -1)
-  for i in 1 2 3 4 5 6 7; do
-    sid=$(B sql "select max(id) from scans where kind='cal' and cal_id=$cal and status='active'" | tail -1); [ -z "$sid" ] && break
-    while c_o=$(B claim "$sid"); [ "$c_o" != NONE ]; do c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$c_o"); n=0
-      for p in $(sed -n 's/^- \(src[^ ]*\)$/\1/p' <<<"$c_o"); do n=$((n+1))
-        cap=$([ "$model" = good-model ] && echo 100 || echo 1)
-        if [ $n -le $cap ]; then f="[{\"line\":1,\"severity\":\"high\",\"category\":\"x\",\"title\":\"bug in $p\"}]"; else f='[]'; fi
-        B submit "$sid" "$c" --file "$p" <<<"$f" >/dev/null || echo SUBMITFAIL; done; done
-    r=$(B calibrate next "$cal" | tail -1); has "$r" '^DONE' && break
+# --- init: simulated candidates (model + effort) on two batches; `init next` drives the staged search
+# initsim <initId> <rule fn>: review every round `init next` asks for; the rule gets model effort size batch n (file # in chunk) → 1 reports the file's bug
+initsim() {
+  local id=$1 rule=$2 sids sid meta model effort size batch c_o c n p f i
+  sids=$(B sql "select id from scans where kind='cal' and status='active' and cal_id in (select id from calibrations where init_id=$id)" | tail -n +2)
+  for i in $(seq 1 14); do
+    for sid in $sids; do
+      meta=$(B sql "select c.model||' '||coalesce(c.effort,'-')||' '||json_extract(s.options_json,'$.chunkKb')||' '||json_extract(s.options_json,'$.batch') from scans s join calibrations c on c.id=s.cal_id where s.id=$sid" | tail -1)
+      read -r model effort size batch <<<"$meta"
+      while c_o=$(B claim "$sid"); [ "$c_o" != NONE ]; do c=$(sed -n 's/^CHUNK \([0-9]*\).*/\1/p' <<<"$c_o"); n=0
+        for p in $(sed -n 's/^- \(src[^ ]*\)$/\1/p' <<<"$c_o"); do n=$((n+1))
+          if [ "$($rule "$model" "$effort" "$size" "$batch" "$n")" = 1 ]; then f="[{\"line\":1,\"severity\":\"high\",\"category\":\"x\",\"title\":\"bug in $p\"}]"; else f='[]'; fi
+          B submit "$sid" "$c" --file "$p" <<<"$f" >/dev/null || echo SUBMITFAIL; done; done
+    done
+    INITOUT=$(B init next "$id"); has "$INITOUT" '^DONE' && return
+    sids=$(tail -1 <<<"$INITOUT" | python3 -c 'import json,sys;l=sys.stdin.read();print(" ".join(str(r["scanId"]) for r in json.loads(l[5:])["rounds"]))')
   done
-done
+}
+goodweak() { if [ "$1" = good-model ]; then echo 1; else [ "$5" -le 1 ] && echo 1 || echo 0; fi; }
+o=$(B init start --models good-model,weak-model --efforts high --sample-kb 40 --medium 16)
+has "$o" 'init 1: 2 model(s), 2 candidate(s)' && has "$o" 'sample: A 1 biggest file' && has "$o" 'small file(s) 40KB in src/cal' && ok init-start || bad "init-start: $o"
+initsim 1 goodweak
+has "$INITOUT" '^DONE init 1' && has "$INITOUT" 'weak-model high pruned' && ok init-prune || bad "init-prune: $INITOUT"
 r=$(B init report)
-has "$r" 'good-model' && has "$r" '\$/1kLOC' && [ "$(sed -n 3p <<<"$r" | cut -f1)" = good-model ] && ok init-report || bad "init-report: $r"
-o=$(B init pick good-model); has "$o" 'default reviewer model: good-model' && has "$o" 'review profile default@1' && ok init-pick || bad "init-pick: $o"
+has "$r" 'good-model' && has "$r" '\$/1kLOC' && has "$r" 'qA' && [ "$(sed -n 3p <<<"$r" | cut -f1,2)" = "good-model	high" ] && ok init-report || bad "init-report: $r"
+o=$(B init pick good-model); has "$o" 'default reviewer model: good-model effort high' && has "$o" 'review profile default@1' && ok init-pick || bad "init-pick: $o"
 fresh; o=$(B start --force)
 has "$o" 'profile=default@1' && has "$o" 'model good-model' && ! has "$o" '^INIT' && ok init-default-used || bad "init-default-used: $o"
 node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"delete from config where key='default_profile'\")"
@@ -522,6 +530,30 @@ o=$(B scans rm "$sb" --dry-run); has "$o" '0 finding(s) only it reported' && ok 
 B scans label "$sb" keep >/dev/null; has "$(B scans)" 'keep' && ok scans-label || bad scans-label
 B scans rm keep >/dev/null; ! has "$(B scans)" 'keep' && has "$(B show "$uaf")" "scan $sa" && ! has "$(B show "$uaf")" "scan $sb " && ok scans-rm || bad "scans-rm: $(B show "$uaf")"
 has "$(B run "$s2" --model opus 2>&1)" 'belong to a profile' && ok run-locked-to-profile || bad run-locked-to-profile
+
+# --- init with effort: bracket + refine, grow-first for efforts that hold up, A round reuse, matrix, pick --effort (own store)
+export CODESCAN_HOME=$W/state-init
+# low effort loses all but 2 files per chunk above 16KB; high/max hold up at every size; medium in between
+efr() { case $2 in low) { [ "$3" -le 16 ] || [ "$5" -le 2 ]; } && echo 1 || echo 0;; medium) { [ "$3" -le 16 ] || [ "$5" -le 6 ]; } && echo 1 || echo 0;; *) echo 1;; esac; }
+o=$(B init start --models eff-model --sample-kb 40 --medium 16)
+has "$o" '3 candidate(s) \[eff-model low, eff-model high, eff-model max\]' && has "$o" 'screen at 16/36KB' && ok init-effort-bracket || bad "init-effort-bracket: $o"
+initsim 1 efr
+r=$(B init status)
+has "$r" 'eff-model medium' && ok init-effort-refine || bad "init-effort-refine: $r"
+has "$r" 'eff-model high \[done\] → 36KB' && has "$r" 'eff-model low \[done\] → 16KB' && ok init-effort-sizes || bad "init-effort-sizes: $r"
+n=$(B sql "select count(*) from scans s join calibrations c on c.id=s.cal_id where c.init_id=1 and c.effort='high' and json_extract(s.options_json,'$.chunkKb')<16" | tail -1)
+[ "$n" = 0 ] && ok init-grow-first || bad "init-grow-first: $n rounds below 16KB for high"
+n=$(B sql "select count(*) from scans s join calibrations c on c.id=s.cal_id where c.init_id=1 and c.effort='high' and json_extract(s.options_json,'$.batch')='a'" | tail -1)
+[ "$n" = 1 ] && ok init-a-reuse || bad "init-a-reuse: $n A rounds for high"
+rec=$(B init report | sed -n 's/^recommended: eff-model \([a-z]*\) .*/\1/p')
+o=$(B init pick eff-model 2>&1); [ -n "$rec" ] && has "$o" "effort $rec," && ok init-pick-recommended-effort || bad "init-pick-recommended-effort: [$rec] $o"
+o=$(B init pick eff-model --effort high); has "$o" 'effort high, chunk size 36KB' && has "$(B profile show default)" 'effort=high' && ok init-pick-effort || bad "init-pick-effort: $o"
+has "$(B sql "select value from config where key='chunk_kb:eff-model@high'")" 36 && ok init-chunk-per-effort || bad init-chunk-per-effort
+o=$(B init start --models eff-model --matrix --sizes 16 --sample-kb 40 --medium 16)
+has "$o" '5 candidate(s)' && has "$o" 'every candidate runs 16KB (no search)' && ok init-matrix-start || bad "init-matrix-start: $o"
+initsim 2 efr
+has "$INITOUT" '^DONE init 2' && ! has "$INITOUT" 'pruned' && [ "$(grep -o 'done 16KB' <<<"$INITOUT" | wc -l)" = 5 ] && ok init-matrix || bad "init-matrix: $INITOUT"
+export CODESCAN_HOME=$W/state
 
 # --- upgrade: a store made by the previous release gets legacy profiles, keeps its ledger
 OLD=2faaeaa270ecbe8a689c2a67403b2e36389fcf2b   # 1.7.0, the last release before registered profiles
