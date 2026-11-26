@@ -23,19 +23,23 @@ Never add Claude/Anthropic attribution to issue titles or bodies.
 (default high), `require_triage` (default confirmed; `any` = open+confirmed), `priority_map`
 (JSON), `issue_type`/`components` (Jira), `title_template`, `body_template` (file path; variables
 `{{title}} {{severity}} {{severity_upper}} {{type}} {{category}} {{path}} {{basename}} {{line}} {{count}}
-{{commit}} {{short_commit}} {{findings}} {{locations}} {{severities}}`), `max_per_run`,
+{{commit}} {{short_commit}} {{findings}} {{locations}} {{severities}}`), `max_per_run`, `dedupe_trackers` (comma list a finding must have been searched in, e.g. `gh:o/r,jira:PROJ`),
 `code_repo` (owner/repo for permalinks), `marker` (yes/no). Set with `$CS report-config set <k> <v>`.
 One-off overrides on render: `--target`, `--group-by`, `--min-severity`, `--triage`, `--max`,
 `--label`, plus any query filter (`--path`, `--severity`, `--ids`, ...).
 
 ## File
-1. Avoid refiling: run the tracker matching from `/code-scan:dupes` (sync → match → adjudicate →
-   link) unless it was done in this session. Run `$CS dupes` if `group_by` is dupe-group.
-2. `$CS render [overrides]` → prints draft count, warnings (e.g. commit not pushed — tell the user;
-   permalinks need it on the remote) and a manifest path. 0 drafts → say why (no confirmed
-   findings? use `/code-scan:triage`, or `--triage any`).
+1. Avoid refiling: findings are checked for an existing report by the auto-triage agent that validates
+   them (`/code-scan:auto-triage --repo … [--jira …]`). `render` files only findings whose triager reported a
+   successful (`done`) search of every tracker in `dedupe_trackers` (default: the target); the rest are listed
+   as HELD. Run `$CS dupes` if `group_by` is dupe-group.
+2. `$CS render [overrides]` → prints draft count, HELD findings, warnings (e.g. commit not pushed — tell the
+   user; permalinks need it on the remote) and a manifest path. HELD findings: re-triage them with the command
+   it prints; never pass `--allow-unsearched` unless the user explicitly says to file without a duplicate check.
+   0 drafts → say why (no confirmed findings? use `/code-scan:triage`, or `--triage any`).
 3. `$CS drafts` and show the user: target, the draft list (titles), and the full body of the first
-   draft (read that one body file only). Ask for confirmation.
+   draft (read that one body file only). Ask for confirmation — every time, even if the user asked earlier
+   to "publish" or "file": filing is public and hard to undo, and the drafts are what they approve.
 4. On yes:
    - GitHub: `$CS file-gh` (or `--drafts d-..,d-..` for a subset). It creates the issues and records them.
    - Jira: for each draft in the manifest, create the issue with the Atlassian MCP create-issue

@@ -126,6 +126,11 @@ export CODESCAN_HOME=$W/state-codex
 o=$(B auto-triage start --group-size 1 --runner cursor); has "$o" 'RUN .*auto-triage run 1' && has "$o" '"runner":"cursor"' || bad "at-start: $o"
 o=$(B auto-triage run 2>&1); st=$(B auto-triage status)
 has "$st" 'groups: 1 done' && has "$st" 'real 1' && ok auto-triage-run || bad "auto-triage-run: $o // $st"
+# codex triagers that must search GitHub get a networked sandbox outside the checkout
+: > "$FAKE_LOG"
+o=$(B auto-triage start --recheck --triage all --group-size 5 --runner codex --repo acme/toy --no-preflight 2>&1); o=$(B auto-triage run 2>&1); st=$(B auto-triage status)
+l=$(grep '^codex ' "$FAKE_LOG" | head -1)
+has "$l" 'workspace-write -c sandbox_workspace_write.network_access=true' && ! has "$l" "-C $W/repo " && has "$st" 'duplicate search in gh:acme/toy: done 1, FAILED 0' && ok codex-triage-network || bad "codex-triage-network: $l // $st"
 
 # --- calibration and a mixed-vendor init
 export CODESCAN_HOME=$W/state-init

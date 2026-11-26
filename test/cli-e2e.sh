@@ -20,6 +20,7 @@ sidof() { B status | sed -n 's/^scan \([0-9]*\).*/\1/p'; }
 cat > "$W/bin/gh" <<'EOF'
 #!/bin/bash
 echo "gh $*" >> "$FAKEGH_LOG"
+if [ "$1" = api ]; then [ -f "$FAKEGH_LOG.noapi" ] && { echo "error connecting to api.github.com" >&2; exit 1; }; echo acme/toy; exit 0; fi
 if [ "$1 $2" = "issue create" ]; then n=$(( $(cat "$FAKEGH_LOG.n" 2>/dev/null || echo 100) + 1 )); echo $n > "$FAKEGH_LOG.n"; echo "https://github.com/acme/toy/issues/$n"; exit 0; fi
 if [ "$1 $2" = "issue list" ]; then cat "$FAKEGH_ISSUES" 2>/dev/null || echo '[]'; exit 0; fi
 if [ "$1 $2" = "issue view" ] && [ -f "$FAKEGH_LOG.pr.$3" ]; then echo "GraphQL: Could not resolve to an issue" >&2; exit 1; fi
@@ -149,6 +150,8 @@ echo '[{"key":"PROJ-1","fields":{"summary":"x","status":{"name":"Open"},"descrip
 B report-config set labels code-scan >/dev/null
 git -C "$W/repo" remote set-url origin https://github.com/acme/toy.js.git   # dotted repo name
 r=$(B render)
+has "$r" 'HELD 3 finding(s): no successful duplicate search in gh:acme/toy' && has "$r" '0 draft' && ok render-holds-unsearched || bad "render-holds-unsearched: $r"
+r=$(B render --allow-unsearched)
 git -C "$W/repo" remote set-url origin https://github.com/acme/toy.git
 has "$r" '2 draft(s)' && ok render || bad "render: $r"
 body=$(B drafts | sed -n 2p | cut -f5); grep -q 'github.com/acme/toy.js/blob/' "$body" && grep -q 'code-scan:fp=' "$body" && ok permalinks-marker || bad permalinks-marker
@@ -160,7 +163,7 @@ assert idx and all(lines[i].startswith('https://') and lines[i-1] == '' and line
 PY
 has "$(B file-gh)" 'filed 2' && ok file-gh || bad file-gh
 grep -q -- '--label code-scan' "$FAKEGH_LOG" && ok labels || bad labels
-has "$(B render)" '0 draft' && ok no-refile || bad no-refile
+has "$(B render --allow-unsearched)" '0 draft' && ok no-refile || bad no-refile
 [ "$(B query --unreported | head -1)" = 'no findings match' ] && ok all-reported || bad all-reported
 
 # --- restart: only changed files, stale, plan reuse, fixed->reopen
@@ -455,12 +458,23 @@ o=$(B auto-triage claim "$run"); has "$o" 'GROUP 2 ' && ok at-claim-next || bad 
 [ "$(B auto-triage claim "$run")" = NONE ] && ok at-claim-none || bad at-claim-none
 has "$(B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"real","severity":"high","type":"logic","fix_loc":1,"issue":null,"note":"x"}]' 2>&1)" 'missing: #6 #7' && ok at-reject-missing || bad at-reject-missing
 o=$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"huge","fix_loc":1,"issue":null,"note":""}]' 2>&1); has "$o" 'note is required' && has "$o" 'type must be one of' && ok at-reject-fields || bad at-reject-fields
-B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","type":"concurrency","fix_loc":3,"issue":{"number":42,"url":"https://github.com/acme/toy/issues/42"},"note":"free then write at buf.c:1"}]' >/dev/null
+o=$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","type":"concurrency","fix_loc":3,"issue":null,"note":"x"}]' 2>&1); has "$o" 'issue_search is required' && ok at-search-required || bad "at-search-required: $o"
+o=$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","type":"concurrency","fix_loc":3,"issue":null,"issue_search":{"gh:acme/toy":{"status":"done","queries":[]}},"note":"x"}]' 2>&1); has "$o" 'needs the queries you ran' && ok at-search-queries || bad "at-search-queries: $o"
+B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","type":"concurrency","fix_loc":3,"issue":{"number":42,"url":"https://github.com/acme/toy/issues/42"},"issue_search":{"gh:acme/toy":{"status":"done","queries":["buf free","use after free buf.c"]}},"note":"free then write at buf.c:1"}]' >/dev/null
 o=$(B show 8); has "$o" 'confirmation=confirmed' && has "$o" 'triage=confirmed' && has "$o" 'fix_loc=3' && has "$o" '\[severity: high → medium\]' && has "$o" 'linked_existing: gh:acme/toy 42' && has "$o" 'type=concurrency (set by triage)' && has "$o" '\[type: memory-safety → concurrency\]' && ok at-submit-applied || bad "at-submit-applied: $o"
 has "$(B auto-triage submit "$run" 1 <<<'[]' 2>&1)" 'already submitted' && ok at-resubmit || bad at-resubmit
-B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"false_positive","severity":"high","type":"memory-safety","fix_loc":0,"issue":null,"note":"loop bound is n-1"},{"id":6,"verdict":"wontfix","severity":"low","type":"memory-safety","fix_loc":2,"issue":null,"note":"test helper"},{"id":7,"verdict":"unsure","severity":"high","type":"memory-safety","fix_loc":2,"issue":null,"note":"depends on caller"}]' >/dev/null
+B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"false_positive","severity":"high","type":"memory-safety","fix_loc":0,"issue":null,"note":"loop bound is n-1"},{"id":6,"verdict":"wontfix","severity":"low","type":"memory-safety","fix_loc":2,"issue":null,"note":"test helper"},{"id":7,"verdict":"unsure","severity":"high","type":"memory-safety","fix_loc":2,"issue":null,"issue_search":{"gh:acme/toy":{"status":"failed","error":"error connecting to api.github.com"}},"note":"depends on caller"}]' >/dev/null
 has "$(B show 5)" 'triage=false_positive' && has "$(B show 6)" 'triage=wontfix' && has "$(B show 7)" 'confirmation=not_confirmed' && has "$(B show 7)" 'triage=open' && ok at-verdict-map || bad at-verdict-map
 o=$(B auto-triage status "$run"); has "$o" '2 done' && has "$o" 'real 1, false_positive 1, wontfix 1, unsure 1' && has "$o" 'severity changed 2' && has "$o" 'type changed 1' && has "$o" 'memory-safety→concurrency' && ok at-status || bad "at-status: $o"
+has "$o" 'duplicate search in gh:acme/toy: done 1, FAILED 1, missing 0' && ok at-status-search || bad "at-status-search: $o"
+# render files a confirmed finding only after a successful search; a failed search keeps it held
+B triage 7 --set confirmed >/dev/null; B unlink 8 >/dev/null 2>&1
+r=$(B render --ids 7,8 --triage confirmed --min-severity low)
+has "$r" 'HELD 1 finding(s)' && has "$r" '#7 .*gh:acme/toy: failed' && has "$r" '1 draft' && ok render-gate-search || bad "render-gate-search: $r"
+B triage 7 --set open >/dev/null; B link 8 gh:acme/toy 42 --kind linked_existing >/dev/null
+# start refuses when gh cannot reach the repo; claim lists issue numbers cited near the finding
+touch "$FAKEGH_LOG.noapi"; o=$(B auto-triage start 7 --recheck --repo acme/toy 2>&1); rm -f "$FAKEGH_LOG.noapi"
+has "$o" 'cannot reach GitHub repo acme/toy' && ok at-preflight || bad "at-preflight: $o"
 has "$(B query --max-fix-loc 2 --triage all --sort fix_loc)" '#7' && ! has "$(B query --max-fix-loc 2 --triage all)" '#8	' && ok at-fix-loc-filter || bad at-fix-loc-filter
 has "$(B auto-triage plan)" 'no findings to triage' && has "$(B auto-triage plan --recheck --severity high+)" '#7' && ok at-recheck || bad at-recheck
 

@@ -117,13 +117,16 @@ const RUNNERS = {
     },
   },
   codex: {
-    bins: ['codex'], vendor: 'openai', stdin: true,
+    bins: ['codex'], vendor: 'openai', stdin: true, networkScratchCwd: true,
     argv: (o) => {
       const extra = extraArgs('codex', o);
       // codex rejects a repeated --sandbox: a sandbox given in the extra args replaces the read-only default
       const ownSandbox = extra.some((x) => /^(-s|--sandbox|--sandbox=.*|--dangerously-bypass-approvals-and-sandbox|--yolo)$/.test(x));
+      // read-only has no network; agents that must search issues (o.network) get workspace-write with network on,
+      // run from a scratch directory (runAgent) so the writable workspace is not the checkout
       return ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-C', o.cwd,
-        ...(o.full ? ['--dangerously-bypass-approvals-and-sandbox'] : ownSandbox ? [] : ['--sandbox', 'read-only']),
+        ...(o.full ? ['--dangerously-bypass-approvals-and-sandbox'] : ownSandbox ? []
+          : o.network ? ['--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true'] : ['--sandbox', 'read-only']),
         ...(o.model ? ['-m', o.model] : []), ...effortArgs('codex', o), ...extra, '-'];
     },
     parse(stdout) {
@@ -423,7 +426,7 @@ function killAll(sig = 'SIGTERM') {
 /**
  * Run one agent. Resolves (never rejects) with {ok, text, usage, costUsd, model, exit, error, ms, pid}.
  */
-function runAgent({ runner, model, effort, prompt, cwd, full = false, extra, timeoutMs = 45 * 60 * 1000, tmpDir, onSpawn }) {
+function runAgent({ runner, model, effort, prompt, cwd, full = false, network = false, extra, timeoutMs = 45 * 60 * 1000, tmpDir, onSpawn }) {
   const r = RUNNERS[runner];
   const bin = binOf(runner);
   if (!r || !bin) return Promise.resolve({ ok: false, error: `${runner} CLI not found`, exit: null, ms: 0 });
@@ -437,11 +440,17 @@ function runAgent({ runner, model, effort, prompt, cwd, full = false, extra, tim
     promptFile = f;
     p = `Read the file ${f} completely (it is long; read all of it) and follow the instructions in it exactly. Your final reply is what that file asks for.`;
   }
+  let scratch = null;
+  if (network && !full && r.networkScratchCwd) {
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'code-scan-net-'));
+    cwd = scratch;
+  }
   const cleanup = () => {
+    if (scratch) { try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) { /* already gone */ } }
     if (promptFile) { try { fs.unlinkSync(promptFile); } catch (e) { /* already gone */ } }
     if (ownDir) { try { fs.rmSync(ownDir, { recursive: true, force: true }); } catch (e) { /* already gone */ } }
   };
-  const o = { prompt: p, model, effort, cwd, full, extra };
+  const o = { prompt: p, model, effort, cwd, full, network, extra };
   const args = r.argv(o);
   const env = { ...process.env, ...(r.env ? r.env(o) : {}) };
   const t0 = Date.now();
