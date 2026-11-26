@@ -177,7 +177,7 @@ function repoRoot() {
 }
 
 function git(args, opts = {}) {
-  const r = spawnSync('git', args, {
+  const r = RN.spawnSyncIn('git', args, {
     cwd: repoRoot(), encoding: opts.buffer ? 'buffer' : 'utf8',
     maxBuffer: 256 * 1024 * 1024, input: opts.input,
   });
@@ -203,7 +203,12 @@ function stateDir() {
     .trim().split('\n').filter(Boolean).sort();
   const key = sha1(roots[0] || repoRoot(), 12);
   const d = path.join(base, 'code-scan', key);
-  fs.mkdirSync(d, { recursive: true });
+  try { fs.mkdirSync(d, { recursive: true }); } catch (e) {
+    const sandboxed = !!(process.env.CODEX_SANDBOX || process.env.CODEX_SANDBOX_NETWORK_DISABLED);
+    die(`cannot create the state directory ${d}: ${e.code || e.message}${sandboxed
+      ? ' — the Codex sandbox blocks it: run code-scan outside the sandbox (request escalation), or set CODESCAN_HOME to a writable directory'
+      : ' — set CODESCAN_HOME (or XDG_CACHE_HOME) to a writable directory'}`);
+  }
   return d;
 }
 
@@ -356,9 +361,17 @@ let DB = null;
 function db() {
   if (DB) return DB;
   const p = path.join(stateDir(), 'codescan.db');
-  DB = new DatabaseSync(p, { timeout: 30000 });
-  DB.exec('PRAGMA busy_timeout=30000;');
-  if (DB.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal') DB.exec('PRAGMA journal_mode=WAL;');
+  try {
+    DB = new DatabaseSync(p, { timeout: 30000 });
+    DB.exec('PRAGMA busy_timeout=30000;');
+    if (DB.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal') DB.exec('PRAGMA journal_mode=WAL;');
+  } catch (e) {
+    DB = null;
+    if (process.env.CODEX_SANDBOX || process.env.CODEX_SANDBOX_NETWORK_DISABLED) {
+      die(`cannot open ${p}: ${e.message} — the Codex sandbox blocks writes there: run code-scan outside the sandbox (request escalation)`);
+    }
+    throw e;
+  }
   if (!DB.prepare("SELECT 1 FROM sqlite_master WHERE name='cal_findings'").get()) DB.exec(SCHEMA);
   const scanCols = DB.prepare('PRAGMA table_info(scans)').all().map((c) => c.name);
   if (!scanCols.includes('kind')) DB.exec("ALTER TABLE scans ADD COLUMN kind TEXT NOT NULL DEFAULT 'scan'");
@@ -416,8 +429,10 @@ function db() {
     usd REAL, usd_estimated INTEGER NOT NULL DEFAULT 0, error TEXT);
   CREATE INDEX IF NOT EXISTS agent_runs_scan ON agent_runs(scan_id);
   CREATE INDEX IF NOT EXISTS agent_runs_tr ON agent_runs(triage_run_id);`);
-  if (!DB.prepare('PRAGMA table_info(triage_runs)').all().some((c) => c.name === 'runner')) {
-    try { DB.exec('ALTER TABLE triage_runs ADD COLUMN runner TEXT'); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  const trunCols = DB.prepare('PRAGMA table_info(triage_runs)').all().map((c) => c.name);
+  for (const col of ['runner', 'effort']) {
+    if (trunCols.includes(col)) continue;
+    try { DB.exec(`ALTER TABLE triage_runs ADD COLUMN ${col} TEXT`); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
   }
   // registered review profiles: immutable, versioned specs of everything that shapes a review
   DB.exec(`CREATE TABLE IF NOT EXISTS review_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
@@ -538,7 +553,7 @@ function promptFromFlags(f, fallbackName = 'default') {
 // and repeated. Re-registering an unchanged spec returns the existing version; a changed one is the
 // next version of that name. Run-time knobs (lanes, spending limits, commit) stay on the scan.
 
-const PROFILE_SPEC_FLAGS = ['model', 'runner', 'runner-args', 'prompt', 'prompt-file', 'chunk-kb', 'only', 'include', 'exclude',
+const PROFILE_SPEC_FLAGS = ['model', 'runner', 'effort', 'runner-args', 'prompt', 'prompt-file', 'chunk-kb', 'only', 'include', 'exclude',
   'include-tests', 'no-plan', 'no-dismissed', 'reset-scope'];
 
 function canon(v) {
@@ -610,6 +625,8 @@ function specFromFlags(f) {
   try { r = RN.resolve({ flagRunner: f.runner, flagModel: model }); } catch (e) { die(e.message); }
   if (!r.model || !RN.splitModel(r.model).model) die(`--model ${f.model}: name the model, not just the runner (e.g. ${r.runner}:<model>)`);
   const cal = cfgGet(`chunk_kb:${modelId(r.model)}`);
+  const effErr = RN.effortError(r.runner, f.effort);
+  if (effErr) die(effErr);
   if (f['chunk-kb'] !== undefined && !(Number(f['chunk-kb']) > 0)) die('--chunk-kb must be a positive number (KB)');
   const spec = {
     v: 1,
@@ -617,6 +634,8 @@ function specFromFlags(f) {
     reviewer: reviewerSnapshot(),
     runner: r.runner,
     model: modelId(r.model),
+    // absent unless set, so profiles registered without it keep their hash
+    effort: f.effort ? String(f.effort) : undefined,
     runnerArgs: f['runner-args'] !== undefined ? String(f['runner-args']).split(/\s+/).filter(Boolean) : RN.extraArgs(r.runner),
     chunkKb: f['chunk-kb'] !== undefined ? Number(f['chunk-kb']) : cal ? Number(cal) : DEFAULT_CHUNK_KB,
     scope: { only: scopeList(f.only), include: scopeList(f.include), exclude: scopeList(f.exclude), includeTests: !!f['include-tests'] },
@@ -675,7 +694,7 @@ function runRecord(p, extra = {}) {
   const s = p.spec;
   const runner = s.runner && RN.RUNNERS[s.runner] ? s.runner : null;
   const bin = runner ? RN.binOf(runner) : null;
-  const argv = runner ? RN.RUNNERS[runner].argv({ prompt: '<prompt>', model: s.model ? RN.splitModel(s.model).model : null, cwd: '<repo>', full: false,
+  const argv = runner ? RN.RUNNERS[runner].argv({ prompt: '<prompt>', model: s.model ? RN.splitModel(s.model).model : null, effort: s.effort, cwd: '<repo>', full: false,
     extra: Array.isArray(s.runnerArgs) ? s.runnerArgs : undefined }) : null;
   const host = RN.detectHost();
   const cur = reviewerSnapshot();
@@ -1000,6 +1019,8 @@ function nextObj(scan, plan) {
   const so = JSON.parse(getScan(scan.id).options_json);
   const alias = modelAlias(so.model);
   if (alias) o.model = alias;
+  const sp = scanSpec(getScan(scan.id));
+  if (sp && sp.effort) o.effort = sp.effort;
   if (so.lanes) o.lanes = so.lanes;
   o.runner = so.runner || null;
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
@@ -1150,7 +1171,7 @@ function createBatch(items, f, supersede = []) {
   const follow = claude.filter((r) => r !== main).map((r) => {
     const x = nextObj(r.scan, false);
     if (JSON.parse(r.scan.options_json).planFrom) x.workers = Math.max(x.workers, o.workers, 1);
-    return { scanId: x.scanId, workers: x.workers, ...(x.model ? { model: x.model } : {}), ...(x.lanes ? { lanes: x.lanes } : {}) };
+    return { scanId: x.scanId, workers: x.workers, ...(x.model ? { model: x.model } : {}), ...(x.effort ? { effort: x.effort } : {}), ...(x.lanes ? { lanes: x.lanes } : {}) };
   });
   if (follow.length) o.follow = follow;
   out('NEXT ' + JSON.stringify(o));
@@ -2563,7 +2584,7 @@ function cmdStatusline(a) {
     }
   } catch (e) { /* never break the status line over a cache write */ }
   if (a.pos.length) {
-    const r = spawnSync(a.pos[0], a.pos.slice(1), { input: raw, encoding: 'utf8', shell: a.pos.length === 1 });
+    const r = RN.spawnSyncIn(a.pos[0], a.pos.slice(1), { input: raw, encoding: 'utf8', shell: a.pos.length === 1 });
     process.stdout.write(r.stdout || '');
     return;
   }
@@ -3010,7 +3031,7 @@ function scanProfileRef(s) {
   const p = profileById(s.profile_id);
   return p ? `${profileLabel(p)} ${p.hash}` : s.profile_name;
 }
-function specModel(spec) { return spec.model || (spec.runner ? `${spec.runner}:(its default)` : '(session model)'); }
+function specModel(spec) { return (spec.model || (spec.runner ? `${spec.runner}:(its default)` : '(session model)')) + (spec.effort ? ` effort=${spec.effort}` : ''); }
 function scopeText(sc) {
   if (!sc) return 'whole repo';
   const parts = [];
@@ -3020,7 +3041,7 @@ function scopeText(sc) {
   if (sc.includeTests) parts.push('with tests');
   return parts.join(' ') || 'whole repo';
 }
-const SPEC_FIELDS = [['prompt', 'prompt text'], ['reviewer', 'reviewer instructions'], ['runner', 'runner'], ['model', 'model'],
+const SPEC_FIELDS = [['prompt', 'prompt text'], ['reviewer', 'reviewer instructions'], ['runner', 'runner'], ['model', 'model'], ['effort', 'reasoning effort'],
   ['runnerArgs', 'runner CLI args'], ['chunkKb', 'chunk size'], ['scope', 'scope'], ['planner', 'planner'], ['dismissedContext', 'dismissed-findings context']];
 /** Fields that differ between two specs, as labels. */
 function specDiff(a, b) {
@@ -3120,7 +3141,7 @@ function cmdProfile(a) {
     return;
   }
   if (['add', 'rm'].includes(sub)) die(`review-focus texts are prompts now: \`prompt ${sub} …\`; a review profile is registered with \`profile register\``);
-  die('usage: profile list [--all-versions] [--retired] | register <name> --prompt p|--prompt-file f --model m [--runner-args "…"] [--chunk-kb N] [--only g] [--include g] [--exclude g] [--include-tests] [--no-plan] [--no-dismissed] [--note s] | show <ref> [--full] [--json] | diff <ref> <ref> | default [<ref>] | retire|unretire <ref>');
+  die('usage: profile list [--all-versions] [--retired] | register <name> --prompt p|--prompt-file f --model m [--effort e] [--runner-args "…"] [--chunk-kb N] [--only g] [--include g] [--exclude g] [--include-tests] [--no-plan] [--no-dismissed] [--note s] | show <ref> [--full] [--json] | diff <ref> <ref> | default [<ref>] | retire|unretire <ref>');
 }
 
 function cmdPrompt(a) {
@@ -4160,6 +4181,7 @@ function atNext(run) {
   const o = { cli: CLI, root: repoRoot(), runId: run.id, groups: pending, lanes: Math.min(run.lanes || 10, Math.max(1, pending)) };
   const alias = modelAlias(run.model);
   if (alias) o.model = alias;
+  if (run.effort) o.effort = run.effort;
   o.runner = run.runner || null;
   if (process.env.CODESCAN_HOME) o.home = path.resolve(process.env.CODESCAN_HOME);
   return (pending ? `RUN ${cliPrefix()} auto-triage run ${run.id} --detach\n` : '') + 'NEXT ' + JSON.stringify(o);
@@ -4190,14 +4212,16 @@ function atStart(a) {
   let rr;
   try { rr = RN.resolve({ flagRunner: a.f.runner, flagModel: a.f.model ? modelId(a.f.model) : null }); } catch (e) { die(e.message); }
   const model = rr.model ? modelId(rr.model) : null;
+  const effErr = rr.runner ? RN.effortError(rr.runner, a.f.effort) : null;
+  if (effErr) die(effErr);
   const run = tx((d) => {
-    const r = d.prepare("INSERT INTO triage_runs(created,repo,group_size,model,lanes,status,runner) VALUES(?,?,?,?,?,'active',?)")
-      .run(now(), repo, n, model, lanes, rr.runner);
+    const r = d.prepare("INSERT INTO triage_runs(created,repo,group_size,model,lanes,status,runner,effort) VALUES(?,?,?,?,?,'active',?,?)")
+      .run(now(), repo, n, model, lanes, rr.runner, a.f.effort ? String(a.f.effort) : null);
     const ins = d.prepare("INSERT INTO triage_groups(run_id,gid,ids_json,state) VALUES(?,?,?,'pending')");
     groups.forEach((g, i) => ins.run(r.lastInsertRowid, i + 1, JSON.stringify(g.map((x) => x.id))));
     return d.prepare('SELECT * FROM triage_runs WHERE id=?').get(r.lastInsertRowid);
   });
-  out(`auto-triage run ${run.id}${repo ? ` (issues searched in ${repo})` : ' (no --repo: GitHub issue search skipped)'}; runner ${rr.runner || 'none'} — ${rr.why}`);
+  out(`auto-triage run ${run.id}${repo ? ` (issues searched in ${repo})` : ' (no --repo: GitHub issue search skipped)'}; runner ${rr.runner || 'none'}${run.effort ? ` effort ${run.effort}` : ''} — ${rr.why}`);
   atListing(groups);
   out(atNext(run));
 }
@@ -4206,6 +4230,11 @@ function atContinue(a) {
   const run = atRun(a.pos[0]);
   db().prepare("UPDATE triage_runs SET status='active' WHERE id=?").run(run.id);
   if (a.f.concurrency !== undefined) db().prepare('UPDATE triage_runs SET lanes=? WHERE id=?').run(parseConcurrency(a.f.concurrency), run.id);
+  if (a.f.effort !== undefined) {
+    const effErr = RN.effortError(run.runner || 'claude', a.f.effort);
+    if (effErr) die(effErr);
+    db().prepare('UPDATE triage_runs SET effort=? WHERE id=?').run(a.f.effort ? String(a.f.effort) : null, run.id);
+  }
   out(atNext(atRun(run.id)));
 }
 
@@ -4388,7 +4417,7 @@ function atStatus(a) {
   const run = atRun(a.pos[0]);
   const gs = d.prepare('SELECT state, COUNT(*) n FROM triage_groups WHERE run_id=? GROUP BY state').all(run.id);
   const gc = Object.fromEntries(gs.map((x) => [x.state, x.n]));
-  out(`auto-triage run ${run.id} [${run.status}] group size ${run.group_size} repo=${run.repo || '-'}${run.task_id ? ` task=${run.task_id}` : ''}`);
+  out(`auto-triage run ${run.id} [${run.status}] group size ${run.group_size}${run.effort ? ` effort ${run.effort}` : ''} repo=${run.repo || '-'}${run.task_id ? ` task=${run.task_id}` : ''}`);
   out(`groups: ${gc.done || 0} done, ${gc.claimed || 0} in progress, ${gc.pending || 0} pending`);
   const rs = d.prepare('SELECT * FROM triage_results WHERE run_id=? ORDER BY finding_id').all(run.id);
   if (!rs.length) return;
@@ -4415,7 +4444,7 @@ const INFLIGHT = { chunks: new Map(), groups: new Map() };
 
 /** Run a code-scan subcommand in a child process; claims and submits keep their own transactions. */
 function self(args, input) {
-  const r = spawnSync(process.execPath, [CLI, '-C', repoRoot(), ...args], { encoding: 'utf8', input: input ?? '', maxBuffer: 256 * 1024 * 1024, env: process.env });
+  const r = RN.spawnSyncIn(process.execPath, [CLI, '-C', repoRoot(), ...args], { encoding: 'utf8', input: input ?? '', maxBuffer: 256 * 1024 * 1024, env: process.env });
   return { ok: r.status === 0, out: r.stdout || '', err: String(r.stderr || '').replace(/^code-scan: /gm, '').trim() };
 }
 
@@ -4441,7 +4470,7 @@ function runnerFor(f, stored = {}) {
 async function agentCall({ ctx, prompt, kind, unit, full = false }) {
   const started = now();
   let pid = null;
-  const r = await RN.runAgent({ runner: ctx.runner, model: ctx.model ? RN.splitModel(ctx.model).model : null, prompt, cwd: repoRoot(), full, extra: ctx.extra,
+  const r = await RN.runAgent({ runner: ctx.runner, model: ctx.model ? RN.splitModel(ctx.model).model : null, effort: ctx.effort, prompt, cwd: repoRoot(), full, extra: ctx.extra,
     tmpDir: path.join(stateDir(), 'prompts'), onSpawn: (p) => { pid = p; } });
   if (!r.model) r.model = RN.defaultModel(ctx.runner);
   const priced = typeof r.costUsd === 'number' ? { usd: r.costUsd, estimated: false } : usageUsd(r.model || ctx.model, ctx.runner, r.usage);
@@ -4606,6 +4635,7 @@ async function cmdRun(a) {
   if (spec) {
     ctx = runnerFor({}, { runner: spec.runner || so.runner, model: spec.model || so.model });
     if (Array.isArray(spec.runnerArgs)) ctx.extra = spec.runnerArgs;
+    if (spec.effort) ctx.effort = spec.effort;
     ctx.why = `review profile ${scan.profile_name}`;
     const rr = scan.run_json ? JSON.parse(scan.run_json) : null;
     const v = RN.version(ctx.runner);
@@ -4725,6 +4755,11 @@ async function atRunCmd(a) {
   if (run.status !== 'active') die(`auto-triage run ${run.id} is ${run.status} — \`auto-triage continue\` it first`);
   const ctx = runnerFor(a.f, { model: run.model, runner: run.runner });
   if (ctx.runner !== run.runner || ctx.model !== run.model) db().prepare('UPDATE triage_runs SET runner=?, model=? WHERE id=?').run(ctx.runner, ctx.model, run.id);
+  if (run.effort) {
+    const effErr = RN.effortError(ctx.runner, run.effort);
+    if (effErr) die(`auto-triage run ${run.id}: ${effErr} — \`auto-triage continue ${run.id} --effort <level>\` (empty to clear)`);
+    ctx.effort = run.effort;
+  }
   if (run.task_id !== `pid:${process.pid}` && pidAlive(run.task_id)) die(`auto-triage run ${run.id} already has a runner (${run.task_id})`);
   const pending = db().prepare("SELECT COUNT(*) n FROM triage_groups WHERE run_id=? AND state!='done'").get(run.id).n;
   const lanes = Math.min(a.f.concurrency !== undefined ? parseConcurrency(a.f.concurrency) : run.lanes || 10, Math.max(1, pending));
@@ -4732,7 +4767,7 @@ async function atRunCmd(a) {
     const logPath = path.join(stateDir(), 'runs', `auto-triage-${run.id}.log`);
     const pid = detachSelf(logPath);
     db().prepare('UPDATE triage_runs SET task_id=? WHERE id=?').run(`pid:${pid}`, run.id);
-    out(`RUNNING auto-triage run ${run.id} on ${ctx.runner}${ctx.model ? ` (${ctx.model})` : ''}, ${lanes} lane(s): pid ${pid}, log ${logPath}`);
+    out(`RUNNING auto-triage run ${run.id} on ${ctx.runner}${ctx.model ? ` (${ctx.model})` : ''}${ctx.effort ? ` effort ${ctx.effort}` : ''}, ${lanes} lane(s): pid ${pid}, log ${logPath}`);
     return;
   }
   db().prepare('UPDATE triage_runs SET task_id=? WHERE id=?').run(`pid:${process.pid}`, run.id);
@@ -4770,9 +4805,12 @@ async function atRunCmd(a) {
 /** One isolated agent on a prompt file (used by verify outside Claude Code). Prints its reply. */
 async function cmdRunPrompt(a) {
   const file = a.pos[0];
-  if (!file) die('usage: run-prompt <file> [--runner r] [--model m] [--full]');
+  if (!file) die('usage: run-prompt <file> [--runner r] [--model m] [--effort e] [--full]');
   const prompt = fs.readFileSync(file, 'utf8');
   const ctx = runnerFor(a.f, {});
+  const effErr = RN.effortError(ctx.runner, a.f.effort);
+  if (effErr) die(effErr);
+  if (a.f.effort) ctx.effort = String(a.f.effort);
   onStopSignals();
   const r = await agentCall({ ctx, prompt, kind: 'prompt', full: !!a.f.full });
   if (!r.ok) die(`${ctx.runner} agent failed: ${r.error}`);
@@ -4814,7 +4852,7 @@ const INSTALL_MANIFEST = '.code-scan-installed.json';
 /** One skill's SKILL.md for a non-Claude host. */
 function renderSkill(text, name) {
   return text
-    .replace(/^If the plugin root above was not filled in.*\n/m, '')
+    .replace(/^If the plugin root above was not filled in.*\n\n?/m, '')
     .replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, PLUGIN_ROOT)
     .replace(/^name:\s*.*$/m, `name: code-scan-${name}`)
     .replace(/\/code-scan:([a-z-]+)/g, 'the code-scan-$1 skill');
@@ -4854,7 +4892,7 @@ function cmdInstall(a) {
 // ---------------------------------------------------------------------- main
 
 const HELP = `code-scan.js [-C repo] <command> [...]
-profiles:  profile register <name> --prompt p|--prompt-file f --model m|runner:m [--runner-args "…"] [--chunk-kb N] [--only g] [--include g] [--exclude g]
+profiles:  profile register <name> --prompt p|--prompt-file f --model m|runner:m [--effort e] [--runner-args "…"] [--chunk-kb N] [--only g] [--include g] [--exclude g]
                  [--include-tests] [--no-plan] [--no-dismissed] [--note s]     (immutable; a changed spec is the next version name@N)
            profile list [--all-versions] [--retired] [--json] | show <ref> [--full] [--json] | diff <ref> <ref> | default [<ref>] | retire|unretire <ref>
            refs: name (latest version) | name@N | #id | hash prefix
@@ -4867,7 +4905,7 @@ store:     scans [list] [--profile p] [--model m] [--commit c] [--status s] [--l
 compare:   compare <scan> <scan> […] [--severity s] [--type t] [--path p] [--list none|diff|all] [--limit n] [--json]
            (same commit: overlap, disagreements, quality vs cost; same profile at two commits: new / gone / still there)
 runner:    run [scan] [--concurrency N] [--detach]     (runner, model and CLI args come from the scan's profile)
-           runners  (installed agent CLIs, detected host, what a new scan would use) | run-prompt <file> [--runner r] [--model m] [--full]
+           runners  (installed agent CLIs, detected host, what a new scan would use) | run-prompt <file> [--runner r] [--model m] [--effort e] [--full]
            auto-triage run [run] | calibrate run [id] | init run [id]   (same flags; agents are headless CLI processes)
 install:   install [--user|--project|--dir d] [--uninstall]   (render skills into ~/.agents/skills for non-Claude hosts)
 planner:   plan-context <scan> | apply-plan <scan> --file plan.json
@@ -4890,8 +4928,9 @@ trackers:  tracker-sync gh [--repo o/r] [--state all] [--search q] | tracker-imp
 init:      init start [--models opus,sonnet,haiku,fable] [--prompt p] [--only g] | init report [id] [--truth f] | init pick <model> [--name default] [--prompt p] | init status
 calibrate: calibrate start --model m [--only g] [--sample-kb 200] [--medium 40] | calibrate report [id] [--truth f.json] | calibrate next [id] | calibrate status | calibrate set <m> <kb>
 verify:    verify-prompt <id> --repo owner/name --base <sha> --worktree <dir>   (prompt for a fresh verifying agent)
-auto-triage: auto-triage plan|start [ids|filters] [--group-size 5] [--recheck] [--repo owner/name] [--concurrency N] [--model m]
-           auto-triage claim <run> [--rules] | submit <run> <group> < results.json | status [run|--all] | stop|continue [run] | set-run <run> <task>
+auto-triage: auto-triage plan|start [ids|filters] [--group-size 5] [--recheck] [--repo owner/name] [--concurrency N] [--model m] [--effort e]
+           auto-triage claim <run> [--rules] | submit <run> <group> < results.json | status [run|--all] | stop|continue [run] [--effort e] | set-run <run> <task>
+effort:    --effort: claude low|medium|high|xhigh|max; codex minimal|low|medium|high|xhigh; opencode any --variant; others unsupported
 report:    report-config show|set <k> <v>|unset <k> | render [filters] [--target t] [--group-by g] [--max n]
            drafts | file-gh [--drafts d1,d2] [--dry-run] | record-filing <draft> <tracker> <key> [url]`;
 

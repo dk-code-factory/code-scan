@@ -48,7 +48,7 @@ await parallel(Array.from({ length: LANES }, () => async () => {
   let failures = 0
   while (started < groups + LANES * 2) {
     const n = ++started
-    const r = await run(PROMPT, { label: `triage ${n}`, phase: 'Triage', schema: SCHEMA, ...(args.model ? { model: args.model } : {}) })
+    const r = await run(PROMPT, { label: `triage ${n}`, phase: 'Triage', schema: SCHEMA, ...(args.model ? { model: args.model } : {}), ...(args.effort ? { effort: args.effort } : {}) })
     results.push(r)
     if (!r) { if (++failures >= 2) break; continue }
     failures = 0

@@ -9,7 +9,9 @@ description: Triage code-scan findings with agents — split the chosen findings
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
-If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+If the plugin root above was not filled in by your agent CLI (Codex, Copilot, …), the plugin root is the directory two levels above this SKILL.md: use its absolute path wherever this file says `${CLAUDE_PLUGIN_ROOT}`.
+
+**Codex:** `$CS` writes its store under `~/.cache/code-scan` and starts agent CLIs that need the network, so the Codex sandbox blocks it. Run every `$CS` command outside the sandbox: request escalation (`sandbox_permissions: "require_escalated"`, proposing the prefix rule `["node", "<plugin root>/bin/code-scan.js"]` so the user approves it once). If escalation is unavailable (approval policy `never`, e.g. `codex exec`), do not work around it: tell the user to rerun Codex with `--sandbox danger-full-access` (or approvals on).
 
 Agents only read code and search GitHub; nothing is built, run or filed. Invoking this skill is the user's
 opt-in to the agent fan-out it launches. Do not read source files or findings yourself.
@@ -38,8 +40,10 @@ issue search is skipped).
 
 ## 3. Start and launch
 
-`$CS auto-triage start <same selection> [--group-size N] --repo <owner/name> [--concurrency N] [--model m] [--runner r]`
-(`--concurrency` 1–32 agents at once, default 10; `--model`/`--runner` only if the user names one — the runner
+`$CS auto-triage start <same selection> [--group-size N] --repo <owner/name> [--concurrency N] [--model m] [--runner r] [--effort e]`
+(`--concurrency` 1–32 agents at once, default 10; `--effort` reasoning effort — claude `low…max`, codex
+`minimal…xhigh`, opencode any — only if the user asks, change it later with `auto-triage continue <run> --effort e`;
+`--model`/`--runner` only if the user names one — the runner
 otherwise is the agent CLI you are running in, as for scans). Its last lines are `RUN ...` and `NEXT {...}`.
 
 With the `Workflow` tool and `"runner":"claude"` in NEXT:

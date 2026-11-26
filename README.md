@@ -15,10 +15,22 @@ Claude Code:
 /plugin install code-scan@code-scan
 ```
 
-Codex CLI and Copilot CLI read Claude plugin manifests (`.claude-plugin/`) and `${CLAUDE_PLUGIN_ROOT}`:
+Codex CLI (native manifests: `.agents/plugins/marketplace.json`, `.codex-plugin/plugin.json`):
 
 ```text
-codex plugin marketplace add dk-code-factory/code-scan      # then: codex plugin add code-scan
+codex plugin marketplace add dk-code-factory/code-scan
+codex plugin add code-scan@code-scan
+```
+
+In Codex the skills are `code-scan:scan`, `code-scan:findings`, …. code-scan keeps its store in
+`~/.cache/code-scan` and starts `codex exec` reviewers that need the network, which the Codex sandbox
+blocks, so the skills run `code-scan.js` outside the sandbox through an escalation request (approve the
+`node …/bin/code-scan.js` prefix once). With approvals off (`codex exec`, approval policy `never`) start
+Codex with `--sandbox danger-full-access` instead.
+
+Copilot CLI reads the Claude plugin manifest (`.claude-plugin/`):
+
+```text
 copilot plugin install dk-code-factory/code-scan
 ```
 
@@ -76,6 +88,10 @@ can compare models across vendors: `init start --models sonnet,codex:gpt-6.2-sol
 Extra arguments for one CLI: `CODESCAN_<RUNNER>_ARGS` (frozen into a review profile when it is registered, or
 `profile register --runner-args "…"`; e.g. `CODESCAN_CODEX_ARGS="--sandbox workspace-write -c sandbox_workspace_write.network_access=true"`
 so triage agents can run `gh`); another binary: `CODESCAN_<RUNNER>_BIN`.
+Reasoning effort: `profile register --effort <level>` (frozen into the profile) and `auto-triage start|continue
+--effort <level>`, `run-prompt --effort <level>`: claude `--effort low|medium|high|xhigh|max`, codex
+`-c model_reasoning_effort=minimal|low|medium|high|xhigh`, opencode `--variant <any>`; Workflow agents get it as
+their `effort`. Other runners have no effort setting.
 
 ## Skills
 
@@ -110,7 +126,7 @@ A scan runs a registered review profile — an immutable spec of everything that
 |---|---|
 | prompt | the review-focus text, frozen (from the prompt library: `default`, `security`, `memory`, `concurrency`, or `prompt add`) |
 | reviewer instructions | the plugin's reviewer instructions at registration (runner reviewers and `--rules` get this copy) |
-| runner, model, runner args | e.g. `codex` / `codex:gpt-6.2-sol` / `CODESCAN_CODEX_ARGS` at registration |
+| runner, model, effort, runner args | e.g. `codex` / `codex:gpt-6.2-sol` / `--effort high` / `CODESCAN_CODEX_ARGS` at registration |
 | chunk size | the repo's calibration for that model, or `--chunk-kb` |
 | scope | `--only`, `--include`, `--exclude`, `--include-tests` |
 | planner, dismissed context | `--no-plan`, `--no-dismissed` |
