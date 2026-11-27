@@ -506,7 +506,7 @@
    "name": "scylladb/nodejs-rs-driver",
    "public": true,
    "url": "https://github.com/scylladb/nodejs-rs-driver",
-   "lang": "ts",
+   "lang": "ts+rust",
    "scans": [
     {
      "id": 16,
@@ -811,8 +811,8 @@
      },
      "triaged": 41,
      "precision": 0.98,
-     "usd": 0.25,
-     "usdPer100Kb": 0.02,
+     "usd": null,
+     "usdPer100Kb": null,
      "hours": 0.1
     }
    ],

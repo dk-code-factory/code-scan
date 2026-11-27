@@ -16,10 +16,12 @@
   <p class="muted">Data snapshot: <span id="generated">…</span> · <a href="https://github.com/dk-code-factory/code-scan">GitHub</a> ·
     <a href="https://github.com/dk-code-factory/code-scan#readme">README</a></p>
   <nav class="toc">
+    <a href="#find">Find your setup</a>
+    <a href="#pick-model">Models by language</a>
+    <a href="#pick-effort">Effort by goal</a>
+    <a href="#pick-chunk">Chunk size</a>
     <a href="#install">Install</a>
-    <a href="#pick-model">How to pick a model</a>
-    <a href="#pick-effort">How to pick an effort level</a>
-    <a href="#pick-chunk">How to pick a chunk size</a>
+    <span class="muted">Evidence:</span>
     <a href="#bench">Known-bug benchmark</a>
     <a href="#h2h">Head-to-head scans</a>
     <a href="#scans">All full scans</a>
@@ -29,24 +31,30 @@
   </nav>
 </header>
 
-<section id="install">
-<h2>Install</h2>
-<pre><code># Claude Code
-/plugin marketplace add dk-code-factory/code-scan
-/plugin install code-scan@code-scan
 
-# Codex CLI
-codex plugin marketplace add dk-code-factory/code-scan
-codex plugin add code-scan@code-scan
-
-# Any Agent Skills host
-git clone https://github.com/dk-code-factory/code-scan &amp;&amp; node code-scan/bin/code-scan.js install</code></pre>
-<p>Then run <code>/code-scan:init</code> once per repository: it benchmarks models on a sample of that repo and picks a chunk size for each.</p>
+<section id="find">
+<h2>Find your setup</h2>
+<p class="muted">Pick the language of the code you scan and what you care about most. The recommendation comes from the scans below; the evidence list shows what was actually measured on that language.</p>
+<div class="picker">
+  <label>Language <select id="pick-lang"></select></label>
+  <label>Goal <select id="pick-goal">
+    <option value="value">Best value: most bugs per dollar</option>
+    <option value="most">Find the most bugs, budget allows</option>
+    <option value="cheap">Lowest cost: a quick first pass</option>
+    <option value="claude">Claude models only</option>
+  </select></label>
+</div>
+<div id="pick-out"></div>
 </section>
 
 <section id="pick-model">
 <h2>How to pick a model</h2>
 <div class="cards" id="headline"></div>
+<h3>By language</h3>
+<p class="muted">What was measured per language. "Compared" means two or more models reviewed the same code; elsewhere only one model ran, so the general recommendation applies.
+Prices are at the recommended levels (Codex <code>xhigh</code>, Opus <code>medium</code>) plus the scans run without an explicit effort; those Codex scans used the CLI default, <code>high</code>.</p>
+<div class="table-wrap"><table id="lang-table"></table></div>
+<h3>In general</h3>
 
 <div class="rec"><strong>Default for full scans: Codex <code>gpt-6.1-sol</code> at <code>xhigh</code> effort.</strong>
 <p>On every repository where it ran next to a Claude model on the same code it found the largest severity-weighted share of issues
@@ -75,6 +83,16 @@ In the effort study below, Codex <code>xhigh</code> alone found 0.40 of the conf
 
 <section id="pick-effort">
 <h2>How to pick an effort level</h2>
+<div class="table-wrap"><table>
+<tr><th class="l">your goal</th><th class="l">Codex gpt-6.1-sol</th><th class="l">Opus 5.5</th></tr>
+<tr><td class="l">quick, cheap first pass</td><td class="l"><code>medium</code> · recall 0.23 · $0.30/100KB</td><td class="l"><code>low</code> · 0.12 · $0.78/100KB</td></tr>
+<tr><td class="l">best value</td><td class="l"><b><code>xhigh</code></b> · 0.40 · $0.75/100KB</td><td class="l"><code>medium</code> · 0.15 · $1.01/100KB</td></tr>
+<tr><td class="l">deepest single run</td><td class="l"><code>xhigh</code> (<code>max</code>: 0.41, +14% price)</td><td class="l"><code>max</code> · 0.35 · $5.89/100KB</td></tr>
+<tr><td class="l">most bugs, any budget</td><td class="l" colspan="2">two runs: Codex <code>xhigh</code> + Opus <code>max</code> · 0.66 · $6.64/100KB; cheaper: Codex <code>high</code> + <code>xhigh</code> · 0.49 · $1.18/100KB</td></tr>
+<tr><td class="l">not worth it</td><td class="l"><code>ultra</code>: 0.36 for $0.95/100KB</td><td class="l"><code>high</code>: same recall as medium, +18% price</td></tr>
+</table></div>
+<p class="note">Recall = share of the 217 confirmed issues all ten runs found together on nodejs-rs-driver (TypeScript + Rust). Effort was measured on that one repository; the trend (recall up, precision flat) is what to expect elsewhere, not the exact numbers.</p>
+<h3>Details</h3>
 <p class="muted">Ten full scans of scylladb/nodejs-rs-driver (995KB, 129 files) on one commit, sharing one plan and 40KB chunks: Codex gpt-6.1-sol at
 low → ultra and Opus 5.5 at low → max. Every finding was triaged by the same judge. Recall is measured against all 217 confirmed issues the ten runs found together.</p>
 
@@ -108,6 +126,22 @@ For critical code, run <code>xhigh</code> plus one different configuration rathe
 Only one run peaked above 60KB: Opus on cpp-rs-driver, at 90KB. Calibration costs $1–5 per model for Sonnet and Opus, $7–15 for Fable, and is reused by every later scan.</p></div>
 </section>
 
+<section id="install">
+<h2>Install</h2>
+<pre><code># Claude Code
+/plugin marketplace add dk-code-factory/code-scan
+/plugin install code-scan@code-scan
+
+# Codex CLI
+codex plugin marketplace add dk-code-factory/code-scan
+codex plugin add code-scan@code-scan
+
+# Any Agent Skills host
+git clone https://github.com/dk-code-factory/code-scan &amp;&amp; node code-scan/bin/code-scan.js install</code></pre>
+<p>Then run <code>/code-scan:init</code> once per repository: it benchmarks models on a sample of that repo and picks a chunk size for each.</p>
+</section>
+
+<div class="part" id="evidence">Evidence</div>
 <section id="bench">
 <h2>Known-bug benchmark</h2>
 <p id="bench-desc" class="muted"></p>
@@ -155,6 +189,7 @@ Share = severity-weighted share of every distinct issue either scan found. Preci
   <li>Price is list price of every token of every reviewer agent (preamble, coordination turns, re-reads), not just the code. Scans whose transcripts are gone or incomplete show no price.</li>
   <li>Precision counts only triaged findings. Most triage was done by Codex auto-triage, which may favour Codex findings.</li>
   <li>Each comparison is one run; model sampling varies between runs.</li>
+  <li>Codex scans before the effort study ran without <code>--effort</code>, so they used the Codex CLI default, <code>high</code>; Claude scans without an effort ran at Claude Code's default.</li>
 </ul>
 </section>
 

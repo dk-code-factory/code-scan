@@ -184,6 +184,108 @@
   $('triage-table').innerHTML = `<tr><th>repository</th><th>triage model</th><th>findings</th><th>real</th><th>false pos.</th><th>won't fix</th><th>unsure</th><th>severity changed</th><th>$/finding</th></tr>` +
     tri.map((t) => `<tr><td>${repoLink(t.repo)}</td><td>${t.model ? withEffort(t.model, t.effort) : '<span class="muted">not recorded</span>'}</td><td>${t.findings}</td><td>${t.verdicts.real || 0}</td><td>${t.verdicts.false_positive || 0}</td><td>${t.verdicts.wontfix || 0}</td><td>${t.verdicts.unsure || 0}</td><td>${t.severityChanged}</td><td>${t.usdPerFinding === null ? '–' : '$' + t.usdPerFinding.toFixed(3)}</td></tr>`).join('');
 
+  // ---------- languages
+  const LANGS = { go: ['Go'], rust: ['Rust'], 'c++': ['C++'], 'ts+rust': ['TypeScript', 'Rust'], ts: ['TypeScript'], js: ['JavaScript'], java: ['Java'], 'c#': ['C#'] };
+  const langsOf = (r) => LANGS[r.lang] || (r.lang ? [r.lang] : []);
+  const langNames = [...new Set(data.repos.flatMap(langsOf))].sort();
+  const reposOf = (L) => data.repos.filter((r) => L === 'any' || langsOf(r).includes(L));
+  const family = (m) => modelInfo(m).name;
+  const range = (xs, fmt) => { xs = xs.filter((v) => v !== null && v !== undefined); if (!xs.length) return '–'; const a = Math.min(...xs), b = Math.max(...xs); return a === b ? fmt(a) : `${fmt(a)}–${fmt(b)}`; };
+  function evidence(L) {
+    const items = [];
+    let compared = false;
+    for (const r of reposOf(L)) {
+      for (const c of r.compares) {
+        compared = true;
+        const [a, b] = c.scans.slice().sort((x, y) => y.share - x.share);
+        const sa = r.scans.find((s) => s.id === a.id && s.store === c.store) || {}, sb = r.scans.find((s) => s.id === b.id && s.store === c.store) || {};
+        const at = (x) => (x.usdPer100Kb ? ` at ${usd(x.usdPer100Kb)}/100KB` : '');
+        items.push(`${repoLink(r)} (same ${kb(c.basisKb)}): ${sw(a.model)} found share <b>${f2(a.share)}</b>${at(sa)} vs ${sw(b.model)} ${f2(b.share)}${at(sb)}`);
+      }
+      for (const i of r.inits) {
+        compared = true;
+        const rows = i.rows.filter((x) => x.status === 'done').sort((x, y) => y.quality - x.quality);
+        items.push(`${repoLink(r)} calibration sample (${kb(i.sampleKb)}): ${rows.map((x) => `${sw(x.model)} ${f2(x.quality)}`).join(', ')}`);
+      }
+      for (const e of r.efforts || []) {
+        compared = true;
+        const best = (m) => e.rows.filter((x) => family(x.model) === m).sort((x, y) => y.confirmedRecall - x.confirmedRecall)[0];
+        const cx = best('Codex gpt-6.1-sol'), op = best('Opus 5.5');
+        items.push(`${repoLink(r)} effort study: best ${sw(cx.model)} <code>${esc(cx.effort)}</code> recall <b>${f2(cx.confirmedRecall)}</b> at ${usd(cx.usdPer100Kb)}/100KB; best ${sw(op.model)} <code>${esc(op.effort)}</code> ${f2(op.confirmedRecall)} at ${usd(op.usdPer100Kb)}/100KB`);
+      }
+      const fams = [...new Set(r.scans.map((s) => family(s.model)))];
+      if (!r.compares.length && !(r.efforts || []).length && fams.length === 1) {
+        const s = r.scans[0];
+        items.push(`${repoLink(r)}: only ${sw(s.model)} ran — ${s.findings} findings, precision ${f2(s.precision)}${s.usdPer100Kb ? `, ${usd(s.usdPer100Kb)}/100KB` : ''}`);
+      }
+    }
+    if (L !== 'any' && data.bench && L === 'Go') items.push(`gocql known-bug benchmark: Opus 5.5 found 7/7, Fable 6/7, Sonnet 4/7, Haiku 2/7`);
+    return { items, compared };
+  }
+  function chunkFor(L, model, short) {
+    const cs = reposOf(L).flatMap((r) => r.curves.filter((c) => family(c.model) === family(model) && c.resultKb).map((c) => (short ? `${c.resultKb}KB` : `${c.resultKb}KB on ${r.name.replace(/^scylladb\//, '')}`)));
+    return cs.length ? [...new Set(cs)].join(short ? ' / ' : ', ') : null;
+  }
+  const SHORT = { 'Codex gpt-6.1-sol': 'Codex', 'Opus 5.5': 'Opus', 'Fable 5.2': 'Fable', 'Sonnet 5.5': 'Sonnet', 'Haiku 5.5': 'Haiku' };
+  // price ranges use the levels the guide recommends, not every level of the effort study
+  const atRecommended = (s) => !s.effort || (family(s.model) === 'Codex gpt-6.1-sol' ? s.effort === 'xhigh' : s.effort === 'medium');
+
+  // ---------- goal picker
+  const CX = 'codex:gpt-6.1-sol', OP = 'claude-opus-5-5';
+  const GOALS = {
+    value: { title: 'Codex gpt-6.1-sol at <code>xhigh</code>', runs: [['codex-xhigh', CX, 'xhigh']], recall: '0.40', price: '$0.75', perBug: '$0.10',
+      why: 'Highest recall per dollar in the effort study, and the largest share of issues on every repository where it ran next to a Claude model.' },
+    most: { title: 'Codex <code>xhigh</code> + Opus <code>max</code>, side by side', runs: [['codex-xhigh', CX, 'xhigh'], ['opus-max', OP, 'max']], recall: '0.66', price: '$6.64', perBug: '$0.46',
+      why: 'No single run found more than 41% of the confirmed issues; two different reviewers overlap little. Cheaper pair: Codex <code>high</code> + <code>xhigh</code>, recall 0.49 at $1.18/100KB.' },
+    cheap: { title: 'Codex gpt-6.1-sol at <code>medium</code>', runs: [['codex-medium', CX, 'medium']], recall: '0.23', price: '$0.30', perBug: '$0.07',
+      why: 'The cheapest level that still finds a useful share; <code>low</code> saves $0.06/100KB but drops recall to 0.17. Precision is the same at every level.' },
+    claude: { title: 'Opus 5.5 at <code>medium</code>', runs: [['opus-medium', OP, 'medium']], recall: '0.15', price: '$1.01', perBug: '$0.28',
+      why: 'Opus at low, medium and high found about the same; medium is the cheap middle. For depth use <code>max</code> (recall 0.35 at $5.89/100KB). Fable 5.2 scores higher on small samples but costs ~2× Opus.' },
+  };
+  const NOTES = {
+    'Go|claude': 'On Go, Opus is the strongest Claude reviewer: 7/7 known gocql bugs and the top score (0.74) on the private Go sample. Sonnet came close there (0.68 at $0.31/100KB) but found only 4/7 known bugs.',
+    'Go|value': 'On gocql Codex found share 0.76 vs Fable 0.43 on the same 1.4MB.',
+    'C++|claude': 'On the seastar sample Fable scored highest (0.65 vs Opus 0.48) at about twice Opus\'s price; Sonnet scored 0.09 — avoid it on C++.',
+    'C++|value': 'On seastar Codex found share 0.81 vs Opus 0.30, at a lower price per 100KB.',
+    'Rust|value': 'On scylla-rust-driver Codex and Fable found similar shares (0.59 vs 0.55) but Fable cost about 7× as much.',
+    'Rust|claude': 'Only Opus and Fable ran on Rust; Fable found more on scylla-rust-driver but at $1.93/100KB vs Opus $0.40.',
+  };
+  function renderPick() {
+    const L = $('pick-lang').value, G = $('pick-goal').value, g = GOALS[G];
+    const ev = evidence(L);
+    const note = NOTES[`${L}|${G}`] || (L !== 'any' && !ev.compared ? `No two models were compared on ${esc(L)} yet, so this is the general recommendation. Run <code>/code-scan:init</code> to compare models on your own repository.` : '');
+    const chunks = g.runs.map(([, m]) => {
+      if (m.startsWith('codex:')) return `${sw(m)}: 40KB (every Codex scan here used 40KB; not calibrated yet)`;
+      const c = chunkFor(L, m) || chunkFor('any', m);
+      return `${sw(m)}: let <code>init</code> calibrate it${c ? ` (chosen before: ${esc(c)})` : ''}`;
+    });
+    const cmds = g.runs.map(([n, m, e]) => `code-scan.js profile register ${n} --prompt default --model ${m} --effort ${e}`).join('\n') +
+      `\ncode-scan.js start --profile ${g.runs.map(([n]) => n).join(',')}`;
+    $('pick-out').innerHTML = `<div class="setup">
+      <h3>${g.title}${ev.compared ? '<span class="badge strong">compared on this language</span>' : L === 'any' ? '' : '<span class="badge">general recommendation</span>'}</h3>
+      <p>${g.why}</p>${note ? `<p>${note}</p>` : ''}
+      <div class="facts"><div><b>${g.recall}</b>recall in the effort study</div><div><b>${g.price}</b>per 100KB of code</div><div><b>${g.perBug}</b>per confirmed bug</div><div><b>0.94–0.99</b>precision after triage</div></div>
+      <p class="muted" style="margin:4px 0">Chunk size</p><ul>${chunks.map((c) => `<li>${c}</li>`).join('')}</ul>
+      <pre><code>${esc(cmds)}</code></pre>
+      <p class="muted" style="margin:4px 0">Evidence for ${L === 'any' ? 'all languages' : esc(L)}</p>
+      <ul>${ev.items.map((x) => `<li>${x}</li>`).join('') || '<li class="muted">No scans in this language yet.</li>'}</ul></div>`;
+  }
+  $('pick-lang').innerHTML = `<option value="any">Any language</option>` + langNames.map((l) => `<option>${esc(l)}</option>`).join('') + '<option value="other">Other</option>';
+  for (const id of ['pick-lang', 'pick-goal']) $(id).addEventListener('change', renderPick);
+  renderPick();
+
+  // ---------- models by language
+  $('lang-table').innerHTML = `<tr><th class="l">language</th><th class="l">repositories</th><th class="l">models run</th><th class="l">compared?</th><th>Codex $/100KB</th><th>Opus $/100KB</th><th>Opus precision</th><th class="l">Opus chunk</th></tr>` +
+    langNames.map((L) => {
+      const rs = reposOf(L), ev = evidence(L);
+      const scans = rs.flatMap((r) => r.scans).filter(atRecommended);
+      const fams = [...new Set(scans.map((s) => s.model).concat(rs.flatMap((r) => r.inits.flatMap((i) => i.rows.map((x) => x.model)))).map(family))].map((f) => SHORT[f] || f);
+      const of = (f) => scans.filter((s) => family(s.model) === f);
+      return `<tr><td class="l"><b>${esc(L)}</b></td><td class="l" style="white-space:normal">${rs.map(repoLink).join(', ')}</td><td class="l" style="white-space:normal">${fams.map(esc).join(', ')}</td>
+        <td class="l">${ev.compared ? 'yes' : '<span class="muted">no</span>'}</td><td>${range(of('Codex gpt-6.1-sol').map((s) => s.usdPer100Kb), usd)}</td><td>${range(of('Opus 5.5').map((s) => s.usdPer100Kb), usd)}</td>
+        <td>${range(of('Opus 5.5').map((s) => s.precision), f2)}</td><td class="l">${esc(chunkFor(L, OP, true) || '–')}</td></tr>`;
+    }).join('');
+
   // ---------- effort
   (function () {
     const studies = data.repos.flatMap((r) => (r.efforts || []).map((e) => ({ ...e, repo: r })));

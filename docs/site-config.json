@@ -24,13 +24,18 @@
    "repo": "scylladb/scylla-rust-driver"
   },
   "380e18d07793": {
-   "repo": "scylladb/cpp-rs-driver"
+   "repo": "scylladb/cpp-rs-driver",
+   "lang": "rust"
   },
   "46a20fe34c54": {
    "repo": "scylladb/scylla-rust-driver"
   },
   "50eebf10e6ec": {
-   "repo": "scylladb/nodejs-rs-driver"
+   "repo": "scylladb/nodejs-rs-driver",
+   "lang": "ts+rust",
+   "noPrice": [
+    1
+   ]
   },
   "57b5acdc3cd5": {
    "repo": "scylladb/csharp-driver"
