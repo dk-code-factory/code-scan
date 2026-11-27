@@ -25,7 +25,7 @@ From the user's words build the selection, then preview it:
 - ids: `12 15 18` or `12,15,18` → exactly those findings.
 - filters (same as `query`): `--severity high+`, `--path src/net/`, `--category leak`, `--text ...`,
   `--scan N`, `--unit u`, `--group g`, ... Already-checked findings (confirmed/not_confirmed, false_positive,
-  wontfix, fixed, linked to an issue) are skipped; "re-check"/"again" → add `--recheck`.
+  wontfix, fixed, duplicate, linked to an issue) are skipped; "re-check"/"again" → add `--recheck`.
 - nothing given → every open, unchecked finding.
 - "groups of 3" → `--group-size 3` (default 5). Findings of the same file and of one dupe group stay together.
 

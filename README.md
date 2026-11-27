@@ -111,7 +111,7 @@ pushing `docs/` to `main` publishes it.
   content hash), repeat, stop. Runs one or several registered review profiles side by side.
 - `/code-scan:status` — progress, per-file state.
 - `/code-scan:findings` — filter/sort/export findings (severity, type, category, path, triage, reported, …), read-only SQL.
-- `/code-scan:triage` — confirmed / false_positive / fixed / wontfix, with notes; set or classify finding types.
+- `/code-scan:triage` — confirmed / false_positive / fixed / wontfix / duplicate, with notes; set or classify finding types.
 - `/code-scan:confirm` — confirmation status (confirmed / not_confirmed / unchecked), separate from triage.
 - `/code-scan:dupes` — duplicate groups and matching against existing GitHub/Jira issues.
 - `/code-scan:auto-triage` — agent-driven triage of chosen findings (ids or filters) in groups of N
