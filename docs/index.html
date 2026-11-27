@@ -17,6 +17,7 @@
     <a href="https://github.com/dk-code-factory/code-scan#readme">README</a></p>
   <nav class="toc">
     <a href="#find">Find your setup</a>
+    <a href="#explore">Compare configurations</a>
     <a href="#pick-model">Models by language</a>
     <a href="#pick-effort">Effort by goal</a>
     <a href="#pick-chunk">Chunk size</a>
@@ -45,6 +46,31 @@
   </select></label>
 </div>
 <div id="pick-out"></div>
+</section>
+
+<section id="explore">
+<h2>Compare every configuration</h2>
+<p class="muted">Every full scan as one row: model, effort, language and repository, with price, findings, confirmed findings, false positives, unique findings and review time.
+Filter to what matters to you and sort by any column. Rates per 100KB make repositories of different size comparable.</p>
+<div class="picker">
+  <label>Language <select id="ex-lang"></select></label>
+  <label>Model <select id="ex-model"></select></label>
+  <label>Effort <select id="ex-effort"></select></label>
+  <label>Columns <select id="ex-view">
+    <option value="overview">Overview</option>
+    <option value="findings">Findings by severity</option>
+    <option value="cost">Price and time</option>
+    <option value="all">All columns</option>
+  </select></label>
+</div>
+<div class="table-wrap"><table id="ex-table" class="sortable"></table></div>
+<p class="note" id="ex-note"></p>
+<h3>Plot any two measures</h3>
+<div class="picker">
+  <label>Horizontal <select id="ex-x"></select></label>
+  <label>Vertical <select id="ex-y"></select></label>
+</div>
+<figure><div class="chart" id="ex-chart"></div><figcaption id="ex-cap"></figcaption></figure>
 </section>
 
 <section id="pick-model">
@@ -161,7 +187,6 @@ Share = severity-weighted share of every distinct issue either scan found. Preci
 <h2>All full scans</h2>
 <figure><div class="chart" id="cost-chart"></div>
 <figcaption>Review price per 100KB of code, every full scan with a known cost. Price is list price of every token of every reviewer agent.</figcaption></figure>
-<div class="table-wrap"><table id="scan-table"></table></div>
 </section>
 
 <section id="calibration">

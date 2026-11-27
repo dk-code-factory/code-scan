@@ -149,6 +149,16 @@ function exportStore(key) {
     // noPrice: scans whose spend record is known to be incomplete (lost transcripts) show no price
     const u = (cfg.noPrice || []).map(Number).includes(r.id) ? 0 : usd.get(r.id) || 0;
     const ms = Date.parse(s.updated) - Date.parse(s.created);
+    // review time: reviewer-agent minutes (process time from the runner, else claim→submit per chunk) and wall clock
+    // as the union of chunk intervals, so pauses between runs (limits, restarts) do not count
+    const iv = q(db, "SELECT claimed_at a, done_at b FROM chunks WHERE scan_id=? AND state='done' AND claimed_at IS NOT NULL AND done_at IS NOT NULL", r.id)
+      .map((x) => [Date.parse(x.a), Date.parse(x.b)]).filter(([a, b]) => b >= a).sort((x, y) => x[0] - y[0]);
+    let wall = 0, end = -Infinity, chunkMin = 0;
+    for (const [a, b] of iv) { chunkMin += (b - a) / 60000; if (b > end) { wall += b - Math.max(a, end); end = b; } }
+    const procMin = (q(db, "SELECT SUM((julianday(ended) - julianday(started)) * 1440) m FROM agent_runs WHERE scan_id=? AND kind='review' AND ended IS NOT NULL", r.id)[0] || {}).m;
+    const agentMin = procMin || chunkMin || null;
+    const confSev = Object.fromEntries(q(db, `SELECT f.severity s, COUNT(*) n FROM seen x JOIN findings f ON f.id=x.finding_id
+      WHERE x.scan_id=? AND (f.triage IN ('confirmed','fixed','wontfix') OR f.confirmation='confirmed') GROUP BY 1`, r.id).map((x) => [x.s, x.n]));
     const repo = repoOf(r.id);
     const lang = cfg.lang || langOf(r.id);
     bucket(repo, lang).scans.push({
@@ -156,7 +166,23 @@ function exportStore(key) {
       effort: sp.effort, chunkKb: sp.chunkKb, commit: s.commit_sha.slice(0, 12), files: r.reviewed, kb: Math.round(bytes / 1024),
       findings: r.findings, severity: sev, triage: tri, triaged: conf_ + fp, precision: conf_ + fp ? round(conf_ / (conf_ + fp)) : null,
       usd: u ? round(u) : null, usdPer100Kb: u && bytes ? round(u / (bytes / 1024) * 100) : null, hours: ms > 0 ? round(ms / 3600000, 1) : null,
+      confirmed: conf_, falsePositive: fp, untriaged: r.findings - conf_ - fp, confirmedSeverity: confSev,
+      usdPerConfirmed: u && conf_ ? round(u / conf_) : null, agentMinutes: agentMin ? round(agentMin, 1) : null,
+      agentMinPer100Kb: agentMin && bytes ? round(agentMin / (bytes / 1024) * 100, 1) : null, wallMinutes: wall ? round(wall / 60000, 1) : null,
     });
+  }
+
+  // unique findings: what no other scan of the same repository (in this store) found, on files they all reviewed
+  for (const b of byRepo.values()) {
+    if (b.scans.length < 2) continue;
+    const o = cli(st, cwd, key, ['compare', ...b.scans.map((x) => String(x.id)), '--json', '--list', 'none']);
+    if (!o) continue;
+    const c = JSON.parse(o);
+    for (const sc of b.scans) {
+      const mine = (c.clusters || []).filter((k) => k.seenBy[sc.id]);
+      const only = mine.filter((k) => Object.keys(k.seenBy).length === 1);
+      Object.assign(sc, { unique: only.length, uniqueConfirmed: only.filter((k) => k.confirmed).length, uniqueAgainst: b.scans.length - 1, uniqueBasisKb: Math.round(c.basis.bytes / 1024) });
+    }
   }
 
   const studies = (CONFIG.effortStudies || []).filter((x) => x.store === key);
