@@ -150,7 +150,7 @@ function exportStore(key) {
     const u = (cfg.noPrice || []).map(Number).includes(r.id) ? 0 : usd.get(r.id) || 0;
     const ms = Date.parse(s.updated) - Date.parse(s.created);
     const repo = repoOf(r.id);
-    const lang = langOf(r.id);
+    const lang = cfg.lang || langOf(r.id);
     bucket(repo, lang).scans.push({
       id: r.id, store: key, profile: r.profile, model: sp.model, runner: (runs[0] && runs[0].runner) || (/^[a-z]+:/.test(sp.model || '') ? sp.model.split(':')[0] : 'claude'),
       effort: sp.effort, chunkKb: sp.chunkKb, commit: s.commit_sha.slice(0, 12), files: r.reviewed, kb: Math.round(bytes / 1024),
