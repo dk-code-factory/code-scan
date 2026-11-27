@@ -98,3 +98,11 @@ footer { margin-top: 64px; font-size: 0.85rem; color: var(--text-secondary); }
 .badge.strong { border-color: var(--good); color: var(--good); }
 .part { margin: 64px 0 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-secondary); }
 @media (max-width: 520px) { .picker select { min-width: 0; width: 100%; } .picker label { width: 100%; } }
+
+table.sortable th[data-k] { cursor: pointer; user-select: none; }
+table.sortable th[data-k]:hover { color: var(--text-primary); }
+table.sortable th.sorted { color: var(--text-primary); }
+table.sortable th.sorted::after { content: " \2193"; }
+table.sortable th.sorted.asc::after { content: " \2191"; }
+table.sortable td.sticky, table.sortable th.sticky { position: sticky; left: 0; background: var(--surface-1); z-index: 1; }
+th.grp { text-align: center; border-bottom: 1px solid var(--border); }

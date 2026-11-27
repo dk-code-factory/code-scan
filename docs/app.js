@@ -133,9 +133,6 @@
     });
     $('cost-chart').appendChild(svg);
   })();
-  $('scan-table').innerHTML = `<tr><th>repository</th><th>model</th><th>code</th><th>files</th>${sevTh}<th>triaged</th><th>precision</th><th>$</th><th>$/100KB</th></tr>` +
-    allScans.sort((a, b) => a.repo.name.localeCompare(b.repo.name) || b.kb - a.kb).map((s) =>
-      `<tr><td>${repoLink(s.repo)}</td><td>${withEffort(s.model, s.effort)}</td><td>${kb(s.kb)}</td><td>${s.files}</td>${sevTd(s.findings, s.severity)}<td>${s.triaged}</td><td>${f2(s.precision)}</td><td>${usd(s.usd)}</td><td>${usd(s.usdPer100Kb)}</td></tr>`).join('');
 
   // ---------- calibration small multiples
   (function () {
@@ -273,6 +270,106 @@
   $('pick-lang').innerHTML = `<option value="any">Any language</option>` + langNames.map((l) => `<option>${esc(l)}</option>`).join('') + '<option value="other">Other</option>';
   for (const id of ['pick-lang', 'pick-goal']) $(id).addEventListener('change', renderPick);
   renderPick();
+
+  // ---------- configuration explorer
+  (function () {
+    const per100 = (v, s) => (v === null || v === undefined || !s.kb ? null : (v / s.kb) * 100);
+    const sev = (o, k) => (o && o[k]) || 0;
+    const fpRate = (s) => (s.confirmed + s.falsePositive ? s.falsePositive / (s.confirmed + s.falsePositive) : null);
+    const n1 = (v) => (v === null || v === undefined ? '–' : v.toFixed(1));
+    const pct = (v) => (v === null || v === undefined ? '–' : (v * 100).toFixed(1) + '%');
+    const int = (v) => (v === null || v === undefined ? '–' : String(v));
+    const mins = (v) => (v === null || v === undefined ? '–' : v >= 90 ? (v / 60).toFixed(1) + ' h' : Math.round(v) + ' min');
+    // id, header, group, value, format, views, plottable
+    const COLS = [
+      ['kb', 'code', '', (s) => s.kb, kb, ['overview', 'findings', 'cost', 'all']],
+      ['findings', 'findings', 'findings reported', (s) => s.findings, int, ['overview', 'findings', 'all'], 1],
+      ['crit', 'critical', 'findings reported', (s) => sev(s.severity, 'critical'), int, ['findings', 'all'], 1],
+      ['high', 'high', 'findings reported', (s) => sev(s.severity, 'high'), int, ['findings', 'all'], 1],
+      ['med', 'medium', 'findings reported', (s) => sev(s.severity, 'medium'), int, ['findings', 'all'], 1],
+      ['low', 'low', 'findings reported', (s) => sev(s.severity, 'low'), int, ['findings', 'all'], 1],
+      ['conf', 'confirmed', 'after triage', (s) => s.confirmed, int, ['overview', 'findings', 'all'], 1],
+      ['cHigh', 'conf. crit+high', 'after triage', (s) => sev(s.confirmedSeverity, 'critical') + sev(s.confirmedSeverity, 'high'), int, ['findings', 'all'], 1],
+      ['confPer100', 'confirmed /100KB', 'after triage', (s) => per100(s.confirmed, s), n1, ['overview', 'all'], 1],
+      ['fp', 'false pos.', 'after triage', (s) => s.falsePositive, int, ['findings', 'all'], 1],
+      ['fpRate', 'false-pos. rate', 'after triage', fpRate, pct, ['overview', 'findings', 'all'], 1],
+      ['untri', 'untriaged', 'after triage', (s) => s.untriaged, int, ['overview', 'findings', 'all'], 1],
+      ['uniq', 'unique', 'not found by other scans', (s) => s.unique ?? null, int, ['overview', 'findings', 'all'], 1],
+      ['uniqConf', 'unique confirmed', 'not found by other scans', (s) => s.uniqueConfirmed ?? null, int, ['findings', 'all'], 1],
+      ['usd', '$ total', 'price', (s) => s.usd, usd, ['cost', 'all'], 1],
+      ['usd100', '$/100KB', 'price', (s) => s.usdPer100Kb, usd, ['overview', 'cost', 'all'], 1],
+      ['usdConf', '$/confirmed', 'price', (s) => s.usdPerConfirmed, usd, ['overview', 'cost', 'all'], 1],
+      ['agent', 'reviewer time', 'time', (s) => s.agentMinutes, mins, ['cost', 'all'], 1],
+      ['agent100', 'reviewer min/100KB', 'time', (s) => s.agentMinPer100Kb, n1, ['overview', 'cost', 'all'], 1],
+      ['wall', 'wall clock', 'time', (s) => s.wallMinutes, mins, ['cost', 'all'], 1],
+    ];
+    const rows = allScans.map((s) => ({ s, lang: langsOf(s.repo) }));
+    const fill = (id, opts) => { $(id).innerHTML = opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join(''); };
+    fill('ex-lang', [['any', 'Any language'], ...langNames.map((l) => [l, l])]);
+    const fams = [...new Set(allScans.map((s) => family(s.model)))].sort();
+    fill('ex-model', [['any', 'Any model'], ...fams.map((f) => [f, f])]);
+    const ORD = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+    const effs = [...new Set(allScans.map((s) => s.effort || ''))].sort((a, b) => ORD.indexOf(a) - ORD.indexOf(b));
+    fill('ex-effort', [['any', 'Any effort'], ...effs.map((e) => [e || 'default', e || 'default (not set)'])]);
+    const plot = COLS.filter((c) => c[6]);
+    fill('ex-x', plot.map((c) => [c[0], c[1]]));
+    fill('ex-y', plot.map((c) => [c[0], c[1]]));
+    $('ex-x').value = 'usd100'; $('ex-y').value = 'confPer100';
+    let sortK = 'usdConf', asc = true;
+    const filtered = () => rows.filter(({ s, lang }) => {
+      const L = $('ex-lang').value, M = $('ex-model').value, E = $('ex-effort').value;
+      return (L === 'any' || lang.includes(L)) && (M === 'any' || family(s.model) === M) && (E === 'any' || (s.effort || 'default') === E);
+    });
+    function render() {
+      const view = $('ex-view').value;
+      const cols = COLS.filter((c) => c[5].includes(view));
+      const col = COLS.find((c) => c[0] === sortK) || cols[0];
+      const list = filtered().slice().sort((a, b) => {
+        const x = col[3](a.s), y = col[3](b.s);
+        if (x === null || x === undefined) return 1; if (y === null || y === undefined) return -1;
+        return asc ? x - y : y - x;
+      });
+      // group header row
+      const groups = [];
+      for (const c of cols) { const g = groups[groups.length - 1]; if (g && g.name === c[2]) g.n++; else groups.push({ name: c[2], n: 1 }); }
+      const head1 = `<tr><th class="sticky"></th><th></th>${groups.map((g) => `<th class="grp" colspan="${g.n}">${esc(g.name)}</th>`).join('')}</tr>`;
+      const head2 = `<tr><th class="l sticky">model · effort</th><th class="l">repository</th>${cols.map((c) => `<th data-k="${c[0]}" class="${c[0] === sortK ? 'sorted' + (asc ? ' asc' : '') : ''}">${esc(c[1])}</th>`).join('')}</tr>`;
+      $('ex-table').innerHTML = head1 + head2 + list.map(({ s }) => `<tr><td class="l sticky">${withEffort(s.model, s.effort)}</td><td class="l">${repoLink(s.repo)}</td>` +
+        cols.map((c) => `<td>${c[0] === 'findings' || c[0] === 'conf' ? '<b>' + c[4](c[3](s)) + '</b>' : c[4](c[3](s))}</td>`).join('') + '</tr>').join('') ||
+        `<tr><td class="l" colspan="${cols.length + 2}">No scans match these filters.</td></tr>`;
+      $('ex-table').querySelectorAll('th[data-k]').forEach((th) => th.addEventListener('click', () => {
+        if (sortK === th.dataset.k) asc = !asc; else { sortK = th.dataset.k; asc = ['usd', 'usd100', 'usdConf', 'agent', 'agent100', 'wall', 'fpRate', 'untri'].includes(sortK); }
+        render();
+      }));
+      $('ex-note').innerHTML = `${list.length} of ${rows.length} scans. Unique = issues no other scan of the same repository found, on files they all reviewed (only where a repository has more than one scan).
+        False-positive rate = false positives / triaged; untriaged findings are not counted, so check the untriaged column. Reviewer time = summed agent time; wall clock = time with at least one reviewer working.`;
+      // scatter
+      const X = COLS.find((c) => c[0] === $('ex-x').value), Y = COLS.find((c) => c[0] === $('ex-y').value);
+      const pts = list.map(({ s }) => ({ s, x: X[3](s), y: Y[3](s) })).filter((p) => p.x !== null && p.x !== undefined && p.y !== null && p.y !== undefined);
+      const host = $('ex-chart'); host.innerHTML = '';
+      if (!pts.length) { host.innerHTML = '<p class="muted">Nothing to plot for these filters.</p>'; return; }
+      const W = 640, H = 320, Lm = 56, R = 20, T = 12, B = 40;
+      const xMax = nice(Math.max(...pts.map((p) => p.x)) * 1.05 || 1), yMax = nice(Math.max(...pts.map((p) => p.y)) * 1.05 || 1);
+      const px = (v) => Lm + (v / xMax) * (W - Lm - R), py = (v) => T + (1 - v / yMax) * (H - T - B);
+      const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': `${Y[1]} against ${X[1]}` });
+      for (let i = 0; i <= 4; i++) {
+        svgEl('line', { x1: Lm, x2: W - R, y1: py((yMax * i) / 4), y2: py((yMax * i) / 4), class: 'grid' }, svg);
+        svgEl('text', { x: Lm - 6, y: py((yMax * i) / 4) + 4, 'text-anchor': 'end' }, svg).textContent = Y[4]((yMax * i) / 4);
+        svgEl('text', { x: px((xMax * i) / 4), y: H - B + 16, 'text-anchor': 'middle' }, svg).textContent = X[4]((xMax * i) / 4);
+      }
+      svgEl('text', { x: (Lm + W - R) / 2, y: H - 6, 'text-anchor': 'middle' }, svg).textContent = X[1];
+      for (const p of pts) {
+        svgEl('circle', { cx: px(p.x), cy: py(p.y), r: 6, fill: modelInfo(p.s.model).color, stroke: 'var(--surface-1)', 'stroke-width': 2 }, svg);
+        if (p.s.effort) svgEl('text', { x: px(p.x) + 8, y: py(p.y) + 4, class: 'lbl' }, svg).textContent = p.s.effort;
+        bindTip(svgEl('circle', { cx: px(p.x), cy: py(p.y), r: 13, class: 'hit' }, svg),
+          `<b>${esc(family(p.s.model))}${p.s.effort ? ' ' + esc(p.s.effort) : ''}</b> · ${esc(p.s.repo.name)}<br>${esc(X[1])}: ${X[4](p.x)}<br>${esc(Y[1])}: ${Y[4](p.y)}`);
+      }
+      host.appendChild(svg);
+      $('ex-cap').innerHTML = `<div class="legend">${[...new Set(pts.map((p) => p.s.model))].map((m) => modelInfo(m).name).filter((v, i, a) => a.indexOf(v) === i).map((n) => `<span>${sw(MODELS.find((x) => x[1] === n)?.[0] || n)}</span>`).join('')}</div>${esc(Y[1])} against ${esc(X[1])}, one dot per scan; labels are effort levels.`;
+    }
+    for (const id of ['ex-lang', 'ex-model', 'ex-effort', 'ex-view', 'ex-x', 'ex-y']) $(id).addEventListener('change', render);
+    render();
+  })();
 
   // ---------- models by language
   $('lang-table').innerHTML = `<tr><th class="l">language</th><th class="l">repositories</th><th class="l">models run</th><th class="l">compared?</th><th>Codex $/100KB</th><th>Opus $/100KB</th><th>Opus precision</th><th class="l">Opus chunk</th></tr>` +
