@@ -1,6 +1,6 @@
 ---
 name: confirm
-description: Set the confirmation status of code-scan findings — confirmed (checked and real), not_confirmed (checked, could not confirm) or unchecked — by id or by filter, with a note. Independent of triage (open/fixed/wontfix/...). Use for "mark #12 as confirmed", "#3 and #5 not confirmed", "reset confirmation of 7", "which findings are confirmed".
+description: Set the confirmation status of code-scan findings — confirmed (checked and real), not_confirmed (checked, could not confirm) or unchecked — by id or by filter, with a note. Independent of triage (open/fixed/wontfix/duplicate/...). Use for "mark #12 as confirmed", "#3 and #5 not confirmed", "reset confirmation of 7", "which findings are confirmed".
 ---
 
 # code-scan: confirm

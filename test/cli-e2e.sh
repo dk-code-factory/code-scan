@@ -131,6 +131,13 @@ nx=$(DM sql "select id from findings where id not in (select finding_id from dup
 DM dupes merge "$gm" "$nx" >/dev/null
 [ "$(DM sql "select count(*) from (select group_id from dupe_groups group by group_id having count(*) < 2 or sum(is_primary) <> 1)" | tail -1)" = 0 ] \
   && ok dupes-merge-cleans-old-group || bad "dupes-merge-cleans-old-group: $(DM sql 'select * from dupe_groups')"
+# triage --set duplicate --of: state, note, shared group; --of needs duplicate; not listed by default (on the copy)
+DM triage "$nx" --set duplicate --of "$gm" --note "same root cause" >/dev/null
+o=$(DM show "$nx"); has "$o" 'triage=duplicate' && has "$o" "duplicate of #$gm: same root cause" \
+  && [ "$(DM sql "select count(distinct group_id) from dupe_groups where finding_id in ($gm,$nx)" | tail -1)" = 1 ] \
+  && ! grep -q "^ *$nx\b" <<<"$(DM query --format csv | cut -d, -f1)" && ok triage-duplicate || bad "triage-duplicate: $o"
+has "$(DM triage "$nx" --set wontfix --of "$gm" 2>&1)" '--of goes with --set duplicate' && has "$(DM triage "$nx" --set duplicate --of "$nx" 2>&1)" 'is one of the findings' \
+  && ok triage-duplicate-usage || bad triage-duplicate-usage
 
 # --- trackers: marker autolink, match, link, jira import
 kv=$(B query --path src/store/kv.go --format json | python3 -c 'import json,sys; r=json.load(sys.stdin)[0]; print(r["id"])')
@@ -424,7 +431,11 @@ B issues-sync --tracker gh:acme/toy >/dev/null; has "$(B show "$fid")" 'triage=w
 
 # --- review fixes: duplicate close leaves finding, reopen restores, PR merged = fixed, prompt quoting, usage, caps
 B triage "$fid" --set confirmed >/dev/null; echo '{"state":"CLOSED","stateReason":"DUPLICATE"}' > "$FAKEGH_LOG.view.501"
-o=$(B issues-sync --tracker gh:acme/toy); has "$o" 'without a usable reason' && has "$(B show "$fid")" 'triage=confirmed' && ok sync-duplicate-left || bad "sync-duplicate-left: $o"
+o=$(B issues-sync --tracker gh:acme/toy); has "$o" 'duplicate 1' && has "$(B show "$fid")" 'triage=duplicate' && has "$(B show "$fid")" 'closed as duplicate' && ok sync-duplicate || bad "sync-duplicate: $o"
+echo '{"state":"OPEN","stateReason":"REOPENED"}' > "$FAKEGH_LOG.view.501"; o=$(B issues-sync --tracker gh:acme/toy)
+has "$o" 'reopened 1' && has "$(B show "$fid")" 'triage=confirmed' && ok sync-duplicate-reopen || bad "sync-duplicate-reopen: $o"
+echo '{"state":"CLOSED","stateReason":"STALE"}' > "$FAKEGH_LOG.view.501"
+o=$(B issues-sync --tracker gh:acme/toy); has "$o" 'without a usable reason' && has "$(B show "$fid")" 'triage=confirmed' && ok sync-unknown-left || bad "sync-unknown-left: $o"
 echo '{"state":"CLOSED","stateReason":"COMPLETED"}' > "$FAKEGH_LOG.view.501"; B issues-sync --tracker gh:acme/toy >/dev/null
 echo '{"state":"OPEN","stateReason":"REOPENED"}' > "$FAKEGH_LOG.view.501"; o=$(B issues-sync --tracker gh:acme/toy)
 has "$o" 'reopened 1' && has "$(B show "$fid")" 'triage=confirmed' && ok sync-reopen || bad "sync-reopen: $o"
