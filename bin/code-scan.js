@@ -5461,7 +5461,7 @@ calibrate: calibrate start --model m [--only g] [--sample-kb 200] [--medium 40] 
 verify:    verify-prompt <id> --repo owner/name --base <sha> --worktree <dir>   (prompt for a fresh verifying agent)
 auto-triage: auto-triage plan|start [ids|filters] [--group-size 5] [--recheck] [--repo owner/name] [--concurrency N] [--model m] [--effort e]
            auto-triage claim <run> [--rules] | submit <run> <group> < results.json | status [run|--all] | stop|continue [run] [--effort e] | set-run <run> <task>
-effort:    --effort: claude low|medium|high|xhigh|max; codex minimal|low|medium|high|xhigh; opencode any --variant; others unsupported
+effort:    --effort: claude low|medium|high|xhigh|max; codex minimal|low|medium|high|xhigh|max|ultra (as the model lists them); opencode any --variant; others unsupported
 report:    report-config show|set <k> <v>|unset <k> | render [filters] [--target t] [--group-by g] [--max n]
            drafts | file-gh [--drafts d1,d2] [--dry-run] | record-filing <draft> <tracker> <key> [url]`;
 

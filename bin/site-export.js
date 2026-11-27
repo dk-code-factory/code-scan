@@ -167,7 +167,7 @@ function exportStore(key) {
     for (let i = 0; i < b.scans.length; i++) for (let j = i + 1; j < b.scans.length; j++) {
       const A = b.scans[i], B = b.scans[j];
       if (A.model === B.model && A.effort === B.effort) continue;
-      if (studyIds.has(A.id) && studyIds.has(B.id)) continue; // compared all at once below
+      if (studyIds.has(A.id) || studyIds.has(B.id)) continue; // study scans are compared together below
       const o = cli(st, cwd, key, ['compare', String(A.id), String(B.id), '--json', '--list', 'none']);
       if (!o) continue;
       const c = JSON.parse(o);
@@ -226,11 +226,14 @@ function exportStore(key) {
       const mine = clusters.filter((k) => k.seenBy[x.id]);
       const severity = {};
       for (const k of mine) { const v = k.seenBy[x.id].severity; severity[v] = (severity[v] || 0) + 1; }
+      // confirmed findings at the severity triage settled on (reviewers grade severity differently)
+      const confirmedSeverity = Object.fromEntries(q(db, `SELECT f.severity s, COUNT(DISTINCT f.id) n FROM seen x JOIN findings f ON f.id=x.finding_id
+        WHERE x.scan_id=? AND (f.triage IN ('confirmed','fixed','wontfix') OR f.confirmation='confirmed') GROUP BY 1`, x.id).map((r) => [r.s, r.n]));
       // severity-weighted share of the confirmed issues any effort level found: recall against the pooled truth
       const realW = clusters.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
       const gotW = mine.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
       return {
-        id: x.id, model: sc.model || x.model, effort: sc.effort, findings: x.findings, severity, unique: x.unique, share: round(x.share),
+        id: x.id, model: sc.model || x.model, effort: sc.effort, findings: x.findings, severity, confirmedSeverity, unique: x.unique, share: round(x.share),
         confirmed: x.confirmed, falsePositive: x.falsePositive, untriaged: x.findings - x.confirmed - x.falsePositive,
         precision: round(x.precision), confirmedRecall: realW ? round(gotW / realW) : null,
         highPlus: mine.filter((k) => k.severity === 'critical' || k.severity === 'high').length,
@@ -239,8 +242,16 @@ function exportStore(key) {
         agentMinutes: tok.secs ? round(tok.secs / 60, 1) : null,
       };
     });
+    // two or more runs together: recall of their union against the same pooled confirmed issues, and summed price
+    const realW = clusters.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
+    const combos = (sd.combos || []).map((ids) => {
+      const gotW = clusters.filter((k) => k.confirmed && ids.some((i) => k.seenBy[i])).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
+      const parts = ids.map((i) => rows.find((r) => r.id === i)).filter(Boolean);
+      const usd_ = parts.reduce((s_, r) => s_ + (r.usd || 0), 0);
+      return { runs: parts.map((r) => ({ model: r.model, effort: r.effort })), recall: realW ? round(gotW / realW) : null, usd: round(usd_) };
+    });
     const repo = repoOf(sd.scans[0]);
-    effortStudies.push({ repo, title: sd.title || null, basisKb: Math.round(c.basis.bytes / 1024), basisFiles: c.basis.files, issues: clusters.length,
+    effortStudies.push({ combos, repo, title: sd.title || null, basisKb: Math.round(c.basis.bytes / 1024), basisFiles: c.basis.files, issues: clusters.length,
       confirmedIssues: clusters.filter((k) => k.confirmed).length, triagedBy: sd.triagedBy || null, rows });
   }
   for (const e of effortStudies) bucket(e.repo, null).efforts = (bucket(e.repo, null).efforts || []).concat(e);
