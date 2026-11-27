@@ -1,5 +1,5 @@
 {
- "generated": "2026-11-26",
+ "generated": "2026-11-27",
  "bench": {
   "repo": "scylladb/gocql",
   "commit": "bf2fcd6",
@@ -509,6 +509,285 @@
    "lang": "ts",
    "scans": [
     {
+     "id": 16,
+     "store": "50eebf10e6ec",
+     "profile": "eff-codex-ultra@1 39837b8ca04a",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "ultra",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 69,
+     "severity": {
+      "critical": 2,
+      "high": 36,
+      "low": 2,
+      "medium": 29
+     },
+     "triage": {
+      "confirmed": 67,
+      "false_positive": 1,
+      "wontfix": 1
+     },
+     "triaged": 69,
+     "precision": 0.99,
+     "usd": 9.44,
+     "usdPer100Kb": 0.95,
+     "hours": 0.4
+    },
+    {
+     "id": 15,
+     "store": "50eebf10e6ec",
+     "profile": "eff-codex-max@1 2ded11e676f5",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "max",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 80,
+     "severity": {
+      "critical": 3,
+      "high": 43,
+      "low": 3,
+      "medium": 31
+     },
+     "triage": {
+      "confirmed": 75,
+      "false_positive": 2,
+      "wontfix": 3
+     },
+     "triaged": 80,
+     "precision": 0.97,
+     "usd": 8.54,
+     "usdPer100Kb": 0.86,
+     "hours": 0.4
+    },
+    {
+     "id": 14,
+     "store": "50eebf10e6ec",
+     "profile": "eff-opus-max@1 a1c4fc591151",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": "max",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 89,
+     "severity": {
+      "critical": 1,
+      "high": 15,
+      "low": 32,
+      "medium": 41
+     },
+     "triage": {
+      "confirmed": 83,
+      "false_positive": 3,
+      "wontfix": 3
+     },
+     "triaged": 89,
+     "precision": 0.97,
+     "usd": 58.61,
+     "usdPer100Kb": 5.89,
+     "hours": 25.4
+    },
+    {
+     "id": 13,
+     "store": "50eebf10e6ec",
+     "profile": "eff-opus-high@1 d0ffdf169364",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": "high",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 40,
+     "severity": {
+      "high": 8,
+      "low": 13,
+      "medium": 19
+     },
+     "triage": {
+      "confirmed": 38,
+      "false_positive": 1,
+      "wontfix": 1
+     },
+     "triaged": 40,
+     "precision": 0.97,
+     "usd": 11.93,
+     "usdPer100Kb": 1.2,
+     "hours": 0.2
+    },
+    {
+     "id": 12,
+     "store": "50eebf10e6ec",
+     "profile": "eff-opus-medium@1 98e73332b2ae",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": "medium",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 38,
+     "severity": {
+      "high": 7,
+      "low": 10,
+      "medium": 21
+     },
+     "triage": {
+      "confirmed": 36,
+      "false_positive": 1,
+      "wontfix": 1
+     },
+     "triaged": 38,
+     "precision": 0.97,
+     "usd": 10.09,
+     "usdPer100Kb": 1.01,
+     "hours": 0.1
+    },
+    {
+     "id": 11,
+     "store": "50eebf10e6ec",
+     "profile": "eff-codex-xhigh@1 42f379730753",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "xhigh",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 76,
+     "severity": {
+      "critical": 1,
+      "high": 43,
+      "medium": 32
+     },
+     "triage": {
+      "confirmed": 73,
+      "false_positive": 2,
+      "wontfix": 1
+     },
+     "triaged": 76,
+     "precision": 0.97,
+     "usd": 7.49,
+     "usdPer100Kb": 0.75,
+     "hours": 3.9
+    },
+    {
+     "id": 10,
+     "store": "50eebf10e6ec",
+     "profile": "eff-codex-high@1 f27efedf3457",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "high",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 59,
+     "severity": {
+      "high": 33,
+      "medium": 26
+     },
+     "triage": {
+      "confirmed": 55,
+      "false_positive": 2,
+      "wontfix": 2
+     },
+     "triaged": 59,
+     "precision": 0.97,
+     "usd": 4.28,
+     "usdPer100Kb": 0.43,
+     "hours": 0.7
+    },
+    {
+     "id": 9,
+     "store": "50eebf10e6ec",
+     "profile": "eff-codex-medium@1 dabce8c1625d",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "medium",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 42,
+     "severity": {
+      "high": 30,
+      "medium": 12
+     },
+     "triage": {
+      "confirmed": 40,
+      "false_positive": 1,
+      "wontfix": 1
+     },
+     "triaged": 42,
+     "precision": 0.98,
+     "usd": 3.03,
+     "usdPer100Kb": 0.3,
+     "hours": 0.6
+    },
+    {
+     "id": 8,
+     "store": "50eebf10e6ec",
+     "profile": "eff-codex-low@1 6e51faabe6ed",
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "low",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 32,
+     "severity": {
+      "high": 17,
+      "medium": 15
+     },
+     "triage": {
+      "confirmed": 31,
+      "false_positive": 1
+     },
+     "triaged": 32,
+     "precision": 0.97,
+     "usd": 2.41,
+     "usdPer100Kb": 0.24,
+     "hours": 3.9
+    },
+    {
+     "id": 7,
+     "store": "50eebf10e6ec",
+     "profile": "eff-opus-low@1 06201bb3df76",
+     "model": "claude-opus-5-5",
+     "runner": "claude",
+     "effort": "low",
+     "chunkKb": 40,
+     "commit": "ed555e2e6622",
+     "files": 129,
+     "kb": 995,
+     "findings": 31,
+     "severity": {
+      "high": 2,
+      "low": 16,
+      "medium": 13
+     },
+     "triage": {
+      "confirmed": 27,
+      "false_positive": 2,
+      "wontfix": 2
+     },
+     "triaged": 31,
+     "precision": 0.94,
+     "usd": 7.72,
+     "usdPer100Kb": 0.78,
+     "hours": 0.1
+    },
+    {
      "id": 1,
      "store": "50eebf10e6ec",
      "profile": "legacy-default@1 072595edb275",
@@ -522,19 +801,18 @@
      "findings": 41,
      "severity": {
       "high": 13,
-      "low": 12,
-      "medium": 16
+      "low": 9,
+      "medium": 19
      },
      "triage": {
-      "confirmed": 27,
+      "confirmed": 38,
       "false_positive": 1,
-      "open": 12,
-      "wontfix": 1
+      "wontfix": 2
      },
-     "triaged": 29,
-     "precision": 0.97,
-     "usd": null,
-     "usdPer100Kb": null,
+     "triaged": 41,
+     "precision": 0.98,
+     "usd": 0.25,
+     "usdPer100Kb": 0.02,
      "hours": 0.1
     }
    ],
@@ -578,8 +856,495 @@
      ]
     }
    ],
-   "triage": [],
-   "efforts": []
+   "triage": [
+    {
+     "model": "codex:gpt-6.1-sol",
+     "runner": "codex",
+     "effort": "high",
+     "groupSize": 5,
+     "findings": 205,
+     "verdicts": {
+      "false_positive": 10,
+      "real": 188,
+      "wontfix": 7
+     },
+     "severityChanged": 59,
+     "usd": 6.63,
+     "usdPerFinding": 0.032
+    }
+   ],
+   "efforts": [
+    {
+     "combos": [
+      {
+       "runs": [
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "high"
+        },
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "xhigh"
+        }
+       ],
+       "recall": 0.49,
+       "usd": 11.77
+      },
+      {
+       "runs": [
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "xhigh"
+        },
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "max"
+        }
+       ],
+       "recall": 0.55,
+       "usd": 16.03
+      },
+      {
+       "runs": [
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "xhigh"
+        },
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "ultra"
+        }
+       ],
+       "recall": 0.54,
+       "usd": 16.93
+      },
+      {
+       "runs": [
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "xhigh"
+        },
+        {
+         "model": "claude-opus-5-5",
+         "effort": "low"
+        }
+       ],
+       "recall": 0.48,
+       "usd": 15.21
+      },
+      {
+       "runs": [
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "xhigh"
+        },
+        {
+         "model": "claude-opus-5-5",
+         "effort": "high"
+        }
+       ],
+       "recall": 0.52,
+       "usd": 19.42
+      },
+      {
+       "runs": [
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "xhigh"
+        },
+        {
+         "model": "claude-opus-5-5",
+         "effort": "max"
+        }
+       ],
+       "recall": 0.66,
+       "usd": 66.1
+      },
+      {
+       "runs": [
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "low"
+        },
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "medium"
+        },
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "high"
+        },
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "xhigh"
+        },
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "max"
+        },
+        {
+         "model": "codex:gpt-6.1-sol",
+         "effort": "ultra"
+        }
+       ],
+       "recall": 0.76,
+       "usd": 35.19
+      },
+      {
+       "runs": [
+        {
+         "model": "claude-opus-5-5",
+         "effort": "low"
+        },
+        {
+         "model": "claude-opus-5-5",
+         "effort": "medium"
+        },
+        {
+         "model": "claude-opus-5-5",
+         "effort": "high"
+        },
+        {
+         "model": "claude-opus-5-5",
+         "effort": "max"
+        }
+       ],
+       "recall": 0.45,
+       "usd": 88.35
+      }
+     ],
+     "repo": "scylladb/nodejs-rs-driver",
+     "title": null,
+     "basisKb": 995,
+     "basisFiles": 129,
+     "issues": 227,
+     "confirmedIssues": 217,
+     "triagedBy": "Codex gpt-6.1-sol auto-triage at high effort (25 findings confirmed earlier by hand)",
+     "rows": [
+      {
+       "id": 8,
+       "model": "codex:gpt-6.1-sol",
+       "effort": "low",
+       "findings": 32,
+       "severity": {
+        "high": 17,
+        "medium": 15
+       },
+       "confirmedSeverity": {
+        "high": 8,
+        "low": 3,
+        "medium": 20
+       },
+       "unique": 2,
+       "share": 0.17,
+       "confirmed": 31,
+       "falsePositive": 1,
+       "untriaged": 0,
+       "precision": 0.97,
+       "confirmedRecall": 0.17,
+       "highPlus": 25,
+       "usd": 2.41,
+       "usdPer100Kb": 0.24,
+       "usdPerConfirmed": 0.08,
+       "agents": 41,
+       "failedAgents": 8,
+       "outputTokens": 16153,
+       "inputTokens": 3369501,
+       "agentMinutes": 101.7
+      },
+      {
+       "id": 9,
+       "model": "codex:gpt-6.1-sol",
+       "effort": "medium",
+       "findings": 42,
+       "severity": {
+        "high": 30,
+        "medium": 12
+       },
+       "confirmedSeverity": {
+        "high": 11,
+        "low": 3,
+        "medium": 27
+       },
+       "unique": 2,
+       "share": 0.22,
+       "confirmed": 41,
+       "falsePositive": 1,
+       "untriaged": 0,
+       "precision": 0.98,
+       "confirmedRecall": 0.23,
+       "highPlus": 34,
+       "usd": 3.03,
+       "usdPer100Kb": 0.3,
+       "usdPerConfirmed": 0.07,
+       "agents": 36,
+       "failedAgents": 3,
+       "outputTokens": 27913,
+       "inputTokens": 4762747,
+       "agentMinutes": 116.2
+      },
+      {
+       "id": 10,
+       "model": "codex:gpt-6.1-sol",
+       "effort": "high",
+       "findings": 59,
+       "severity": {
+        "high": 33,
+        "medium": 26
+       },
+       "confirmedSeverity": {
+        "high": 15,
+        "low": 6,
+        "medium": 36
+       },
+       "unique": 3,
+       "share": 0.31,
+       "confirmed": 57,
+       "falsePositive": 2,
+       "untriaged": 0,
+       "precision": 0.97,
+       "confirmedRecall": 0.31,
+       "highPlus": 45,
+       "usd": 4.28,
+       "usdPer100Kb": 0.43,
+       "usdPerConfirmed": 0.08,
+       "agents": 42,
+       "failedAgents": 9,
+       "outputTokens": 63500,
+       "inputTokens": 7843394,
+       "agentMinutes": 153.6
+      },
+      {
+       "id": 11,
+       "model": "codex:gpt-6.1-sol",
+       "effort": "xhigh",
+       "findings": 76,
+       "severity": {
+        "high": 43,
+        "critical": 1,
+        "medium": 32
+       },
+       "confirmedSeverity": {
+        "high": 20,
+        "low": 3,
+        "medium": 51
+       },
+       "unique": 13,
+       "share": 0.39,
+       "confirmed": 74,
+       "falsePositive": 2,
+       "untriaged": 0,
+       "precision": 0.97,
+       "confirmedRecall": 0.4,
+       "highPlus": 53,
+       "usd": 7.49,
+       "usdPer100Kb": 0.75,
+       "usdPerConfirmed": 0.1,
+       "agents": 42,
+       "failedAgents": 9,
+       "outputTokens": 179336,
+       "inputTokens": 14315735,
+       "agentMinutes": 217.1
+      },
+      {
+       "id": 15,
+       "model": "codex:gpt-6.1-sol",
+       "effort": "max",
+       "findings": 80,
+       "severity": {
+        "critical": 3,
+        "high": 43,
+        "medium": 31,
+        "low": 3
+       },
+       "confirmedSeverity": {
+        "high": 20,
+        "low": 8,
+        "medium": 50
+       },
+       "unique": 16,
+       "share": 0.41,
+       "confirmed": 78,
+       "falsePositive": 2,
+       "untriaged": 0,
+       "precision": 0.97,
+       "confirmedRecall": 0.41,
+       "highPlus": 54,
+       "usd": 8.54,
+       "usdPer100Kb": 0.86,
+       "usdPerConfirmed": 0.11,
+       "agents": 33,
+       "failedAgents": 0,
+       "outputTokens": 252648,
+       "inputTokens": 14035221,
+       "agentMinutes": 94.1
+      },
+      {
+       "id": 16,
+       "model": "codex:gpt-6.1-sol",
+       "effort": "ultra",
+       "findings": 69,
+       "severity": {
+        "critical": 2,
+        "high": 36,
+        "medium": 29,
+        "low": 2
+       },
+       "confirmedSeverity": {
+        "critical": 1,
+        "high": 16,
+        "low": 5,
+        "medium": 46
+       },
+       "unique": 12,
+       "share": 0.35,
+       "confirmed": 68,
+       "falsePositive": 1,
+       "untriaged": 0,
+       "precision": 0.99,
+       "confirmedRecall": 0.36,
+       "highPlus": 47,
+       "usd": 9.44,
+       "usdPer100Kb": 0.95,
+       "usdPerConfirmed": 0.14,
+       "agents": 34,
+       "failedAgents": 1,
+       "outputTokens": 193949,
+       "inputTokens": 31063478,
+       "agentMinutes": 93.1
+      },
+      {
+       "id": 7,
+       "model": "claude-opus-5-5",
+       "effort": "low",
+       "findings": 31,
+       "severity": {
+        "medium": 13,
+        "high": 2,
+        "low": 16
+       },
+       "confirmedSeverity": {
+        "high": 3,
+        "low": 8,
+        "medium": 18
+       },
+       "unique": 7,
+       "share": 0.12,
+       "confirmed": 29,
+       "falsePositive": 2,
+       "untriaged": 0,
+       "precision": 0.94,
+       "confirmedRecall": 0.12,
+       "highPlus": 12,
+       "usd": 7.72,
+       "usdPer100Kb": 0.78,
+       "usdPerConfirmed": 0.27,
+       "agents": 33,
+       "failedAgents": 0,
+       "outputTokens": 30516,
+       "inputTokens": 2415584,
+       "agentMinutes": 16.2
+      },
+      {
+       "id": 12,
+       "model": "claude-opus-5-5",
+       "effort": "medium",
+       "findings": 37,
+       "severity": {
+        "high": 6,
+        "medium": 21,
+        "low": 10
+       },
+       "confirmedSeverity": {
+        "high": 10,
+        "low": 9,
+        "medium": 18
+       },
+       "unique": 6,
+       "share": 0.15,
+       "confirmed": 36,
+       "falsePositive": 1,
+       "untriaged": 0,
+       "precision": 0.97,
+       "confirmedRecall": 0.15,
+       "highPlus": 14,
+       "usd": 10.09,
+       "usdPer100Kb": 1.01,
+       "usdPerConfirmed": 0.28,
+       "agents": 33,
+       "failedAgents": 0,
+       "outputTokens": 81255,
+       "inputTokens": 5058583,
+       "agentMinutes": 26.4
+      },
+      {
+       "id": 13,
+       "model": "claude-opus-5-5",
+       "effort": "high",
+       "findings": 39,
+       "severity": {
+        "high": 7,
+        "medium": 19,
+        "low": 13
+       },
+       "confirmedSeverity": {
+        "high": 11,
+        "low": 8,
+        "medium": 20
+       },
+       "unique": 3,
+       "share": 0.16,
+       "confirmed": 38,
+       "falsePositive": 1,
+       "untriaged": 0,
+       "precision": 0.97,
+       "confirmedRecall": 0.17,
+       "highPlus": 17,
+       "usd": 11.93,
+       "usdPer100Kb": 1.2,
+       "usdPerConfirmed": 0.31,
+       "agents": 33,
+       "failedAgents": 0,
+       "outputTokens": 125292,
+       "inputTokens": 6998323,
+       "agentMinutes": 41.2
+      },
+      {
+       "id": 14,
+       "model": "claude-opus-5-5",
+       "effort": "max",
+       "findings": 88,
+       "severity": {
+        "critical": 1,
+        "high": 14,
+        "medium": 41,
+        "low": 32
+       },
+       "confirmedSeverity": {
+        "high": 16,
+        "low": 22,
+        "medium": 48
+       },
+       "unique": 37,
+       "share": 0.35,
+       "confirmed": 85,
+       "falsePositive": 3,
+       "untriaged": 0,
+       "precision": 0.97,
+       "confirmedRecall": 0.35,
+       "highPlus": 31,
+       "usd": 58.61,
+       "usdPer100Kb": 5.89,
+       "usdPerConfirmed": 0.69,
+       "agents": 47,
+       "failedAgents": 14,
+       "outputTokens": 1426953,
+       "inputTokens": 33960812,
+       "agentMinutes": 230.7
+      }
+     ]
+    }
+   ]
   },
   {
    "name": "scylladb/scylla-rust-driver",
@@ -753,15 +1518,15 @@
      "findings": 289,
      "severity": {
       "critical": 3,
-      "high": 38,
-      "low": 121,
-      "medium": 127
+      "high": 19,
+      "low": 125,
+      "medium": 142
      },
      "triage": {
-      "confirmed": 161,
+      "confirmed": 160,
       "false_positive": 6,
       "open": 121,
-      "wontfix": 1
+      "wontfix": 2
      },
      "triaged": 168,
      "precision": 0.96,
@@ -788,12 +1553,14 @@
       "medium": 287
      },
      "triage": {
-      "confirmed": 727,
+      "confirmed": 701,
+      "duplicate": 21,
       "false_positive": 2,
+      "fixed": 4,
       "open": 3,
-      "wontfix": 1
+      "wontfix": 2
      },
-     "triaged": 730,
+     "triaged": 709,
      "precision": 1,
      "usd": 101.66,
      "usdPer100Kb": 0.46,
@@ -804,6 +1571,19 @@
    "inits": [],
    "curves": [],
    "triage": [
+    {
+     "model": null,
+     "runner": "claude",
+     "effort": null,
+     "groupSize": 5,
+     "findings": 19,
+     "verdicts": {
+      "real": 19
+     },
+     "severityChanged": 19,
+     "usd": null,
+     "usdPerFinding": null
+    },
     {
      "model": "codex:gpt-6.1-sol",
      "runner": "codex",
@@ -874,10 +1654,12 @@
       "medium": 105
      },
      "triage": {
-      "confirmed": 295,
+      "confirmed": 266,
+      "duplicate": 28,
+      "fixed": 1,
       "wontfix": 2
      },
-     "triaged": 297,
+     "triaged": 269,
      "precision": 1,
      "usd": 19.19,
      "usdPer100Kb": 0.48,
@@ -896,20 +1678,21 @@
      "kb": 3706,
      "findings": 144,
      "severity": {
-      "critical": 7,
-      "high": 13,
+      "critical": 2,
+      "high": 17,
       "low": 50,
-      "medium": 74
+      "medium": 75
      },
      "triage": {
-      "confirmed": 84,
-      "false_positive": 7,
-      "fixed": 5,
-      "open": 47,
+      "confirmed": 83,
+      "duplicate": 4,
+      "false_positive": 8,
+      "fixed": 7,
+      "open": 41,
       "wontfix": 1
      },
-     "triaged": 97,
-     "precision": 0.93,
+     "triaged": 99,
+     "precision": 0.92,
      "usd": 20.5,
      "usdPer100Kb": 0.55,
      "hours": 0.2
@@ -943,14 +1726,14 @@
        "model": "claude-opus-5-5",
        "findings": 19,
        "severity": {
-        "critical": 2,
+        "critical": 1,
         "medium": 8,
-        "high": 2,
+        "high": 3,
         "low": 7
        },
        "unique": 14,
-       "share": 0.3,
-       "confirmed": 13,
+       "share": 0.29,
+       "confirmed": 14,
        "falsePositive": 0,
        "precision": 1
       }
@@ -1100,6 +1883,20 @@
      "severityChanged": 12,
      "usd": 9.95,
      "usdPerFinding": 0.094
+    },
+    {
+     "model": null,
+     "runner": "claude",
+     "effort": null,
+     "groupSize": 5,
+     "findings": 6,
+     "verdicts": {
+      "false_positive": 1,
+      "real": 5
+     },
+     "severityChanged": 5,
+     "usd": null,
+     "usdPerFinding": null
     }
    ],
    "efforts": []

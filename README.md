@@ -97,7 +97,9 @@ their `effort`. Other runners have no effort setting.
 ## Model performance
 
 https://dk-code-factory.github.io/code-scan/ compares reviewer models on real repositories (quality, false positives,
-price, chunk size) and recommends which to pick. The data is exported from local stores with `npm run site`
+price, chunk size, reasoning effort) and recommends which to pick. Short version from those runs: Codex
+`gpt-6.1-sol` at `xhigh` for full scans; effort raises recall, not precision; a second, different run finds more than a
+higher effort level. The data is exported from local stores with `npm run site`
 (`bin/site-export.js`: runs `scans`, `compare`, `init report` and `calibrate report` on copies of
 `~/.cache/code-scan/*`, exports only aggregates, anonymizes repos not listed as public in `docs/site-config.json`);
 pushing `docs/` to `main` publishes it.

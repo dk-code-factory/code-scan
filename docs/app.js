@@ -189,7 +189,7 @@
     const studies = data.repos.flatMap((r) => (r.efforts || []).map((e) => ({ ...e, repo: r })));
     const host = $('effort-body');
     if (!studies.length) { host.innerHTML = '<p class="muted">No effort study yet.</p>'; return; }
-    const ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    const ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
     for (const st of studies) {
       const rows = st.rows.slice().sort((a, b) => modelInfo(a.model).name.localeCompare(modelInfo(b.model).name) || ORDER.indexOf(a.effort) - ORDER.indexOf(b.effort));
       const sec = document.createElement('div');
@@ -226,10 +226,29 @@
       cap.innerHTML = `<div class="legend">${models.map((m) => `<span>${sw(m)}</span>`).join('')}</div>Recall = severity-weighted share of all confirmed issues found by any of these scans. Up and left is better.`;
       fig.appendChild(cap);
       sec.appendChild(fig);
-      const tw = document.createElement('div'); tw.className = 'table-wrap';
-      tw.innerHTML = `<table><tr><th>model</th><th>effort</th>${sevTh}<th>confirmed</th><th>false pos.</th><th>precision</th><th>recall</th><th>only this one</th><th>$</th><th>$/100KB</th><th>$/confirmed</th><th>output tokens</th><th>agent min</th></tr>` +
-        rows.map((r) => `<tr><td>${sw(r.model)}</td><td>${esc(r.effort || '–')}</td>${sevTd(r.findings, r.severity)}<td>${r.confirmed}</td><td>${r.falsePositive}</td><td>${f2(r.precision)}</td><td><b>${f2(r.confirmedRecall)}</b></td><td>${r.unique}</td><td>${usd(r.usd)}</td><td>${usd(r.usdPer100Kb)}</td><td>${usd(r.usdPerConfirmed)}</td><td>${r.outputTokens ? (r.outputTokens / 1e6).toFixed(2) + 'M' : '–'}</td><td>${r.agentMinutes ?? '–'}</td></tr>`).join('') + '</table>';
-      sec.appendChild(tw);
+      const lab = (r) => `<td>${sw(r.model)}</td><td class="l">${esc(r.effort || '–')}</td>`;
+      const t1 = document.createElement('div'); t1.className = 'table-wrap';
+      t1.innerHTML = `<table><tr><th>model</th><th class="l">effort</th><th>recall</th><th>precision</th><th>confirmed</th><th>false pos.</th><th>untriaged</th><th>only this one</th><th>$</th><th>$/100KB</th><th>$/confirmed</th><th>output tokens</th><th>agent min</th></tr>` +
+        rows.map((r) => `<tr>${lab(r)}<td><b>${f2(r.confirmedRecall)}</b></td><td>${f2(r.precision)}</td><td>${r.confirmed}</td><td>${r.falsePositive}</td><td>${r.untriaged}</td><td>${r.unique}</td><td>${usd(r.usd)}</td><td>${usd(r.usdPer100Kb)}</td><td>${usd(r.usdPerConfirmed)}</td><td>${r.outputTokens ? (r.outputTokens / 1e6).toFixed(2) + 'M' : '–'}</td><td>${r.agentMinutes ?? '–'}</td></tr>`).join('') + '</table>';
+      sec.appendChild(t1);
+      const h = document.createElement('h4'); h.textContent = 'Findings by severity: as reported by the reviewer, and confirmed at the severity triage settled on'; h.className = 'muted'; h.style.margin = '16px 0 4px';
+      sec.appendChild(h);
+      const t2 = document.createElement('div'); t2.className = 'table-wrap';
+      t2.innerHTML = `<table><tr><th rowspan="2">model</th><th rowspan="2" class="l">effort</th><th colspan="5">reported</th><th colspan="5">confirmed (triaged severity)</th></tr><tr>${sevTh}${sevTh}</tr>` +
+        rows.map((r) => `<tr>${lab(r)}${sevTd(r.findings, r.severity)}${sevTd(r.confirmed, r.confirmedSeverity)}</tr>`).join('') + '</table>';
+      sec.appendChild(t2);
+      if (st.combos && st.combos.length) {
+        const h2 = document.createElement('h4'); h2.className = 'muted'; h2.style.margin = '16px 0 4px';
+        h2.textContent = 'Several runs together: recall of their union and their combined price';
+        sec.appendChild(h2);
+        const t3 = document.createElement('div'); t3.className = 'table-wrap';
+        const best = rows.reduce((a, r) => (r.confirmedRecall > (a ? a.confirmedRecall : -1) ? r : a), null);
+        t3.innerHTML = `<table><tr><th>runs</th><th>recall</th><th>$</th></tr>` +
+          (best ? `<tr><td class="l">${withEffort(best.model, best.effort)} <span class="muted">(best single run)</span></td><td><b>${f2(best.confirmedRecall)}</b></td><td>${usd(best.usd)}</td></tr>` : '') +
+          st.combos.map((c) => `<tr><td class="l">${c.runs.map((r) => withEffort(r.model, r.effort)).join(' + ')}</td><td><b>${f2(c.recall)}</b></td><td>${usd(c.usd)}</td></tr>`).join('') + '</table>';
+        t3.querySelectorAll('td.l').forEach((td) => { td.style.whiteSpace = 'normal'; });
+        sec.appendChild(t3);
+      }
       host.appendChild(sec);
     }
   })();
