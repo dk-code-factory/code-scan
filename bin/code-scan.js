@@ -935,21 +935,107 @@ function stemKey(p) {
   return stem;
 }
 
-function pack(scan) {
+/** Release abandoned claims, retaining recent claims owned by reviewers still running. */
+function requeueClaims(scanId, keepClaimedSince, replay = false) {
+  const d = db();
+  const kept = keepClaimedSince
+    ? d.prepare("SELECT id, items_json FROM chunks WHERE scan_id=? AND state='claimed' AND claimed_at >= ?").all(scanId, keepClaimedSince)
+    : [];
+  const keptPaths = new Set(kept.flatMap((c) => JSON.parse(c.items_json).map((it) => it.path)));
+  let retained = [];
+  if (replay) {
+    d.prepare(`UPDATE chunks SET state='pending', claimed_at=NULL WHERE scan_id=? AND
+      (state='void' OR (state='claimed' AND (? IS NULL OR claimed_at IS NULL OR claimed_at < ?)))`)
+      .run(scanId, keepClaimedSince, keepClaimedSince);
+  } else {
+    const open = d.prepare("SELECT id, items_json, bytes FROM chunks WHERE scan_id=? AND state IN ('pending','claimed')").all(scanId);
+    const heldIds = new Set(kept.map((c) => c.id));
+    const reservedIds = new Set(heldIds);
+    if (kept.length) {
+      // Legacy chunks can share a sliced file. Keep its queued siblings and their slice progress;
+      // include every path sharing those chunks so repacking cannot duplicate any of their items.
+      const byPath = new Map();
+      const progress = new Map(d.prepare('SELECT path,state,slices_json,slices_done FROM files WHERE scan_id=?').all(scanId)
+        .map((f) => [f.path, { state: f.state, slices: f.slices_json ? JSON.parse(f.slices_json) : null, done: JSON.parse(f.slices_done) }]));
+      const unfinished = (it) => {
+        const f = progress.get(it.path);
+        return f && f.state !== 'reviewed' && (it.slice === undefined || !f.done.includes(it.slice));
+      };
+      const itemKey = (it) => JSON.stringify([it.path, it.slice]);
+      const covered = new Set();
+      const wholePaths = new Set();
+      for (const c of open) {
+        c.items = JSON.parse(c.items_json);
+        for (const it of c.items) { covered.add(itemKey(it)); if (it.slice === undefined) wholePaths.add(it.path); }
+      }
+      // Failed legacy slices become void. Recover only missing slice keys, newest first, without
+      // reviving superseded whole-file chunks or copies already covered by current/completed work.
+      for (const c of d.prepare("SELECT id,items_json,bytes FROM chunks WHERE scan_id=? AND state='void' ORDER BY id DESC").all(scanId)) {
+        const items = JSON.parse(c.items_json).filter((it) => {
+          const f = progress.get(it.path);
+          if (it.slice === undefined || !f || !f.slices || f.slices.length < 2 || wholePaths.has(it.path)
+            || !unfinished(it) || covered.has(itemKey(it))) return false;
+          covered.add(itemKey(it));
+          return true;
+        });
+        if (items.length) open.push({ ...c, items, wasVoid: true });
+      }
+      for (const c of open) {
+        for (const it of c.items) {
+          if (!byPath.has(it.path)) byPath.set(it.path, []);
+          byPath.get(it.path).push(c);
+        }
+      }
+      const paths = [...keptPaths];
+      for (let i = 0; i < paths.length; i++) {
+        for (const c of byPath.get(paths[i]) || []) {
+          if (reservedIds.has(c.id)) continue;
+          reservedIds.add(c.id);
+          for (const it of c.items) if (!keptPaths.has(it.path)) { keptPaths.add(it.path); paths.push(it.path); }
+        }
+      }
+    }
+    const queue = d.prepare("UPDATE chunks SET state='pending', claimed_at=NULL,items_json=?,bytes=? WHERE id=?");
+    const discard = d.prepare("UPDATE chunks SET state='void' WHERE id=?");
+    for (const c of open) {
+      if (heldIds.has(c.id)) continue;
+      if (reservedIds.has(c.id)) {
+        const fileProgress = d.prepare('SELECT state,slices_done FROM files WHERE scan_id=? AND path=?');
+        c.items = c.items.filter((it) => {
+          const f = fileProgress.get(scanId, it.path);
+          return f && f.state !== 'reviewed' && (it.slice === undefined || !JSON.parse(f.slices_done).includes(it.slice));
+        });
+        if (!c.items.length) { discard.run(c.id); continue; }
+        c.bytes = c.items.reduce((sum, it) => sum + Number(it.bytes || 0), 0);
+        queue.run(JSON.stringify(c.items), c.bytes, c.id);
+        retained.push(c);
+      } else if (!c.wasVoid) discard.run(c.id);
+    }
+  }
+  const reset = d.prepare("UPDATE files SET state='pending', slices_done='[]' WHERE scan_id=? AND path=?");
+  for (const f of d.prepare("SELECT path FROM files WHERE scan_id=? AND state IN ('in_progress','partial')").all(scanId)) {
+    if (!keptPaths.has(f.path)) reset.run(scanId, f.path);
+  }
+  return { keptClaims: kept.length, keptPaths, retained };
+}
+
+function pack(scan, { keepClaimedSince = null } = {}) {
   const opts = JSON.parse(scan.options_json);
   const budget = Math.max(MIN_CHUNK_KB, Number(opts.chunkKb || DEFAULT_CHUNK_KB)) * 1024;
   const plan = scan.plan_json ? JSON.parse(scan.plan_json) : null;
   const d = db();
-  d.prepare("UPDATE chunks SET state='void' WHERE scan_id=? AND state IN ('pending','claimed')").run(scan.id);
-  d.prepare("UPDATE files SET state='pending', slices_done='[]' WHERE scan_id=? AND state IN ('in_progress','partial')").run(scan.id);
-  const files = d.prepare("SELECT * FROM files WHERE scan_id=? AND state IN ('pending','partial') ORDER BY path").all(scan.id);
+  const { keptClaims, keptPaths, retained } = requeueClaims(scan.id, keepClaimedSince);
+  const files = d.prepare("SELECT * FROM files WHERE scan_id=? AND state IN ('pending','partial') ORDER BY path").all(scan.id)
+    .filter((f) => !keptPaths.has(f.path));
   // a file is never split (older state may carry slice bookkeeping; drop it)
   const setSlices = d.prepare('UPDATE files SET slices_json=? WHERE scan_id=? AND path=?');
   for (const f of files) if (f.slices_json) setSlices.run(null, scan.id, f.path);
   const chunks = packPlan(files, budget, plan);
   const ins = d.prepare("INSERT INTO chunks(scan_id,ord,unit,items_json,bytes,state) VALUES(?,?,?,?,?,'pending')");
   chunks.forEach((c, i) => ins.run(scan.id, i, c.unit, JSON.stringify(c.items), c.bytes));
-  return { chunks: chunks.length, files: files.length, bytes: chunks.reduce((s, c) => s + c.bytes, 0) };
+  const queuedPaths = new Set([...files.map((f) => f.path), ...retained.flatMap((c) => c.items.map((it) => it.path))]);
+  return { chunks: chunks.length + retained.length, files: queuedPaths.size,
+    bytes: [...chunks, ...retained].reduce((s, c) => s + c.bytes, 0), keptClaims };
 }
 
 /** Chunks for `files` ({path, bytes, unit}, sorted by path) at `budget` bytes: pure, no database. */
@@ -1003,6 +1089,10 @@ function packPlan(files, budget, plan) {
   return chunks;
 }
 
+function hasClaimedChunks(scanId) {
+  return !!db().prepare("SELECT 1 FROM chunks WHERE scan_id=? AND state='claimed' LIMIT 1").get(scanId);
+}
+
 function pendingChunks(scanId) {
   return db().prepare("SELECT COUNT(*) n FROM chunks WHERE scan_id=? AND state='pending'").get(scanId).n;
 }
@@ -1031,7 +1121,8 @@ function modelAlias(id) {
 /** Workflow args for one scan (the `NEXT` object), without the follow list. */
 function nextObj(scan, plan) {
   const workers = Math.min(pendingChunks(scan.id), MAX_WORKERS_PER_RUN);
-  const o = { cli: CLI, root: repoRoot(), scanId: scan.id, plan: !!plan, workers };
+  // Planning repacks the queue; existing reviewers keep the heuristic layout until they finish.
+  const o = { cli: CLI, root: repoRoot(), scanId: scan.id, plan: !!plan && !hasClaimedChunks(scan.id), workers };
   const so = JSON.parse(getScan(scan.id).options_json);
   const alias = modelAlias(so.model);
   if (alias) o.model = alias;
@@ -1128,7 +1219,7 @@ function adoptPlan(scanId) {
   return tx((d) => {
     const cur = getScan(scanId);
     const o = JSON.parse(cur.options_json);
-    if (!o.planFrom || o.planAdopted) return false;
+    if (!o.planFrom || o.planAdopted || hasClaimedChunks(scanId)) return false;
     const lead = getScan(o.planFrom);
     if (lead.plan_json) { try { applyPlan(cur, JSON.parse(lead.plan_json)); } catch (e) { if (!(e instanceof PlanError)) throw e; } }
     o.planAdopted = lead.plan_json ? lead.id : 'none';
@@ -1246,35 +1337,25 @@ function cmdRestart(a) {
 }
 
 /** Put a repeated scan's own chunks back in the queue (it is never repacked: chunks stay as copied). */
-function reviveReplay(scanId) {
-  tx((d) => {
-    d.prepare("UPDATE chunks SET state='pending', claimed_at=NULL WHERE scan_id=? AND state IN ('claimed','void')").run(scanId);
-    d.prepare("UPDATE files SET state='pending', slices_done='[]' WHERE scan_id=? AND state IN ('in_progress','partial')").run(scanId);
-  });
+function reviveReplay(scanId, keepClaimedSince = null) {
+  const { keptClaims } = tx(() => requeueClaims(scanId, keepClaimedSince, true));
   const d = db();
   const r = d.prepare("SELECT COUNT(*) n, COALESCE(SUM(bytes),0) b FROM chunks WHERE scan_id=? AND state='pending'").get(scanId);
   const files = d.prepare("SELECT COUNT(*) n FROM files WHERE scan_id=? AND state='pending'").get(scanId).n;
-  return { chunks: r.n, bytes: r.b, files };
+  return { chunks: r.n, bytes: r.b, files, keptClaims };
 }
 
-const CLAIM_LIVE_MS = 45 * 60 * 1000; // an agent's own timeout: an older claim has no live reviewer
+const CLAIM_LIVE_MS = 60 * 60 * 1000; // grace beyond the runner agent timeout (45 minutes)
 function cmdContinue(a) {
   rejectSpecFlags(a.f, 'continue');
   const scan = pickScan(a.f);
   if (!scan) die('no active or stopped scan — use `start` or `restart`');
   if (!['active', 'stopped'].includes(scan.status)) die(`scan ${scan.id} is ${scan.status}`);
-  // pack() voids claimed chunks and re-queues their files: with reviewers still working on them
-  // (a live runner, or a user `stop` without --now whose in-flight agents have not submitted yet) that
-  // would review the same code twice and record duplicate findings
-  const cl = db().prepare("SELECT COUNT(*) n, MAX(claimed_at) last FROM chunks WHERE scan_id=? AND state='claimed'").get(scan.id);
-  if (cl.n && !a.f.reclaim) {
-    const runnerLive = /^pid:/.test(scan.workflow_task || '') && pidAlive(scan.workflow_task);
-    const recent = Date.now() - Date.parse(cl.last) < CLAIM_LIVE_MS;
-    const userStop = scan.status === 'stopped' && !cfgGet(`stop_reason:${scan.id}`); // not a spending-limit stop
-    if (runnerLive || (userStop && recent)) {
-      die(`scan ${scan.id}: ${cl.n} chunk(s) still claimed by in-flight reviewers${runnerLive ? ` (runner ${scan.workflow_task} is running)` : ''} — wait for them to finish, \`stop --now\` to release them, or \`continue --reclaim\` to re-queue them anyway`);
-    }
-  }
+  // A live PID runner or a stopped scan can still have in-flight reviewers (including limit stops).
+  // Preserve their fresh claims; --reclaim, a dead PID runner, or an expired claim releases them.
+  const pidRun = /^pid:/.test(scan.workflow_task || '');
+  const mayBeRunning = !a.f.reclaim && (pidRun ? pidAlive(scan.workflow_task) : scan.status === 'stopped');
+  const keepClaimedSince = mayBeRunning ? new Date(Date.now() - CLAIM_LIVE_MS).toISOString() : null;
   const head = git(['rev-parse', 'HEAD']).trim();
   setScanStatus(scan.id, 'active');
   db().prepare('DELETE FROM config WHERE key=?').run(`stop_reason:${scan.id}`);
@@ -1305,11 +1386,12 @@ function cmdContinue(a) {
     adoptPlan(scan.id);
   }
   const s1 = getScan(scan.id);
-  const pk = JSON.parse(s1.options_json).replay ? reviveReplay(scan.id) : tx(() => pack(s1));
+  const pk = JSON.parse(s1.options_json).replay ? reviveReplay(scan.id, keepClaimedSince) : tx(() => pack(s1, { keepClaimedSince }));
   const unplanned = !s1.plan_json && !so.noPlan && !so.planFrom && !so.replay;
   out(`scan ${scan.id} @ ${scan.commit_sha.slice(0, 12)} profile=${scan.profile_name}: ${pk.files} files (${kb(pk.bytes)}) left in ${pk.chunks} chunks`);
   if (head !== scan.commit_sha) out(`note: HEAD is ${head.slice(0, 12)}; this scan reviews ${scan.commit_sha.slice(0, 12)} (use \`restart\` for HEAD)`);
-  if (pk.chunks === 0 && !unplanned) { setScanStatus(scan.id, 'done'); out('nothing left — scan marked done'); }
+  if (pk.keptClaims) out(`note: ${pk.keptClaims} chunk(s) still claimed by running reviewers are left to them (\`continue --reclaim\` re-queues them now)`);
+  if (pk.chunks === 0 && !pk.keptClaims && !unplanned) { setScanStatus(scan.id, 'done'); out('nothing left — scan marked done'); }
   out(nextLine(getScan(scan.id), unplanned && pk.files > 0));
 }
 
@@ -1449,6 +1531,7 @@ function cmdPlanContext(a) {
 }
 
 function applyPlan(scan, plan) {
+  if (hasClaimedChunks(scan.id)) throw new PlanError(`scan ${scan.id} has claimed chunks — finish or release them before applying a plan`);
   const d = db();
   const all = d.prepare('SELECT path,state,reason,blob_sha FROM files WHERE scan_id=?').all(scan.id);
   const bad = [];
@@ -5303,7 +5386,7 @@ async function cmdRun(a) {
     adoptPlan(scan.id);
     scan = getScan(scan.id);
     log(scan.plan_json ? `adopted the plan of scan ${so.planFrom}` : `scan ${so.planFrom} has no plan; heuristic chunking`);
-  } else if (!scan.plan_json && !so.noPlan && !so.replay && scan.kind === 'scan') {
+  } else if (!scan.plan_json && !so.noPlan && !so.replay && scan.kind === 'scan' && !hasClaimedChunks(scan.id)) {
     log('planning');
     const plan = await runPlanner(scan, ctx);
     if (plan && plan.agentFailed) {
