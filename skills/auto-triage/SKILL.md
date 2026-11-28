@@ -32,15 +32,28 @@ From the user's words build the selection, then preview it:
 Show the user the group listing the command prints (it lists every finding id). If it selects more than 10
 findings and the user did not already name the ids, ask them to confirm before starting.
 
-## 2. Repository for the issue search
+## 2. Trackers for the duplicate search
 
-`gh repo view --json nameWithOwner,parent` in the repo: the upstream is `parent` (owner/name) if the checkout is a
-fork, else `nameWithOwner`. If `gh` is unavailable or the repo is not on GitHub, start without `--repo` (the
-issue search is skipped).
+The same agent that validates a finding searches for an existing report of it. `gh repo view --json
+nameWithOwner,parent` in the repo: the upstream is `parent` (owner/name) if the checkout is a fork, else
+`nameWithOwner` → `--repo <owner/name>`. If the project also tracks bugs in Jira (the user says so, or
+`report-config dedupe_trackers` lists a `jira:` tracker) add `--jira <PROJ>`; agents search it with their Jira tool.
+`start` checks that `gh` reaches the repo and refuses otherwise. Each agent reports per finding and tracker whether
+its search ran (`done` with the queries) or `failed`; `render` will not file a finding without a `done` search of
+every dedupe tracker. The named `code-scan:triager` Workflow agent inherits the Claude session's
+configured MCP tools, with `Edit`, `Write`, `NotebookEdit` and `Agent` denied; use Jira tools only to
+search and read issues. If the plugin agent is unavailable, Workflow uses the default agent with the
+host's tool permissions and the same read-only triage instructions. A printed `RUN` command
+starts a separate CLI: configure the Jira connection and read-tool permissions in that runner too.
+For Claude CLI, preapprove the exact Jira search/read tool names in its permission settings; the
+runner's `--allowedTools` flags add preapprovals rather than hiding other tools. A connection available
+only in the hosting app does not transfer to a headless CLI. Missing or denied Jira tools must be
+reported as a failed search, keeping findings held.
+With neither `--repo` nor `--jira` the search is skipped and those findings cannot be filed from this run.
 
 ## 3. Start and launch
 
-`$CS auto-triage start <same selection> [--group-size N] --repo <owner/name> [--concurrency N] [--model m] [--runner r] [--effort e]`
+`$CS auto-triage start <same selection> [--group-size N] [--repo <owner/name>] [--jira PROJ] [--concurrency N] [--model m] [--runner r] [--effort e]`
 (`--concurrency` 1–32 agents at once, default 10; `--effort` reasoning effort — claude `low…max`, codex
 `minimal…xhigh`, opencode any — only if the user asks, change it later with `auto-triage continue <run> --effort e`;
 `--model`/`--runner` only if the user names one — the runner
@@ -55,7 +68,8 @@ command (it detaches and returns at once). Tell the user in one line which run i
 `$CS auto-triage status <runId>` shows progress. Do not poll.
 
 When the completion notification arrives: `$CS auto-triage status <runId>`. If groups are still pending
-(agents failed), `$CS auto-triage continue <runId>` and launch again the same way (at most 2 more rounds). Finish with the status output's verdict line plus the per-finding lines for `real` ones, and
+(agents failed), `$CS auto-triage continue <runId>` and launch again the same way (at most 2 more rounds). Finish with the status output's verdict line and its `duplicate search` lines — if any search FAILED or is missing,
+say so prominently: those findings cannot be filed until re-triaged — plus the per-finding lines for `real` ones, and
 point to `$CS query --ids <ids> --triage all --sort fix_loc` / `/code-scan:report` for filing.
 
 ## Stop

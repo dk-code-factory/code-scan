@@ -40,8 +40,12 @@ function answer() {
   }
   const arr = prompt.match(/^(\[\{"id":.*\}\])$/m);
   if (arr) {
-    const ids = JSON.parse(arr[1]).map((x) => x.id);
-    return JSON.stringify(ids.map((id) => ({ id, verdict: 'real', severity: 'medium', type: 'logic', fix_loc: 2, issue: null, note: `checked #${id}` })));
+    const tmpl = JSON.parse(arr[1]);
+    // a tracker search is reported as done only when this "agent" was started with network access
+    const net = args.includes('sandbox_workspace_write.network_access=true') || runner !== 'codex';
+    return JSON.stringify(tmpl.map(({ id, issue_search: s }) => ({ id, verdict: 'real', severity: 'medium', type: 'logic', fix_loc: 2, issue: null,
+      issue_search: Object.fromEntries(Object.keys(s || {}).map((t) => [t, net ? { status: 'done', queries: ['q1', 'q2'] } : { status: 'failed', error: 'error connecting to api.github.com' }])),
+      note: `checked #${id}` })));
   }
   return 'I could not understand the task.';
 }
