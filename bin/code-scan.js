@@ -937,23 +937,51 @@ function stemKey(p) {
 function requeueClaims(scanId, keepClaimedSince, replay = false) {
   const d = db();
   const kept = keepClaimedSince
-    ? d.prepare("SELECT items_json FROM chunks WHERE scan_id=? AND state='claimed' AND claimed_at >= ?").all(scanId, keepClaimedSince)
+    ? d.prepare("SELECT id, items_json FROM chunks WHERE scan_id=? AND state='claimed' AND claimed_at >= ?").all(scanId, keepClaimedSince)
     : [];
   const keptPaths = new Set(kept.flatMap((c) => JSON.parse(c.items_json).map((it) => it.path)));
+  let retained = [];
   if (replay) {
     d.prepare(`UPDATE chunks SET state='pending', claimed_at=NULL WHERE scan_id=? AND
       (state='void' OR (state='claimed' AND (? IS NULL OR claimed_at IS NULL OR claimed_at < ?)))`)
       .run(scanId, keepClaimedSince, keepClaimedSince);
   } else {
-    d.prepare(`UPDATE chunks SET state='void' WHERE scan_id=? AND
-      (state='pending' OR (state='claimed' AND (? IS NULL OR claimed_at IS NULL OR claimed_at < ?)))`)
-      .run(scanId, keepClaimedSince, keepClaimedSince);
+    const open = d.prepare("SELECT id, items_json, bytes FROM chunks WHERE scan_id=? AND state IN ('pending','claimed')").all(scanId);
+    const heldIds = new Set(kept.map((c) => c.id));
+    const reservedIds = new Set(heldIds);
+    if (kept.length) {
+      // Legacy chunks can share a sliced file. Keep its queued siblings and their slice progress;
+      // include every path sharing those chunks so repacking cannot duplicate any of their items.
+      const byPath = new Map();
+      for (const c of open) {
+        c.items = JSON.parse(c.items_json);
+        for (const it of c.items) {
+          if (!byPath.has(it.path)) byPath.set(it.path, []);
+          byPath.get(it.path).push(c);
+        }
+      }
+      const paths = [...keptPaths];
+      for (let i = 0; i < paths.length; i++) {
+        for (const c of byPath.get(paths[i]) || []) {
+          if (reservedIds.has(c.id)) continue;
+          reservedIds.add(c.id);
+          for (const it of c.items) if (!keptPaths.has(it.path)) { keptPaths.add(it.path); paths.push(it.path); }
+        }
+      }
+    }
+    const queue = d.prepare("UPDATE chunks SET state='pending', claimed_at=NULL WHERE id=?");
+    const discard = d.prepare("UPDATE chunks SET state='void' WHERE id=?");
+    for (const c of open) {
+      if (heldIds.has(c.id)) continue;
+      if (reservedIds.has(c.id)) { queue.run(c.id); retained.push(c); }
+      else discard.run(c.id);
+    }
   }
   const reset = d.prepare("UPDATE files SET state='pending', slices_done='[]' WHERE scan_id=? AND path=?");
   for (const f of d.prepare("SELECT path FROM files WHERE scan_id=? AND state IN ('in_progress','partial')").all(scanId)) {
     if (!keptPaths.has(f.path)) reset.run(scanId, f.path);
   }
-  return { keptClaims: kept.length, keptPaths };
+  return { keptClaims: kept.length, keptPaths, retained };
 }
 
 function pack(scan, { keepClaimedSince = null } = {}) {
@@ -961,7 +989,7 @@ function pack(scan, { keepClaimedSince = null } = {}) {
   const budget = Math.max(MIN_CHUNK_KB, Number(opts.chunkKb || DEFAULT_CHUNK_KB)) * 1024;
   const plan = scan.plan_json ? JSON.parse(scan.plan_json) : null;
   const d = db();
-  const { keptClaims, keptPaths } = requeueClaims(scan.id, keepClaimedSince);
+  const { keptClaims, keptPaths, retained } = requeueClaims(scan.id, keepClaimedSince);
   const files = d.prepare("SELECT * FROM files WHERE scan_id=? AND state IN ('pending','partial') ORDER BY path").all(scan.id)
     .filter((f) => !keptPaths.has(f.path));
   // a file is never split (older state may carry slice bookkeeping; drop it)
@@ -970,7 +998,9 @@ function pack(scan, { keepClaimedSince = null } = {}) {
   const chunks = packPlan(files, budget, plan);
   const ins = d.prepare("INSERT INTO chunks(scan_id,ord,unit,items_json,bytes,state) VALUES(?,?,?,?,?,'pending')");
   chunks.forEach((c, i) => ins.run(scan.id, i, c.unit, JSON.stringify(c.items), c.bytes));
-  return { chunks: chunks.length, files: files.length, bytes: chunks.reduce((s, c) => s + c.bytes, 0), keptClaims };
+  const queuedPaths = new Set([...files.map((f) => f.path), ...retained.flatMap((c) => c.items.map((it) => it.path))]);
+  return { chunks: chunks.length + retained.length, files: queuedPaths.size,
+    bytes: [...chunks, ...retained].reduce((s, c) => s + c.bytes, 0), keptClaims };
 }
 
 /** Chunks for `files` ({path, bytes, unit}, sorted by path) at `budget` bytes: pure, no database. */

@@ -337,6 +337,37 @@ cp -r "$CODESCAN_HOME" "$W/state-claims"
   held=$(B claim "$live" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p'); B stop >/dev/null
   B set-run "$live" pid:2147483647 >/dev/null; B continue >/dev/null
   [ "$(B sql "select state from chunks where id=$held" | tail -1)" = void ] && ok continue-dead-runner || bad continue-dead-runner
+  # Persisted legacy slices remain a supported input even though new scans pack whole files.
+  P legacy --prompt default --model opus --no-plan --only src/store/big.c --chunk-kb 40
+  fresh; B restart --profile legacy --force >/dev/null; live=$(sidof)
+  read -r held expired pending < <(node - "$live" <<'JS'
+const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db'), sid=Number(process.argv[2]);
+const c=d.prepare("select * from chunks where scan_id=? and state='pending' order by ord limit 1").get(sid);
+const base=JSON.parse(c.items_json)[0], slices=[0,1,2].map(slice=>({...base,slice,start:slice*500+1,end:(slice+1)*500,bytes:Math.ceil(base.bytes/3)}));
+d.prepare('update files set slices_json=?, slices_done=? where scan_id=? and path=?').run(JSON.stringify(slices),'[]',sid,base.path);
+d.prepare('update chunks set items_json=?,bytes=? where id=?').run(JSON.stringify([slices[0]]),slices[0].bytes,c.id);
+const add=d.prepare('insert into chunks(scan_id,ord,unit,items_json,bytes,state,claimed_at) values(?,?,?,?,?,?,?)');
+const expired=add.run(sid,1,c.unit,JSON.stringify([slices[1]]),slices[1].bytes,'claimed','2000-01-01T00:00:00.000Z').lastInsertRowid;
+const pending=add.run(sid,2,c.unit,JSON.stringify([slices[2]]),slices[2].bytes,'pending',null).lastInsertRowid;
+console.log(c.id,Number(expired),Number(pending));
+JS
+  )
+  o=$(B claim "$live"); has "$o" "CHUNK $held " && has "$o" 'slice 0' || bad "legacy-claim: $o"
+  B stop >/dev/null; o=$(B continue)
+  [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && [ "$(B sql "select count(*) from chunks where id in ($expired,$pending) and state='pending'" | tail -1)" = 2 ] \
+    && has "$o" 'left in 2 chunks' && ok continue-legacy-siblings || bad "continue-legacy-siblings: $o"
+  B submit "$live" "$held" --file src/store/big.c --slice 0 <<<'[]' >/dev/null
+  [ "$(B sql "select slices_done from files where scan_id=$live and path='src/store/big.c'" | tail -1)" = '[0]' ] \
+    && ok continue-legacy-progress || bad continue-legacy-progress
+  o=$(B claim "$live"); has "$o" "CHUNK $expired " || bad "legacy-expired-claim: $o"
+  B submit "$live" "$expired" --file src/store/big.c --slice 1 <<<'[]' >/dev/null
+  o=$(B claim "$live"); has "$o" "CHUNK $pending " || bad "legacy-pending-claim: $o"
+  B submit "$live" "$pending" --file src/store/big.c --slice 2 <<<'[]' >/dev/null
+  has "$(B status --scan "$live")" '\[done\]' \
+    && [ "$(B sql "select slices_done from files where scan_id=$live and path='src/store/big.c'" | tail -1)" = '[0,1,2]' ] \
+    && ok continue-legacy-completes || bad continue-legacy-completes
   [ "$FAILS" = "$claim_failures" ]
 )
 # Include failures from the isolated scenario block in the outer test result.
