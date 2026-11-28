@@ -1087,6 +1087,10 @@ function packPlan(files, budget, plan) {
   return chunks;
 }
 
+function hasClaimedChunks(scanId) {
+  return !!db().prepare("SELECT 1 FROM chunks WHERE scan_id=? AND state='claimed' LIMIT 1").get(scanId);
+}
+
 function pendingChunks(scanId) {
   return db().prepare("SELECT COUNT(*) n FROM chunks WHERE scan_id=? AND state='pending'").get(scanId).n;
 }
@@ -1115,7 +1119,8 @@ function modelAlias(id) {
 /** Workflow args for one scan (the `NEXT` object), without the follow list. */
 function nextObj(scan, plan) {
   const workers = Math.min(pendingChunks(scan.id), MAX_WORKERS_PER_RUN);
-  const o = { cli: CLI, root: repoRoot(), scanId: scan.id, plan: !!plan, workers };
+  // Planning repacks the queue; existing reviewers keep the heuristic layout until they finish.
+  const o = { cli: CLI, root: repoRoot(), scanId: scan.id, plan: !!plan && !hasClaimedChunks(scan.id), workers };
   const so = JSON.parse(getScan(scan.id).options_json);
   const alias = modelAlias(so.model);
   if (alias) o.model = alias;
@@ -1212,7 +1217,7 @@ function adoptPlan(scanId) {
   return tx((d) => {
     const cur = getScan(scanId);
     const o = JSON.parse(cur.options_json);
-    if (!o.planFrom || o.planAdopted) return false;
+    if (!o.planFrom || o.planAdopted || hasClaimedChunks(scanId)) return false;
     const lead = getScan(o.planFrom);
     if (lead.plan_json) { try { applyPlan(cur, JSON.parse(lead.plan_json)); } catch (e) { if (!(e instanceof PlanError)) throw e; } }
     o.planAdopted = lead.plan_json ? lead.id : 'none';
@@ -1524,6 +1529,7 @@ function cmdPlanContext(a) {
 }
 
 function applyPlan(scan, plan) {
+  if (hasClaimedChunks(scan.id)) throw new PlanError(`scan ${scan.id} has claimed chunks — finish or release them before applying a plan`);
   const d = db();
   const all = d.prepare('SELECT path,state,reason,blob_sha FROM files WHERE scan_id=?').all(scan.id);
   const bad = [];
@@ -5237,7 +5243,7 @@ async function cmdRun(a) {
     adoptPlan(scan.id);
     scan = getScan(scan.id);
     log(scan.plan_json ? `adopted the plan of scan ${so.planFrom}` : `scan ${so.planFrom} has no plan; heuristic chunking`);
-  } else if (!scan.plan_json && !so.noPlan && !so.replay && scan.kind === 'scan') {
+  } else if (!scan.plan_json && !so.noPlan && !so.replay && scan.kind === 'scan' && !hasClaimedChunks(scan.id)) {
     log('planning');
     const plan = await runPlanner(scan, ctx);
     if (plan && plan.agentFailed) {

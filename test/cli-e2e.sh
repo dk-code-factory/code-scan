@@ -389,6 +389,33 @@ JS
   o=$(B claim "$live"); has "$o" "CHUNK $pending " || bad "legacy-after-failure-pending: $o"
   B submit "$live" "$pending" --file src/store/big.c --slice 2 <<<'[]' >/dev/null
   has "$(B status --scan "$live")" '\[done\]' && ok continue-legacy-failed-completes || bad continue-legacy-failed-completes
+  # Failed planning can leave heuristic reviewers running; neither Workflow nor RUN may replan over them.
+  P heuristic --prompt default --model codex:m1 --only src/net/ --only src/store/big.c --chunk-kb 8
+  fresh; B start --profile heuristic --replan --force >/dev/null; live=$(sidof)
+  printf '%s\n' '{"exclude":[{"glob":"missing-plan-path/","reason":"bad planner output"}]}' > "$W/heuristic-bad.json"
+  o=$(B apply-plan "$live" --file "$W/heuristic-bad.json" 2>&1)
+  has "$o" 'globs match no tracked file' && ok heuristic-planner-failed || bad "heuristic-planner-failed: $o"
+  held=$(B claim "$live" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p'); B stop >/dev/null
+  o=$(B continue)
+  has "$o" '"plan":false' && [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && [ "$(B sql "select count(*) from chunks where scan_id=$live and state='pending'" | tail -1)" -gt 0 ] \
+    && ok continue-heuristic-defers-plan || bad "continue-heuristic-defers-plan: $o"
+  printf '%s\n' '{}' > "$W/heuristic-good.json"
+  o=$(B apply-plan "$live" --file "$W/heuristic-good.json" 2>&1)
+  has "$o" 'finish or release them before applying a plan' \
+    && [ "$(B sql "select plan_json is null from scans where id=$live" | tail -1)" = 1 ] \
+    && [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && ok apply-plan-keeps-inflight || bad "apply-plan-keeps-inflight: $o"
+  o=$(B run "$live" --concurrency 1 2>&1)
+  [ "$(B sql "select count(*) from agent_runs where scan_id=$live and kind='plan'" | tail -1)" = 0 ] \
+    && [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && [ "$(B sql "select count(*) from chunks where scan_id=$live and state='pending'" | tail -1)" = 0 ] \
+    && ok run-heuristic-keeps-inflight || bad "run-heuristic-keeps-inflight: $o"
+  B submit "$live" "$held" --file src/store/big.c <<<'[]' >/dev/null
+  o=$(B apply-plan "$live" --file "$W/heuristic-good.json")
+  has "$o" 'plan applied:' && has "$(B status --scan "$live")" '\[done\]' \
+    && [ "$(B sql "select plan_json is not null from scans where id=$live" | tail -1)" = 1 ] \
+    && ok heuristic-planning-after-held-completes || bad "heuristic-planning-after-held-completes: $o"
   [ "$FAILS" = "$claim_failures" ]
 )
 # Include failures from the isolated scenario block in the outer test result.

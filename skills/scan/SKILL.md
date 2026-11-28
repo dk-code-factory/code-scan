@@ -137,3 +137,4 @@ stays pending for `continue`. "Abandon"/"close" a scan for good: `$CS stop --sca
 stop, while it queues other unfinished files. A live `RUN` runner's fresh claims are preserved on active
 scans too. A dead `RUN` runner's claims are released immediately.
 Use `continue --reclaim` to release all claims when their reviewers have been stopped.
+Planning is deferred while chunks remain claimed; remaining heuristic chunks can still proceed.
