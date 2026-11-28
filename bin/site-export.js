@@ -146,16 +146,43 @@ function exportStore(key) {
     const tri = Object.fromEntries(q(db, 'SELECT f.triage t, COUNT(*) n FROM seen x JOIN findings f ON f.id=x.finding_id WHERE x.scan_id=? GROUP BY 1', r.id).map((x) => [x.t, x.n]));
     const conf_ = (tri.confirmed || 0) + (tri.fixed || 0) + (tri.wontfix || 0), fp = tri.false_positive || 0;
     const runs = q(db, "SELECT runner, SUM(usd) u, COUNT(*) n FROM agent_runs WHERE scan_id=? GROUP BY runner", r.id);
-    const u = usd.get(r.id) || 0;
+    // noPrice: scans whose spend record is known to be incomplete (lost transcripts) show no price
+    const u = (cfg.noPrice || []).map(Number).includes(r.id) ? 0 : usd.get(r.id) || 0;
     const ms = Date.parse(s.updated) - Date.parse(s.created);
+    // review time: reviewer-agent minutes (process time from the runner, else claim→submit per chunk) and wall clock
+    // as the union of chunk intervals, so pauses between runs (limits, restarts) do not count
+    const iv = q(db, "SELECT claimed_at a, done_at b FROM chunks WHERE scan_id=? AND state='done' AND claimed_at IS NOT NULL AND done_at IS NOT NULL", r.id)
+      .map((x) => [Date.parse(x.a), Date.parse(x.b)]).filter(([a, b]) => b >= a).sort((x, y) => x[0] - y[0]);
+    let wall = 0, end = -Infinity, chunkMin = 0;
+    for (const [a, b] of iv) { chunkMin += (b - a) / 60000; if (b > end) { wall += b - Math.max(a, end); end = b; } }
+    const procMin = (q(db, "SELECT SUM((julianday(ended) - julianday(started)) * 1440) m FROM agent_runs WHERE scan_id=? AND kind='review' AND ended IS NOT NULL", r.id)[0] || {}).m;
+    const agentMin = procMin || chunkMin || null;
+    const confSev = Object.fromEntries(q(db, `SELECT f.severity s, COUNT(*) n FROM seen x JOIN findings f ON f.id=x.finding_id
+      WHERE x.scan_id=? AND (f.triage IN ('confirmed','fixed','wontfix') OR f.confirmation='confirmed') GROUP BY 1`, r.id).map((x) => [x.s, x.n]));
     const repo = repoOf(r.id);
-    const lang = langOf(r.id);
+    const lang = cfg.lang || langOf(r.id);
     bucket(repo, lang).scans.push({
       id: r.id, store: key, profile: r.profile, model: sp.model, runner: (runs[0] && runs[0].runner) || (/^[a-z]+:/.test(sp.model || '') ? sp.model.split(':')[0] : 'claude'),
       effort: sp.effort, chunkKb: sp.chunkKb, commit: s.commit_sha.slice(0, 12), files: r.reviewed, kb: Math.round(bytes / 1024),
       findings: r.findings, severity: sev, triage: tri, triaged: conf_ + fp, precision: conf_ + fp ? round(conf_ / (conf_ + fp)) : null,
       usd: u ? round(u) : null, usdPer100Kb: u && bytes ? round(u / (bytes / 1024) * 100) : null, hours: ms > 0 ? round(ms / 3600000, 1) : null,
+      confirmed: conf_, falsePositive: fp, untriaged: r.findings - conf_ - fp, confirmedSeverity: confSev,
+      usdPerConfirmed: u && conf_ ? round(u / conf_) : null, agentMinutes: agentMin ? round(agentMin, 1) : null,
+      agentMinPer100Kb: agentMin && bytes ? round(agentMin / (bytes / 1024) * 100, 1) : null, wallMinutes: wall ? round(wall / 60000, 1) : null,
     });
+  }
+
+  // unique findings: what no other scan of the same repository (in this store) found, on files they all reviewed
+  for (const b of byRepo.values()) {
+    if (b.scans.length < 2) continue;
+    const o = cli(st, cwd, key, ['compare', ...b.scans.map((x) => String(x.id)), '--json', '--list', 'none']);
+    if (!o) continue;
+    const c = JSON.parse(o);
+    for (const sc of b.scans) {
+      const mine = (c.clusters || []).filter((k) => k.seenBy[sc.id]);
+      const only = mine.filter((k) => Object.keys(k.seenBy).length === 1);
+      Object.assign(sc, { unique: only.length, uniqueConfirmed: only.filter((k) => k.confirmed).length, uniqueAgainst: b.scans.length - 1, uniqueBasisKb: Math.round(c.basis.bytes / 1024) });
+    }
   }
 
   const studies = (CONFIG.effortStudies || []).filter((x) => x.store === key);
@@ -166,15 +193,16 @@ function exportStore(key) {
     for (let i = 0; i < b.scans.length; i++) for (let j = i + 1; j < b.scans.length; j++) {
       const A = b.scans[i], B = b.scans[j];
       if (A.model === B.model && A.effort === B.effort) continue;
-      if (studyIds.has(A.id) && studyIds.has(B.id)) continue; // compared all at once below
+      if (studyIds.has(A.id) || studyIds.has(B.id)) continue; // study scans are compared together below
       const o = cli(st, cwd, key, ['compare', String(A.id), String(B.id), '--json', '--list', 'none']);
       if (!o) continue;
       const c = JSON.parse(o);
       if (!c.basis || c.basis.bytes < (CONFIG.minScanKb || 100) * 1024) continue;
       const clusters = c.clusters || [];
+      const sevBy = (id) => { const o = {}; for (const k of clusters) { const v = k.seenBy[id]; if (v) o[v.severity] = (o[v.severity] || 0) + 1; } return o; };
       b.compares.push({
         store: key, basisKb: Math.round(c.basis.bytes / 1024), basisFiles: c.basis.files, both: clusters.filter((x) => Object.keys(x.seenBy).length > 1).length,
-        scans: c.scans.map((x) => ({ id: x.id, model: x.model, findings: x.findings, unique: x.unique, share: round(x.share), confirmed: x.confirmed, falsePositive: x.falsePositive, precision: round(x.precision) })),
+        scans: c.scans.map((x) => ({ id: x.id, model: x.model, findings: x.findings, severity: sevBy(x.id), unique: x.unique, share: round(x.share), confirmed: x.confirmed, falsePositive: x.falsePositive, precision: round(x.precision) })),
       });
     }
   }
@@ -222,11 +250,16 @@ function exportStore(key) {
       const tok = q(db, `SELECT COUNT(*) agents, SUM(input_tokens) i, SUM(output_tokens) o, SUM(cache_read) cr, SUM(cache_write) cw, SUM(1 - ok) failed,
         SUM((julianday(ended) - julianday(started)) * 86400) secs FROM agent_runs WHERE scan_id=? AND kind='review'`, x.id)[0] || {};
       const mine = clusters.filter((k) => k.seenBy[x.id]);
+      const severity = {};
+      for (const k of mine) { const v = k.seenBy[x.id].severity; severity[v] = (severity[v] || 0) + 1; }
+      // confirmed findings at the severity triage settled on (reviewers grade severity differently)
+      const confirmedSeverity = Object.fromEntries(q(db, `SELECT f.severity s, COUNT(DISTINCT f.id) n FROM seen x JOIN findings f ON f.id=x.finding_id
+        WHERE x.scan_id=? AND (f.triage IN ('confirmed','fixed','wontfix') OR f.confirmation='confirmed') GROUP BY 1`, x.id).map((r) => [r.s, r.n]));
       // severity-weighted share of the confirmed issues any effort level found: recall against the pooled truth
       const realW = clusters.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
       const gotW = mine.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
       return {
-        id: x.id, model: sc.model || x.model, effort: sc.effort, findings: x.findings, unique: x.unique, share: round(x.share),
+        id: x.id, model: sc.model || x.model, effort: sc.effort, findings: x.findings, severity, confirmedSeverity, unique: x.unique, share: round(x.share),
         confirmed: x.confirmed, falsePositive: x.falsePositive, untriaged: x.findings - x.confirmed - x.falsePositive,
         precision: round(x.precision), confirmedRecall: realW ? round(gotW / realW) : null,
         highPlus: mine.filter((k) => k.severity === 'critical' || k.severity === 'high').length,
@@ -235,8 +268,16 @@ function exportStore(key) {
         agentMinutes: tok.secs ? round(tok.secs / 60, 1) : null,
       };
     });
+    // two or more runs together: recall of their union against the same pooled confirmed issues, and summed price
+    const realW = clusters.filter((k) => k.confirmed).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
+    const combos = (sd.combos || []).map((ids) => {
+      const gotW = clusters.filter((k) => k.confirmed && ids.some((i) => k.seenBy[i])).reduce((s_, k) => s_ + (sevW[k.severity] || 1), 0);
+      const parts = ids.map((i) => rows.find((r) => r.id === i)).filter(Boolean);
+      const usd_ = parts.reduce((s_, r) => s_ + (r.usd || 0), 0);
+      return { runs: parts.map((r) => ({ model: r.model, effort: r.effort })), recall: realW ? round(gotW / realW) : null, usd: round(usd_) };
+    });
     const repo = repoOf(sd.scans[0]);
-    effortStudies.push({ repo, title: sd.title || null, basisKb: Math.round(c.basis.bytes / 1024), basisFiles: c.basis.files, issues: clusters.length,
+    effortStudies.push({ combos, repo, title: sd.title || null, basisKb: Math.round(c.basis.bytes / 1024), basisFiles: c.basis.files, issues: clusters.length,
       confirmedIssues: clusters.filter((k) => k.confirmed).length, triagedBy: sd.triagedBy || null, rows });
   }
   for (const e of effortStudies) bucket(e.repo, null).efforts = (bucket(e.repo, null).efforts || []).concat(e);

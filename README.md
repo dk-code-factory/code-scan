@@ -90,13 +90,16 @@ Extra arguments for one CLI: `CODESCAN_<RUNNER>_ARGS` (frozen into a review prof
 so triage agents can run `gh`); another binary: `CODESCAN_<RUNNER>_BIN`.
 Reasoning effort: `profile register --effort <level>` (frozen into the profile) and `auto-triage start|continue
 --effort <level>`, `run-prompt --effort <level>`: claude `--effort low|medium|high|xhigh|max`, codex
-`-c model_reasoning_effort=minimal|low|medium|high|xhigh`, opencode `--variant <any>`; Workflow agents get it as
+`-c model_reasoning_effort=minimal|low|medium|high|xhigh|max|ultra` (narrowed to what the model lists in Codex's
+`models_cache.json`, e.g. gpt-6.1-sol: low … ultra), opencode `--variant <any>`; Workflow agents get it as
 their `effort`. Other runners have no effort setting.
 
 ## Model performance
 
 https://dk-code-factory.github.io/code-scan/ compares reviewer models on real repositories (quality, false positives,
-price, chunk size) and recommends which to pick. The data is exported from local stores with `npm run site`
+price, chunk size, reasoning effort) and recommends which to pick. Short version from those runs: Codex
+`gpt-6.1-sol` at `xhigh` for full scans; effort raises recall, not precision; a second, different run finds more than a
+higher effort level. The data is exported from local stores with `npm run site`
 (`bin/site-export.js`: runs `scans`, `compare`, `init report` and `calibrate report` on copies of
 `~/.cache/code-scan/*`, exports only aggregates, anonymizes repos not listed as public in `docs/site-config.json`);
 pushing `docs/` to `main` publishes it.
@@ -110,7 +113,7 @@ pushing `docs/` to `main` publishes it.
   content hash), repeat, stop. Runs one or several registered review profiles side by side.
 - `/code-scan:status` — progress, per-file state.
 - `/code-scan:findings` — filter/sort/export findings (severity, type, category, path, triage, reported, …), read-only SQL.
-- `/code-scan:triage` — confirmed / false_positive / fixed / wontfix, with notes; set or classify finding types.
+- `/code-scan:triage` — confirmed / false_positive / fixed / wontfix / duplicate, with notes; set or classify finding types.
 - `/code-scan:confirm` — confirmation status (confirmed / not_confirmed / unchecked), separate from triage.
 - `/code-scan:dupes` — duplicate groups and matching against existing GitHub/Jira issues.
 - `/code-scan:auto-triage` — agent-driven triage of chosen findings (ids or filters) in groups of N

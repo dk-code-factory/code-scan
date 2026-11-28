@@ -43,10 +43,10 @@ Filing issues is public: only do it because the user asked for verification and 
 
 ## Status tools (for the agent and for later updates)
 
-- `$CS triage <id> --set confirmed|false_positive|wontfix|fixed|open --note "<why>"` — verdict; the note is
+- `$CS triage <id> --set confirmed|false_positive|wontfix|fixed|duplicate|open --note "<why>"` — verdict; the note is
   shown to future reviewers of the file for dismissed findings, so always give the reason.
 - `$CS link <id> gh:<owner/repo> <number> --kind filed|linked_existing --url <url>` / `$CS unlink <id> [tracker] [key]`
   — which issue covers the finding.
 - `$CS issues-sync` — refresh the state of every linked GitHub issue or PR: closed as completed (or PR merged) →
-  finding `fixed`, closed as not planned → `wontfix`, reopened → back to `confirmed`; duplicates and closes
+  finding `fixed`, closed as not planned → `wontfix`, closed as a duplicate → `duplicate`, reopened → back to `confirmed`; closes
   without a reason are recorded but leave the finding alone. `$CS show <id>` prints the state.

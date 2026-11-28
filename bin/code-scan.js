@@ -68,7 +68,7 @@ function typeFromCategory(category, title) {
   return 'other';
 }
 function typeList() { return TYPES.map((t) => `  ${t}: ${TYPE_DESC[t]}`).join('\n'); }
-const TRIAGE = ['open', 'confirmed', 'false_positive', 'fixed', 'wontfix'];
+const TRIAGE = ['open', 'confirmed', 'false_positive', 'fixed', 'wontfix', 'duplicate'];
 // confirmation: whether someone checked the finding is real, independent of triage (NULL = unchecked)
 const CONFIRMATION = ['confirmed', 'not_confirmed', 'unchecked'];
 const FILE_STATES = ['pending', 'in_progress', 'partial', 'reviewed', 'excluded', 'unchanged'];
@@ -634,7 +634,7 @@ function specFromFlags(f) {
   // --model default also takes the effort picked at init, unless --effort is given
   const effort = f.effort !== undefined ? f.effort : f.model === 'default' ? cfgGet('default_effort') || undefined : undefined;
   const cal = (effort && cfgGet(chunkKey(modelId(r.model), effort))) || cfgGet(chunkKey(modelId(r.model)));
-  const effErr = RN.effortError(r.runner, effort);
+  const effErr = RN.effortError(r.runner, effort, r.model);
   if (effErr) die(effErr);
   if (f['chunk-kb'] !== undefined && !(Number(f['chunk-kb']) > 0)) die('--chunk-kb must be a positive number (KB)');
   const spec = {
@@ -2230,7 +2230,7 @@ function initRefine(cals, sc, io) {
     byModel.get(c.model).push(c);
   }
   for (const [model, list] of byModel) {
-    const levels = (RN.EFFORT[RN.splitModel(model).runner] || {}).levels;
+    const levels = RN.effortLevels(RN.splitModel(model).runner, model);
     if (!levels) continue;
     const have = new Set(cals.filter((c) => c.model === model).map((c) => c.effort));
     list.sort((x, y) => levels.indexOf(x.effort) - levels.indexOf(y.effort));
@@ -2468,13 +2468,13 @@ function initEfforts(model, io, efforts) {
   const ent = RN.EFFORT[runner];
   if (efforts) {
     if (!ent) return { list: [{ effort: null, role: 'fixed' }], note: `${model}: the ${runner} runner has no effort setting — one candidate` };
-    for (const e of efforts) { const err = RN.effortError(runner, e); if (err) die(`${model}: ${err}`); }
+    for (const e of efforts) { const err = RN.effortError(runner, e, model); if (err) die(`${model}: ${err}`); }
     return { list: efforts.map((e) => ({ effort: e, role: 'fixed' })) };
   }
   if (!ent || !ent.levels) {
     return { list: [{ effort: null, role: 'fixed' }], note: ent ? `${model}: ${runner} takes any effort name — pass --efforts to compare some` : null };
   }
-  const lv = ent.levels;
+  const lv = RN.effortLevels(runner, model);
   if (io.matrix || lv.length < 3) return { list: lv.map((e) => ({ effort: e, role: io.matrix ? 'fixed' : 'bracket' })) };
   return { list: [lv[0], lv[Math.floor((lv.length - 1) / 2)], lv[lv.length - 1]].map((e) => ({ effort: e, role: 'bracket' })) };
 }
@@ -2583,7 +2583,7 @@ function cmdInit(a) {
       else if (efforts.length <= 1) effort = efforts.length ? efforts[0] : null;
       else die(`${model} was benchmarked at several efforts (${efforts.map((e) => e || 'none').join(', ')}) — pass --effort <level>`);
     }
-    if (effort) { const err = RN.effortError(RN.splitModel(model).runner, effort); if (err) die(err); }
+    if (effort) { const err = RN.effortError(RN.splitModel(model).runner, effort, model); if (err) die(err); }
     const cal = d.prepare("SELECT * FROM calibrations WHERE model=? AND effort IS ? AND status='done' ORDER BY id DESC LIMIT 1").get(model, effort);
     let size = cal ? cal.result_kb : null;
     if (!size) {
@@ -3400,13 +3400,21 @@ function cmdTriage(a) {
   if (!TRIAGE.includes(state)) die(`--set must be one of ${TRIAGE.join('|')}`);
   const ids = selectIds(a);
   if (!ids.length) die('no findings selected');
-  const note = a.f.note;
+  // --of <finding id>: the finding these duplicate; it joins their duplicate group and stays as it is
+  const of = a.f.of === undefined ? null : Number(a.f.of);
+  if (of !== null && state !== 'duplicate') die('--of goes with --set duplicate');
+  if (of !== null) {
+    if (!Number.isInteger(of) || !db().prepare('SELECT 1 FROM findings WHERE id=?').get(of)) die(`--of: no finding ${a.f.of}`);
+    if (ids.includes(of)) die(`--of #${of} is one of the findings being marked duplicate`);
+  }
+  const note = [of !== null ? `duplicate of #${of}` : null, a.f.note].filter(Boolean).join(': ') || null;
   tx((d) => {
     const st = d.prepare(`UPDATE findings SET triage=?, note=CASE WHEN ? IS NULL THEN note ELSE
       COALESCE(note || char(10), '') || ? END, updated=? WHERE id=?`);
-    for (const id of ids) st.run(state, note || null, note || null, now(), id);
+    for (const id of ids) st.run(state, note, note, now(), id);
+    if (of !== null) mergeDupeGroup(d, [of, ...ids]);
   });
-  out(`${ids.length} finding(s) → ${state}: ${ids.slice(0, 30).map((i) => '#' + i).join(' ')}${ids.length > 30 ? ' …' : ''}`);
+  out(`${ids.length} finding(s) → ${state}${of !== null ? ` of #${of}` : ''}: ${ids.slice(0, 30).map((i) => '#' + i).join(' ')}${ids.length > 30 ? ' …' : ''}`);
 }
 
 /** Change a finding's severity, lock it against rescans and note the old value. Returns the old severity if it changed. */
@@ -3991,6 +3999,19 @@ function jaccard(a, b) {
 }
 function shape(s) { return String(s || '').replace(/"[^"]*"|'[^']*'/g, 's').replace(/[A-Za-z_]\w*/g, 'x').replace(/\d+/g, '0').replace(/\s+/g, ''); }
 
+/** Put the findings in one new manual duplicate group (leaving their old groups); returns the group id. Call inside tx(). */
+function mergeDupeGroup(d, ids) {
+  const gid = (d.prepare('SELECT MAX(group_id) m FROM dupe_groups').get().m || 0) + 1;
+  const oldGroups = d.prepare(`SELECT DISTINCT group_id FROM dupe_groups WHERE finding_id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+  d.prepare(`DELETE FROM dupe_groups WHERE finding_id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+  // the groups they left: drop a group left with one member, re-pick a primary that was merged away
+  for (const g of oldGroups) cleanupGroup(g.group_id);
+  ids.forEach((id) => d.prepare('INSERT INTO dupe_groups(group_id,finding_id,is_primary,reason,manual) VALUES(?,?,0,?,1)').run(gid, id, 'manual'));
+  d.prepare(`UPDATE findings SET dupe_lock=1 WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+  setPrimary(gid);
+  return gid;
+}
+
 function cmdDupes(a) {
   const sub = a.pos[0];
   const d = db();
@@ -4012,14 +4033,7 @@ function cmdDupes(a) {
     const ids = selectIds({ pos: a.pos.slice(1), f: a.f });
     if (ids.length < 2) die('merge needs at least two finding ids');
     tx(() => {
-      const gid = (d.prepare('SELECT MAX(group_id) m FROM dupe_groups').get().m || 0) + 1;
-      const oldGroups = d.prepare(`SELECT DISTINCT group_id FROM dupe_groups WHERE finding_id IN (${ids.map(() => '?').join(',')})`).all(...ids);
-      d.prepare(`DELETE FROM dupe_groups WHERE finding_id IN (${ids.map(() => '?').join(',')})`).run(...ids);
-      // the groups they left: drop a group left with one member, re-pick a primary that was merged away
-      for (const g of oldGroups) cleanupGroup(g.group_id);
-      ids.forEach((id) => d.prepare('INSERT INTO dupe_groups(group_id,finding_id,is_primary,reason,manual) VALUES(?,?,0,?,1)').run(gid, id, 'manual'));
-      d.prepare(`UPDATE findings SET dupe_lock=1 WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
-      setPrimary(gid);
+      const gid = mergeDupeGroup(d, ids);
       out(`group ${gid}: ${ids.map((i) => '#' + i).join(' ')}`);
     });
     return;
@@ -4308,13 +4322,14 @@ function cmdLink(a) {
 
 /**
  * Pull the state of every filed/linked GitHub issue back into the store. An issue closed as completed
- * marks its open/confirmed findings fixed; closed as not planned marks them wontfix (note says which).
+ * marks its open/confirmed findings fixed; closed as not planned marks them wontfix; closed as a duplicate
+ * marks them duplicate (note says which).
  */
 function cmdIssuesSync(a) {
   const d = db();
   const rows = d.prepare(`SELECT DISTINCT tracker, key FROM filings WHERE kind != 'skipped' AND tracker LIKE 'gh:%'
     ${a.f.tracker ? 'AND tracker = ?' : ''}`).all(...(a.f.tracker ? [a.f.tracker] : []));
-  let open = 0, fixed = 0, wont = 0, reopened = 0, other = 0, failed = 0;
+  let open = 0, fixed = 0, wont = 0, dup = 0, reopened = 0, other = 0, failed = 0;
   const view = (kind, key, repo, fields) => {
     const r = spawnSync('gh', [kind, 'view', String(key), '--repo', repo, '--json', fields], { encoding: 'utf8' });
     if (r.status !== 0) return { err: (r.stderr || '').trim().split('\n')[0] };
@@ -4342,7 +4357,7 @@ function cmdIssuesSync(a) {
         open++;
         // a reopened report brings back findings that an earlier sync closed
         for (const f of linked) {
-          if ((f.triage === 'fixed' || f.triage === 'wontfix') && String(f.note || '').includes(mark)) {
+          if (['fixed', 'wontfix', 'duplicate'].includes(f.triage) && String(f.note || '').includes(mark)) {
             d.prepare("UPDATE findings SET triage='confirmed', note=COALESCE(note || char(10), '') || ?, updated=? WHERE id=?")
               .run(`${tracker} #${key} reopened`, now(), f.id);
             reopened++;
@@ -4350,19 +4365,19 @@ function cmdIssuesSync(a) {
         }
         return;
       }
-      // only an explicit outcome moves the finding; duplicates and unknown reasons are recorded only
-      const to = reason === 'completed' ? 'fixed' : reason === 'not_planned' ? 'wontfix' : null;
+      // only an explicit outcome moves the finding; unknown reasons (an unmerged PR, …) are recorded only
+      const to = { completed: 'fixed', not_planned: 'wontfix', duplicate: 'duplicate' }[reason] || null;
       if (!to) { other++; return; }
       for (const f of linked) {
         if (f.triage !== 'open' && f.triage !== 'confirmed') continue;
         d.prepare(`UPDATE findings SET triage=?, note=COALESCE(note || char(10), '') || ?, updated=? WHERE id=?`)
           .run(to, `${mark}${reason}`, now(), f.id);
-        if (to === 'fixed') fixed++; else wont++;
+        if (to === 'fixed') fixed++; else if (to === 'wontfix') wont++; else dup++;
       }
     });
   }
-  out(`${rows.length} report(s) checked: ${open} open; findings marked fixed ${fixed}, wontfix ${wont}, reopened ${reopened}` +
-    `${other ? `; ${other} closed without a usable reason (duplicate/unknown — findings left as they are)` : ''}${failed ? `; ${failed} unreadable` : ''}`);
+  out(`${rows.length} report(s) checked: ${open} open; findings marked fixed ${fixed}, wontfix ${wont}, duplicate ${dup}, reopened ${reopened}` +
+    `${other ? `; ${other} closed without a usable reason (findings left as they are)` : ''}${failed ? `; ${failed} unreadable` : ''}`);
 }
 
 function cmdUnlink(a) {
@@ -4624,7 +4639,7 @@ function atSelect(a) {
   if (!hasFindingFilter(f)) { f.triage = ['open']; f.confirmation = ['unchecked']; }
   let rows = loadFindings({ ...f, sort: 'path,line' });
   if (!f.recheck) {
-    rows = rows.filter((r) => !r.confirmation && !['false_positive', 'wontfix', 'fixed'].includes(r.triage) && !r.reported_as);
+    rows = rows.filter((r) => !r.confirmation && !['false_positive', 'wontfix', 'fixed', 'duplicate'].includes(r.triage) && !r.reported_as);
   }
   return rows;
 }
@@ -4755,7 +4770,7 @@ function atStart(a) {
   let rr;
   try { rr = RN.resolve({ flagRunner: a.f.runner, flagModel: a.f.model ? modelId(a.f.model) : null }); } catch (e) { die(e.message); }
   const model = rr.model ? modelId(rr.model) : null;
-  const effErr = rr.runner ? RN.effortError(rr.runner, a.f.effort) : null;
+  const effErr = rr.runner ? RN.effortError(rr.runner, a.f.effort, rr.model) : null;
   if (effErr) die(effErr);
   const run = tx((d) => {
     const r = d.prepare("INSERT INTO triage_runs(created,repo,group_size,model,lanes,status,runner,effort,trackers) VALUES(?,?,?,?,?,'active',?,?,?)")
@@ -4774,7 +4789,7 @@ function atContinue(a) {
   db().prepare("UPDATE triage_runs SET status='active' WHERE id=?").run(run.id);
   if (a.f.concurrency !== undefined) db().prepare('UPDATE triage_runs SET lanes=? WHERE id=?').run(parseConcurrency(a.f.concurrency), run.id);
   if (a.f.effort !== undefined) {
-    const effErr = RN.effortError(run.runner || 'claude', a.f.effort);
+    const effErr = RN.effortError(run.runner || 'claude', a.f.effort, run.model);
     if (effErr) die(effErr);
     db().prepare('UPDATE triage_runs SET effort=? WHERE id=?').run(a.f.effort ? String(a.f.effort) : null, run.id);
   }
@@ -5389,7 +5404,7 @@ async function atRunCmd(a) {
   const ctx = runnerFor(a.f, { model: run.model, runner: run.runner });
   if (ctx.runner !== run.runner || ctx.model !== run.model) db().prepare('UPDATE triage_runs SET runner=?, model=? WHERE id=?').run(ctx.runner, ctx.model, run.id);
   if (run.effort) {
-    const effErr = RN.effortError(ctx.runner, run.effort);
+    const effErr = RN.effortError(ctx.runner, run.effort, ctx.model);
     if (effErr) die(`auto-triage run ${run.id}: ${effErr} — \`auto-triage continue ${run.id} --effort <level>\` (empty to clear)`);
     ctx.effort = run.effort;
   }
@@ -5443,7 +5458,7 @@ async function cmdRunPrompt(a) {
   if (!file) die('usage: run-prompt <file> [--runner r] [--model m] [--effort e] [--full]');
   const prompt = fs.readFileSync(file, 'utf8');
   const ctx = runnerFor(a.f, {});
-  const effErr = RN.effortError(ctx.runner, a.f.effort);
+  const effErr = RN.effortError(ctx.runner, a.f.effort, ctx.model);
   if (effErr) die(effErr);
   if (a.f.effort) ctx.effort = String(a.f.effort);
   onStopSignals();
@@ -5551,7 +5566,8 @@ findings:  query [--severity critical,high|high+] [--category c] [--type t1,t2] 
                  [--tracker t] [--scan s1,s2|--latest] [--profile p] [--seen-by-all s1,s2] [--not-seen-by s] [--stale|--no-stale] [--gone|--include-gone] [--min-confidence x] [--max-fix-loc n] [--text s] [--unit u]
                  [--group g] [--dupe-of id] [--primary-only] [--ids 1,2] [--sort severity:desc,path,line]
                  [--limit n] [--format table|md|json|csv] [--out file]
-           show <id> | sql "<SELECT ...>" | triage <ids|filters> --set <state> [--note s]
+           show <id> | sql "<SELECT ...>" | triage <ids|filters> --set <state> [--of <id>] [--note s]
+                 states: ${TRIAGE.join(' ')}   (--of: with --set duplicate, the finding they duplicate)
            confirm <ids|filters> --set confirmed|not_confirmed|unchecked [--set-severity s] [--set-type t] [--note s]
            retype <ids|filters> --set <type> [--note s] | retype --auto [filters] [--force] | retype --list-other [filters]
            types: ${TYPES.join(' ')}
@@ -5559,7 +5575,7 @@ dupes:     dupes [filters] [--line-window 10] [--title-sim 0.6] | dupes list | d
 trackers:  tracker-sync gh [--repo o/r] [--state all] [--search q] | tracker-import jira < issues.json
            match [filters] [--tracker t] [--include-reported] [--top 3] | match show <id> | match export [--min-score 3] [--out f]
            link <id|ids|gN> <tracker> <key> [--url u] [--kind k] | unlink <id> [tracker] [key]
-           issues-sync [--tracker gh:o/r]   (issue state → findings: closed completed = fixed, not planned = wontfix)
+           issues-sync [--tracker gh:o/r]   (issue state → findings: closed completed = fixed, not planned = wontfix, duplicate = duplicate)
 init:      init start [--models opus,sonnet,haiku,fable] [--efforts e1,e2] [--matrix] [--sizes 20,40,90] [--prompt p] [--only g] [--big-kb 160] [--small-kb 160]
            init next [id] | init report [id] [--truth f] | init pick <model> [--effort e] [--name default] [--prompt p] | init status
            (default: effort bracket lowest/middle/highest + one refine level, screen at 40/90KB, size search for ≤3 survivors;
@@ -5568,7 +5584,7 @@ calibrate: calibrate start --model m [--only g] [--sample-kb 200] [--medium 40] 
 verify:    verify-prompt <id> --repo owner/name --base <sha> --worktree <dir>   (prompt for a fresh verifying agent)
 auto-triage: auto-triage plan|start [ids|filters] [--group-size 5] [--recheck] [--repo owner/name] [--jira PROJ] [--concurrency N] [--model m] [--effort e]
            auto-triage claim <run> [--rules] | submit <run> <group> < results.json | status [run|--all] | stop|continue [run] [--effort e] | set-run <run> <task>
-effort:    --effort: claude low|medium|high|xhigh|max; codex minimal|low|medium|high|xhigh; opencode any --variant; others unsupported
+effort:    --effort: claude low|medium|high|xhigh|max; codex minimal|low|medium|high|xhigh|max|ultra (as the model lists them); opencode any --variant; others unsupported
 report:    report-config show|set <k> <v>|unset <k> | render [filters] [--target t] [--group-by g] [--max n] [--allow-unsearched]
            drafts | file-gh [--drafts d1,d2] [--dry-run] | record-filing <draft> <tracker> <key> [url]`;
 
