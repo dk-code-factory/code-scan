@@ -340,7 +340,7 @@ cp -r "$CODESCAN_HOME" "$W/state-claims"
   # Persisted legacy slices remain a supported input even though new scans pack whole files.
   P legacy --prompt default --model opus --no-plan --only src/store/big.c --chunk-kb 40
   fresh; B restart --profile legacy --force >/dev/null; live=$(sidof)
-  read -r held expired pending < <(node - "$live" <<'JS'
+  legacy_chunks() { node - "$1" "${2:-mixed}" <<'JS'
 const {DatabaseSync}=require('node:sqlite');
 const d=new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db'), sid=Number(process.argv[2]);
 const c=d.prepare("select * from chunks where scan_id=? and state='pending' order by ord limit 1").get(sid);
@@ -348,11 +348,12 @@ const base=JSON.parse(c.items_json)[0], slices=[0,1,2].map(slice=>({...base,slic
 d.prepare('update files set slices_json=?, slices_done=? where scan_id=? and path=?').run(JSON.stringify(slices),'[]',sid,base.path);
 d.prepare('update chunks set items_json=?,bytes=? where id=?').run(JSON.stringify([slices[0]]),slices[0].bytes,c.id);
 const add=d.prepare('insert into chunks(scan_id,ord,unit,items_json,bytes,state,claimed_at) values(?,?,?,?,?,?,?)');
-const expired=add.run(sid,1,c.unit,JSON.stringify([slices[1]]),slices[1].bytes,'claimed','2000-01-01T00:00:00.000Z').lastInsertRowid;
+const expired=add.run(sid,1,c.unit,JSON.stringify([slices[1]]),slices[1].bytes,process.argv[3]==='failed'?'pending':'claimed','2000-01-01T00:00:00.000Z').lastInsertRowid;
 const pending=add.run(sid,2,c.unit,JSON.stringify([slices[2]]),slices[2].bytes,'pending',null).lastInsertRowid;
 console.log(c.id,Number(expired),Number(pending));
 JS
-  )
+  }
+  read -r held expired pending < <(legacy_chunks "$live")
   o=$(B claim "$live"); has "$o" "CHUNK $held " && has "$o" 'slice 0' || bad "legacy-claim: $o"
   B stop >/dev/null; o=$(B continue)
   [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
@@ -368,6 +369,26 @@ JS
   has "$(B status --scan "$live")" '\[done\]' \
     && [ "$(B sql "select slices_done from files where scan_id=$live and path='src/store/big.c'" | tail -1)" = '[0,1,2]' ] \
     && ok continue-legacy-completes || bad continue-legacy-completes
+  # A manual reviewer holds one slice while a real runner fails its sibling twice.
+  printf '#!/bin/sh\nexec node "%s" codex "$@"\n' "$HERE/test/fake-runners/fake-agent.js" > "$W/bin/legacy-codex"
+  chmod +x "$W/bin/legacy-codex"; export CODESCAN_CODEX_BIN=$W/bin/legacy-codex
+  P legacy-fail --prompt default --model codex:m1 --no-plan --only src/store/big.c --chunk-kb 40
+  fresh; B start --profile legacy-fail --force >/dev/null; live=$(sidof)
+  read -r held failed pending < <(legacy_chunks "$live" failed)
+  B claim "$live" >/dev/null
+  o=$(FAKE_FAIL='expected legacy sibling failure' B run "$live" --concurrency 1 2>&1)
+  [ "$(B sql "select state from chunks where id=$failed" | tail -1)" = void ] \
+    && has "$o" '2 failed agent(s)' && ok legacy-runner-voids-slice || bad "legacy-runner-voids-slice: $o"
+  B stop >/dev/null; o=$(B continue)
+  [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && [ "$(B sql "select count(*) from chunks where id in ($failed,$pending) and state='pending'" | tail -1)" = 2 ] \
+    && ok continue-legacy-failed-sibling || bad "continue-legacy-failed-sibling: $o"
+  B submit "$live" "$held" --file src/store/big.c --slice 0 <<<'[]' >/dev/null
+  o=$(B claim "$live"); has "$o" "CHUNK $failed " || bad "legacy-failed-claim: $o"
+  B submit "$live" "$failed" --file src/store/big.c --slice 1 <<<'[]' >/dev/null
+  o=$(B claim "$live"); has "$o" "CHUNK $pending " || bad "legacy-after-failure-pending: $o"
+  B submit "$live" "$pending" --file src/store/big.c --slice 2 <<<'[]' >/dev/null
+  has "$(B status --scan "$live")" '\[done\]' && ok continue-legacy-failed-completes || bad continue-legacy-failed-completes
   [ "$FAILS" = "$claim_failures" ]
 )
 # Include failures from the isolated scenario block in the outer test result.

@@ -953,8 +953,32 @@ function requeueClaims(scanId, keepClaimedSince, replay = false) {
       // Legacy chunks can share a sliced file. Keep its queued siblings and their slice progress;
       // include every path sharing those chunks so repacking cannot duplicate any of their items.
       const byPath = new Map();
+      const progress = new Map(d.prepare('SELECT path,state,slices_json,slices_done FROM files WHERE scan_id=?').all(scanId)
+        .map((f) => [f.path, { state: f.state, slices: f.slices_json ? JSON.parse(f.slices_json) : null, done: JSON.parse(f.slices_done) }]));
+      const unfinished = (it) => {
+        const f = progress.get(it.path);
+        return f && f.state !== 'reviewed' && (it.slice === undefined || !f.done.includes(it.slice));
+      };
+      const itemKey = (it) => JSON.stringify([it.path, it.slice]);
+      const covered = new Set();
+      const wholePaths = new Set();
       for (const c of open) {
         c.items = JSON.parse(c.items_json);
+        for (const it of c.items) { covered.add(itemKey(it)); if (it.slice === undefined) wholePaths.add(it.path); }
+      }
+      // Failed legacy slices become void. Recover only missing slice keys, newest first, without
+      // reviving superseded whole-file chunks or copies already covered by current/completed work.
+      for (const c of d.prepare("SELECT id,items_json,bytes FROM chunks WHERE scan_id=? AND state='void' ORDER BY id DESC").all(scanId)) {
+        const items = JSON.parse(c.items_json).filter((it) => {
+          const f = progress.get(it.path);
+          if (it.slice === undefined || !f || !f.slices || f.slices.length < 2 || wholePaths.has(it.path)
+            || !unfinished(it) || covered.has(itemKey(it))) return false;
+          covered.add(itemKey(it));
+          return true;
+        });
+        if (items.length) open.push({ ...c, items, wasVoid: true });
+      }
+      for (const c of open) {
         for (const it of c.items) {
           if (!byPath.has(it.path)) byPath.set(it.path, []);
           byPath.get(it.path).push(c);
@@ -969,12 +993,21 @@ function requeueClaims(scanId, keepClaimedSince, replay = false) {
         }
       }
     }
-    const queue = d.prepare("UPDATE chunks SET state='pending', claimed_at=NULL WHERE id=?");
+    const queue = d.prepare("UPDATE chunks SET state='pending', claimed_at=NULL,items_json=?,bytes=? WHERE id=?");
     const discard = d.prepare("UPDATE chunks SET state='void' WHERE id=?");
     for (const c of open) {
       if (heldIds.has(c.id)) continue;
-      if (reservedIds.has(c.id)) { queue.run(c.id); retained.push(c); }
-      else discard.run(c.id);
+      if (reservedIds.has(c.id)) {
+        const fileProgress = d.prepare('SELECT state,slices_done FROM files WHERE scan_id=? AND path=?');
+        c.items = c.items.filter((it) => {
+          const f = fileProgress.get(scanId, it.path);
+          return f && f.state !== 'reviewed' && (it.slice === undefined || !JSON.parse(f.slices_done).includes(it.slice));
+        });
+        if (!c.items.length) { discard.run(c.id); continue; }
+        c.bytes = c.items.reduce((sum, it) => sum + Number(it.bytes || 0), 0);
+        queue.run(JSON.stringify(c.items), c.bytes, c.id);
+        retained.push(c);
+      } else if (!c.wasVoid) discard.run(c.id);
     }
   }
   const reset = d.prepare("UPDATE files SET state='pending', slices_done='[]' WHERE scan_id=? AND path=?");
