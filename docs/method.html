@@ -12,24 +12,43 @@
 <main>
 <header class="hero">
   <h1>Method & data</h1>
-  <p class="lede">Where the numbers come from, how price and precision are computed, and how findings were triaged.</p>
+  <p class="lede">What each metric on this site means, where the data comes from, and how far to trust it.</p>
 </header>
 <section id="method">
-<h2>Method</h2>
+<h2>Data</h2>
 <ul>
-  <li>All numbers come from local code-scan stores (<code>~/.cache/code-scan</code>) via <code>npm run site</code> (<code>bin/site-export.js</code>), which runs the
-    tool's own <code>scans</code>, <code>compare</code>, <code>init report</code> and <code>calibrate report</code> on copies of the stores. Only counts, sizes,
-    models and dollars are exported; private repositories are anonymized.</li>
-  <li>Price is list price of every token of every reviewer agent (preamble, coordination turns, re-reads), not just the code. Scans whose transcripts are gone or incomplete show no price.</li>
-  <li>Precision counts only triaged findings. Most triage was done by Codex auto-triage, which may favour Codex findings.</li>
-  <li>Each comparison is one run; model sampling varies between runs.</li>
-  <li>Codex scans before the effort study ran without <code>--effort</code>, so they used the Codex CLI default, <code>high</code>; Claude scans without an effort ran at Claude Code's default.</li>
+  <li><b>Corpus:</b> <span id="method-scope">…</span> Private repositories are anonymized; only counts, sizes, models and dollars are published.</li>
+  <li><b>Verdict coverage:</b> <span id="method-verdicts">…</span></li>
+  <li><b>Scans per model:</b> <span id="method-permodel">…</span></li>
+  <li><b>Full scans vs samples.</b> Overview, Compare, Pick a provider and Pick effort use full scans. The benchmark and chunk-size curves on Pick a model come from <code>code-scan init</code>, which reviews a small code sample (one repository per benchmark), so they generalise less than full scans.</li>
+  <li><b>One run per configuration.</b> No configuration was repeated, so run-to-run noise is not measured: treat small gaps (a few findings, a few cents) as possibly noise.</li>
+</ul>
+<h2 id="metrics">Metrics</h2>
+<p><b>Choose on recall, findings and cost; this data can't separate configurations on precision.</b> Most scans have 0–3 false positives, so a precision gap of a few points is usually 1–3 findings, and those counts come from lenient agent triage (see <a href="#triage">Auto-triage</a>), so real false positives are probably more.</p>
+<ul>
+  <li><b>Findings:</b> every issue a scan reported, critical to low. Each scan counts its own; see Same bug for matching across scans.</li>
+  <li><b>Same bug:</b> two findings from different scans in the same file with similar titles, or on nearby lines with somewhat similar titles. Matching is automatic, so some duplicates slip through and some distinct bugs merge.</li>
+  <li><b>Real</b> (also called <em>confirmed</em>): triage judged the finding a real bug, including ones marked won't fix or already fixed by hand.</li>
+  <li><b>Precision:</b> real ÷ (real + false positives). Other verdicts are left out (see Verdict coverage).</li>
+  <li><b>Recall:</b> of all real issues found by any of the runs being compared (full scans of the same code), the share this run found. Only issues triaged real count; untriaged findings are ignored, so a run whose findings were not triaged can score low. Bugs no run found are not counted, so recall overstates real coverage. <b>Recall is severity-weighted:</b> critical 4, high 3, medium 2, low 1, using the highest severity any reviewer gave, so an issue weighs the same whichever run found it.<br><span class="muted">Used on Pick a provider, Pick a model and Pick effort; the sample-based scores on Pick a model are called quality instead.</span></li>
+  <li><b>Unique findings:</b> issues no other scan of the same repository found, counted only on files every one of those scans reviewed. "Unique confirmed" is the subset that is real.</li>
+  <li><b>Price:</b> list price at scan time of every token of every reviewer agent (preamble, coordination, re-reads), not just the code. Cached input is priced at each provider's cache-read rate; Anthropic cache writes at 1.25× input. <span id="method-noprice"></span></li>
+  <li><b>$/100KB:</b> scan price ÷ KB of source reviewed × 100. <b>Chunk size</b> (Pick a model): KB of source given to one reviewer agent at a time.</li>
+  <li><b>Wall clock:</b> elapsed time while at least one reviewer was working, up to 10 reviewers in parallel by default. The parallelism limit each scan used is not recorded, so a faster wall clock may just mean more parallel reviewers. Pauses and the planner are excluded. <b>Agent-minutes</b> add up every reviewer's time instead.</li>
+  <li><b>Effort:</b> Codex scans without an effort used the Codex CLI default, <code>high</code>; Claude scans used Claude Code's default, which is not recorded. Both are labelled "default" on other pages, but the triage table below merges Codex default into <code>high</code>.</li>
 </ul>
 </section>
 <section id="triage">
 <h2>Auto-triage</h2>
-<p class="muted">Agents re-check each finding against the checkout and mark it real, false positive, won't fix or unsure.</p>
-<div class="table-wrap"><table id="triage-table"></table></div>
+<p>An agent re-reads each finding against the code and marks it real, false positive, won't fix or unsure, and may correct its severity. <span id="triage-summary"></span></p>
+<ul class="muted">
+  <li>Only Codex gpt-6.1-sol was measured as a triage agent (plus a few findings whose triage model was not recorded); there is no data on Claude triage cost or strictness.</li>
+  <li>Codex often also produced the findings it judged, so read "real" as agreement, not ground truth.</li>
+  <li>Triage often corrects severity, so <b>don't filter scan output by the reviewer's severity before triage.</b> The "model not recorded" row covers only a few dozen findings, so its percentages are not shown.</li>
+  <li>"Per agent" is how many findings one triage agent checked at once. Rows triaged different findings, partly in different repositories, so their $/finding is not a like-for-like test of group size or effort.</li>
+  <li>"Real" includes won't fix, as defined above. Severity changes count both directions.</li>
+</ul>
+<div class="table-wrap"><table id="triage-table" class="stack"></table></div>
 </section>
 
 <footer>code-scan · MIT · data snapshot <span class="generated">…</span> · <a href="data.json">data.json</a> ·

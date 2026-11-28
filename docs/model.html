@@ -6,6 +6,39 @@
 <title>Pick a model</title>
 <meta name="description" content="Which reviewer model to use with code-scan: recommendations by language, the gocql known-bug benchmark, cross-model calibration and chunk size.">
 <link rel="stylesheet" href="style.css">
+<style>
+/* edge shadows show that a table scrolls sideways */
+.table-wrap { background:
+  linear-gradient(to right, var(--surface-1) 30%, transparent) left / 32px 100% no-repeat local,
+  linear-gradient(to left, var(--surface-1) 30%, transparent) right / 32px 100% no-repeat local,
+  radial-gradient(farthest-side at 0 50%, rgba(0,0,0,.22), transparent) left / 12px 100% no-repeat scroll,
+  radial-gradient(farthest-side at 100% 50%, rgba(0,0,0,.22), transparent) right / 12px 100% no-repeat scroll,
+  var(--surface-1); }
+#lang-table th { white-space: normal; }
+#lang-table td.lang { white-space: normal; min-width: 11em; font-size: inherit; }
+#lang-table td.lang .muted { font-size: 0.85em; margin-top: 2px; }
+.scroll-hint { display: none; font-size: 0.8rem; margin: 6px 0 0; }
+@media (max-width: 700px) { .scroll-hint { display: block; } }
+@media (max-width: 640px) {
+  #bench-chart { overflow-x: auto; background:
+    linear-gradient(to left, var(--surface-1) 30%, transparent) right / 32px 100% no-repeat local,
+    radial-gradient(farthest-side at 100% 50%, rgba(0,0,0,.22), transparent) right / 12px 100% no-repeat scroll,
+    var(--surface-1); }
+  #bench-chart svg { min-width: 560px; overflow: hidden; }
+  /* phone: one card per language, every number visible without scrolling */
+  #lang-table tr:first-child { display: none; }
+  #lang-table td { display: inline-block; border: 0; padding: 2px 10px 2px 8px; white-space: normal; text-align: left; }
+  #lang-table td.lang { display: block; min-width: 0; padding-top: 10px; }
+  #lang-table tr { display: block; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  #lang-table td[data-l]::before { content: attr(data-l) ": "; color: var(--text-secondary); }
+  #pref-table tr:first-child { display: none; }
+  #pref-table td { display: inline-block; border: 0; padding: 2px 10px 2px 8px; white-space: normal; }
+  #pref-table td.l { display: block; }
+  #pref-table td.l:first-child { padding-top: 10px; }
+  #pref-table tr { display: block; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  #pref-table td[data-l]::before { content: attr(data-l) ": "; color: var(--text-secondary); }
+}
+</style>
 </head>
 <body>
 <nav class="site"><div class="in"><a class="brand" href="index.html">code-scan</a><a href="index.html">Overview</a><a href="compare.html">Compare configurations</a><a href="provider.html">Pick a provider</a><a href="model.html" aria-current="page">Pick a model</a><a href="effort.html">Pick effort</a><a href="method.html">Method & data</a></div></nav>
@@ -14,66 +47,103 @@
   <h1>Pick a model</h1>
   <p class="lede">Codex <code>gpt-6.1-sol</code>, Opus 5.5, Fable 5.2, Sonnet 5.5 and Haiku 5.5 on real repositories. Run <code>/code-scan:init</code> to repeat this comparison on your own code.</p>
 </header>
-<nav class="toc"><a href="#pref">By preference</a><a href="#models">Recommendations</a><a href="#by-lang">By language</a><a href="#bench">Known-bug benchmark</a><a href="#init">Cross-model calibration</a><a href="#chunk">Chunk size</a></nav>
+<nav class="toc"><a href="#scores">How to read the scores</a><a href="#pref">By preference</a><a href="#models">Recommendations</a><a href="#by-lang">By language</a><a href="#bench">Known-bug benchmark</a><a href="#init">Cross-model calibration</a><a href="#chunk">Chunk size</a><a href="#curves">Calibration curves</a></nav>
+<p class="scroll-hint muted">Wide tables scroll sideways.</p>
+<section id="scores">
+<h2>How to read the scores</h2>
+<div class="rec"><strong>This page uses five different scores. Compare numbers only within the same score.</strong>
+<p>The first four are severity-weighted shares of a pool of issues. What changes is the pool, so the same model can score 0.15 in one place and 0.74 in another.</p>
+<ul>
+<li><b>recall</b> (By preference): share of the 217 confirmed issues found by 10 full scans of one 995KB TypeScript + Rust codebase at different efforts. Use this one to pick provider and effort.</li>
+<li><b>share</b> (Recommendations): share of the issues found by either of two full scans of the same code, one Codex and one Claude model.</li>
+<li><b>quality</b> (Known-bug benchmark, Cross-model calibration): share of the issues found by any model on a small 107–255KB sample. Claude models only, because Codex was not run on these samples.</li>
+<li><b>score</b> (Calibration curves): share of what one model found at any chunk size. It compares chunk sizes, not models.</li>
+<li><b>precision</b> (By language): a different kind of number, the share of a model's own findings that auto-triage marked real. Most triage was done by Codex, for Codex and Claude findings alike, so precision is an upper bound and says little about the difference between models.</li>
+</ul>
+<p>Each figure comes from a single run. Differences under about 0.15 are within noise.</p></div>
+</section>
 <section id="pref">
 <h2>By preference</h2>
-<div class="table-wrap"><table class="pref"><tr><th class="l">you want</th><th class="l">model and effort</th><th>recall</th><th>$/100KB</th><th>$/confirmed</th><th>reviewer min/100KB</th></tr>
-<tr><td class="l"><b>Cheapest</b></td><td class="l">Codex gpt-6.1-sol <code>medium</code></td><td>0.23</td><td>$0.30</td><td>$0.07</td><td>11.7</td></tr>
-<tr><td class="l"><b>Most findings</b></td><td class="l">Two scans, findings merged: Codex gpt-6.1-sol <code>xhigh</code> and Opus 5.5 <code>max</code></td><td>0.66</td><td>$6.64</td><td>$0.46</td><td>45.0</td></tr>
-<tr><td class="l"><b>Best value</b></td><td class="l">Codex gpt-6.1-sol <code>xhigh</code></td><td>0.40</td><td>$0.75</td><td>$0.10</td><td>21.8</td></tr>
-<tr><td class="l"><b>Quickest</b></td><td class="l">Opus 5.5 <code>low</code></td><td>0.12</td><td>$0.78</td><td>$0.27</td><td>1.6</td></tr>
-<tr><td class="l"><b>Claude only</b></td><td class="l">Opus 5.5 <code>medium</code> (Fable 5.2 for small critical code)</td><td>0.15</td><td>$1.01</td><td>$0.28</td><td>2.7</td></tr>
+<p class="note"><b>All rows come from one study: 10 full scans of a single 995KB TypeScript + Rust database driver.</b> Treat the gaps as a guide, not a universal ranking.</p>
+<div class="table-wrap"><table id="pref-table" class="pref"><tr><th class="l">you want</th><th class="l">model and effort</th><th>recall</th><th>$/100KB</th><th>$/confirmed</th><th>agent-min/100KB</th></tr>
+<tr><td class="l"><b>Cheapest</b></td><td class="l">Codex gpt-6.1-sol <code>medium</code></td><td data-l="recall">0.23</td><td data-l="$/100KB">$0.30</td><td data-l="$/confirmed">$0.07</td><td data-l="agent-min/100KB">11.7</td></tr>
+<tr><td class="l"><b>Most findings</b></td><td class="l">Two scans, findings merged: Codex gpt-6.1-sol <code>xhigh</code> and Opus 5.5 <code>max</code></td><td data-l="recall">0.66</td><td data-l="$/100KB">$6.64</td><td data-l="$/confirmed">$0.46</td><td data-l="agent-min/100KB">45.0</td></tr>
+<tr><td class="l"><b>Best value</b></td><td class="l">Codex gpt-6.1-sol <code>xhigh</code></td><td data-l="recall">0.40</td><td data-l="$/100KB">$0.75</td><td data-l="$/confirmed">$0.10</td><td data-l="agent-min/100KB">21.8</td></tr>
+<tr><td class="l"><b>Quickest</b>, or <b>Claude only</b> <span class="muted">(finds least)</span></td><td class="l">Opus 5.5 <code>low</code></td><td data-l="recall">0.12</td><td data-l="$/100KB">$0.78</td><td data-l="$/confirmed">$0.27</td><td data-l="agent-min/100KB">1.6</td></tr>
 </table></div>
-<p class="note">Measured in the effort study on nodejs-rs-driver (TypeScript + Rust). Haiku ($0.04/100KB) and Sonnet ($0.41) are cheaper but missed most known bugs, so they are not listed as "cheapest".</p>
+<ul class="note">
+<li><b>recall</b>: severity-weighted share of the 217 confirmed issues found by any of the 10 scans.</li>
+<li><b>$/confirmed</b>: scan price divided by the number of confirmed issues it found (a plain count, not severity-weighted).</li>
+<li><b>agent-min/100KB</b>: reviewer-agent time summed over all agents, not wall clock. Agents run in parallel, so a scan finishes much sooner.</li>
+<li><b>Best value</b>: the effort past which more effort barely adds recall. Codex <code>max</code> reaches 0.41 at $0.86. Lower levels cost less per confirmed issue but find less.</li>
+<li><b>Quickest</b>: Opus <code>low</code> also finished first by the clock, 4 minutes for the 995KB scan against 24–53 for Codex, but found about half as much as Codex <code>medium</code> (0.12 vs 0.23).</li>
+<li><b>Claude only</b>: Opus recall by effort was <code>low</code> 0.12 ($0.78), <code>medium</code> 0.15 ($1.01), <code>high</code> 0.17 ($1.20), <code>max</code> 0.35 ($5.89). <code>low</code>, <code>medium</code> and <code>high</code> are within noise of each other, so the table shows <code>low</code>, the cheapest. The only measurable step is <code>max</code>: about three times the recall of <code>low</code> at about 7.5 times the price. See <a href="effort.html">Pick effort</a>. Fable 5.2 was not in this study; see <a href="#models">Recommendations</a> for when to use it.</li>
+<li><b>Sonnet and Haiku</b> were not in this study. On the small benchmark sample below they cost less ($0.41 and $0.04/100KB), but Sonnet was inconsistent (0.09 on the C++ sample) and Haiku found 2 of 7 known bugs.</li>
+</ul>
 </section>
 <section id="models">
 <h2>Recommendations</h2>
 <div class="rec"><strong>Default for full scans: Codex <code>gpt-6.1-sol</code> at <code>xhigh</code> effort.</strong>
-<p>On every repository where it ran next to a Claude model on the same code it found the largest severity-weighted share of issues
-(gocql 0.76 vs Fable 0.43; seastar 0.81 vs Opus 0.30; scylla-rust-driver 0.59 vs Fable 0.55), at $0.27–0.52 per 100KB —
-about a seventh of Fable's price on the same 2.7MB of Rust. Auto-triage confirmed ≥ 0.99 of its findings, but that triage was
-also done by Codex and rejected almost nothing (4 false positives in 1,623 Codex verdicts), so treat that figure as an upper bound.</p></div>
-<div class="rec"><strong>Best Claude reviewer: Opus 5.5 at 20KB chunks.</strong>
-<p>Found all 7 known bugs on the gocql benchmark at $1.19/100KB and topped the calibration sample of the private Go project (0.74).
-Full scans cost $0.38–0.73/100KB with 0.81–1.00 precision after triage. Use it when you want a Claude-only pipeline or as the second
-opinion next to Codex.</p></div>
+<p>In three full scans next to a Claude model on the same code, it was clearly ahead in two and tied in the third, by share (severity-weighted share of the issues either model found):
+0.76 vs Fable 0.43 on a 1.4MB Go driver, 0.81 vs Opus 0.29 on 439KB of a C++ framework, and 0.59 vs Fable 0.55 on a 2.7MB Rust driver (a tie, but Fable cost about seven times as much).
+These full scans used the CLI default effort (<code>high</code>) and cost $0.27–0.52/100KB. <code>xhigh</code> is recommended because in the <a href="#pref">effort study</a> it reached recall 0.40 vs 0.31 at <code>high</code>, at $0.75 vs $0.43/100KB.
+Codex is not in the benchmark or calibration tables below, which compare Claude models only.</p></div>
+<div class="rec"><strong>Best value among Claude models: Opus 5.5.</strong>
+<p>Expect about $0.40–1.20/100KB for a full scan at <code>low</code> to <code>high</code> effort; <code>max</code> costs about $5.90/100KB.<sup><a href="#opus-price">1</a></sup>
+Quality is split: Opus found all 7 known bugs in the Go benchmark sample and led the private Go calibration sample (0.74), with Sonnet close behind (0.68, within noise) and Fable at 0.43.
+Fable scored higher on the other two calibration samples (see below) at about twice the price on samples and five times on the one full scan where both ran (Rust driver).
+Use Opus for a Claude-only pipeline, or as the second opinion next to Codex.</p>
+<p class="muted" id="opus-price"><sup>1</sup> Full scans with no effort recorded cost $0.38–0.73/100KB on four codebases; on the effort-study codebase <code>medium</code> cost $1.01, <code>high</code> $1.20 and <code>max</code> $5.89. Calibration samples cost more ($0.62–1.19), likely because small chunks carry more per-agent overhead; use full-scan prices for your bill.</p></div>
 <div class="rec"><strong>Fable 5.2: strongest on small samples, most expensive at scale.</strong>
-<p>Best quality on the seastar and gocql calibration samples (0.65, 0.49), but $1.93/100KB on the full scylla-rust-driver scan — about seven times Codex and five times Opus on the same repository.
-Worth it for a focused scan of a critical subsystem (<code>--only</code>), not for a whole large repo.</p></div>
+<p>Best quality on the C++ framework sample (0.65 vs Opus 0.48) and the 255KB Go driver sample (0.49 vs Opus 0.29), though behind Opus on the 107KB known-bug sample of the same driver (0.44 vs 0.50, 6 of 7 bugs vs 7), and third of four on the private Go sample, behind Opus and Sonnet (0.43 vs Opus 0.74). At scale it is expensive: the full 2.7MB Rust driver scan cost $1.93/100KB, about seven times Codex and five times Opus on the same code.
+Use it for a focused scan of a critical subsystem (<code>--only</code>), not for a whole large repo.</p></div>
 <div class="rec"><strong>Sonnet 5.5: cheap but inconsistent. Haiku 5.5: don't use for review.</strong>
-<p>Sonnet ranged from 0.68 (private Go) to 0.09 (seastar C++) on calibration samples, and found 4 of 7 known gocql bugs.
-Haiku found 2 of 7, scored 0.00–0.32 and had rounds fail because reviewers left files unsubmitted.</p></div>
-<div class="rec"><strong>For critical repos, run two models side by side.</strong>
-<p>Overlap between models is small: of the issues Codex and Fable found on gocql only 25 were found by both, on scylla-rust-driver only 12.
-In the effort study below, Codex <code>xhigh</code> alone found 0.40 of the confirmed issues and 0.66 together with Opus <code>max</code>.
-<code>start --profile codex-default,opus-default</code> runs both on the same commit and plan; <code>compare</code> shows what only one found.</p></div>
+<p>Sonnet scored 0.68 on the private Go sample but 0.09 on the C++ sample, and found 4 of 7 known Go bugs. That 0.09 was at the 60KB chunk its calibration picked, a size where quality often drops (its C++ curve was not kept), so it may be partly a chunk-size effect.
+Haiku found 2 of 7 and scored 0.22–0.32; its C++ run failed with no result. Its reviewers often stopped before reporting on all their assigned files, so its results are incomplete.</p></div>
+<div class="rec"><strong>For critical code, run two models side by side.</strong>
+<p>Different models find mostly different issues. On the Go driver, 25 issues were found by both Codex and Fable, while 74 were found only by Codex and 47 only by Fable.
+On the Rust driver: 12 by both, 35 only by Codex, 51 only by Fable. Fable found more there, but Codex's were more severe (22 critical or high vs Fable's 7), so its severity-weighted share is higher (0.59 vs 0.55). In the study above, Codex <code>xhigh</code> alone reached recall 0.40, and 0.66 together with Opus <code>max</code>.
+That pair cost $6.64/100KB in total. To do this, ask <code>/code-scan:scan</code> for "the default review on Codex at xhigh effort and on Opus at max effort": it registers a profile per model and runs both on the same commit and plan. The default efforts (Codex <code>high</code>, Opus unset) are cheaper but were not measured as a pair. Then <code>/code-scan:compare</code> shows what only one of them found.</p></div>
 </section>
 <section id="by-lang">
 <h2>By language</h2>
-<p class="muted">What was measured per language. "Compared" means two or more models reviewed the same code; elsewhere only one model ran, so the general recommendation applies.
-Prices are at the recommended levels (Codex <code>xhigh</code>, Opus <code>medium</code>) plus the scans run without an explicit effort; those Codex scans used the CLI default, <code>high</code>.</p>
+<p class="muted">"Compared" means two or more models reviewed the same code. Where only one model ran, the general recommendation applies.
+Prices are from full scans: Codex at <code>xhigh</code> or the CLI default (<code>high</code>), Opus at <code>medium</code> or with no effort set (level not recorded).
+Two prices in one cell are separate scans of different codebases at different effort levels, not a low–high range. "not recorded" means the scan ran but its price or effort was not saved.
+Precision is an upper bound (see <a href="#scores">How to read the scores</a>). "Opus chunk" is the size <code>init</code> picked: the largest size before quality fell more than 0.15 below the best, which is not always the best-scoring one (see <a href="#chunk">Chunk size</a>).
+The TypeScript row is the TypeScript + Rust codebase also counted under Rust, not a separate measurement.</p>
 <div class="table-wrap"><table id="lang-table"></table></div>
 </section>
 <section id="bench">
 <h2>Known-bug benchmark</h2>
 <p id="bench-desc" class="muted"></p>
+<p class="muted">Claude models only. Codex was not run on this sample. Haiku's reviewers often stopped before reporting on all their assigned files, so its row is incomplete.
+"calibration $" is the one-time cost of running <code>init</code> for that model. It is not paid again on each scan.
+Calibration picked 90KB for Fable on this sample (its curve is not shown) but 40KB on the 255KB sample of the same Go driver (the curve below), and at 20KB Fable found all 7 bugs. Sonnet likewise got 20KB here but 60KB on the 255KB sample, so its scores in the two tables are not at the same size. A calibrated size is a good starting point, not an exact optimum.</p>
+<p class="chart-cue muted">The chart scrolls sideways (Fable is at the right).</p>
 <figure><div class="chart" id="bench-chart"></div>
-<figcaption>Quality (severity-weighted share of all distinct issues any model found) against all-in price. Up and left is better.</figcaption></figure>
+<figcaption>Quality (severity-weighted share of the distinct issues any model found on this sample) against all-in price on the sample. Up and left is better.</figcaption></figure>
 <div class="table-wrap"><table id="bench-table"></table></div>
 </section>
 <section id="init">
 <h2>Cross-model calibration</h2>
-<p class="muted">Each model at its own calibrated chunk size; quality is the share of all distinct issues found by any model on that sample.</p>
+<p class="muted">Claude models only, each at its own calibrated chunk size. Quality is the share of the distinct issues any model found on that sample. Differences under about 0.15 are noise.
+The Go driver sample here (255KB) is not the known-bug benchmark sample (107KB). It was calibrated in a separate run, so chunk sizes and scores differ from the benchmark.
+Quality here is not comparable to the curve scores further down (same model and size can show 0.29 here and 0.75 there): each uses a different pool, see <a href="#scores">How to read the scores</a>.
+The Go driver run did not record prices, so its table has no price columns, and Haiku was not run on it. "calibration $" is the one-time cost of <code>init</code>.</p>
 <div id="init-body"></div>
 </section>
 <section id="chunk">
 <h2>Chunk size</h2>
-<div class="rec"><strong>Let <code>init</code> calibrate it — and expect 20–40KB.</strong>
+<div class="rec"><strong>Let <code>init</code> calibrate it, and expect 20–40KB.</strong>
 <p>Review quality falls off sharply once a reviewer gets too much code at once. Across the 12 calibration curves below, the best-scoring size was
-20KB or 40KB in 9, and in 8 quality fell by a quarter or more one step past it (Fable on seastar: 0.78 at 40KB → 0.39 at 60KB).
-Only one run peaked above 60KB: Opus on cpp-rs-driver, at 90KB. Calibration costs $1–5 per model for Sonnet and Opus, $7–15 for Fable, and is reused by every later scan.</p></div>
-<h3>Calibration curves</h3>
-<p class="muted">Score per chunk size within one model's calibration (share of the distinct issues that model found at any size). One sample per size: differences under ~0.15 are noise.</p>
+20KB or 40KB in 9. In 8, quality fell by a quarter or more one step past the best size (Fable on the C++ framework: 0.78 at 40KB, 0.39 at 60KB).
+<code>init</code> keeps growing the chunk until the score falls more than 0.15 below the best seen so far, then keeps the size before that: not always the peak. Two Opus runs picked 90KB: on the C/C++ driver API in Rust 90KB was the peak (0.86),
+and on the TypeScript + Rust driver it scored 0.50 against 0.64 at 40KB. That is why By language shows 90KB for Rust and TypeScript. C# took 40KB over the best-scoring 20KB because 0.78→0.67 is within 0.15.
+The one outlier, Sonnet on the Go database driver (0.23 at 40KB, 0.69 at 60KB, so <code>init</code> picked 60KB), is most likely single-run noise, not a reason to use bigger chunks.
+<code>init</code> is a one-time cost of $1–5 per model for Sonnet and Opus and $7–15 for Fable. Every later scan reuses the result.</p></div>
+<h3 id="curves">Calibration curves</h3>
+<p class="muted">Score per chunk size within one model's calibration (share of the distinct issues that model found at any size). Compare sizes within one line, not across models. One sample per size, so differences under about 0.15 are noise. Hover a point, or open "values" under a chart, to read exact scores.</p>
 <div class="legend" id="cal-legend"></div>
 <div class="multiples" id="cal-charts"></div>
 </section>

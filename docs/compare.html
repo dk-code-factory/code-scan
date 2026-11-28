@@ -12,14 +12,23 @@
 <main>
 <header class="hero">
   <h1>Compare configurations</h1>
-  <p class="lede">Every full scan as one row. Filter by language, model and effort, sort by any column, and plot any two measures against each other.</p>
+  <p class="lede">Every full scan as one row, grouped by repository. Compare rows within a repository: across repositories the code differs, so the numbers do not compare models.</p>
 </header>
+<div class="rec"><strong>What the fair comparison shows</strong>
+<p>On scylladb/nodejs-rs-driver every Codex and Opus effort level ran on the same 995KB at the same commit, with 40KB chunks:</p>
+<ul>
+<li><b>Most findings for little money:</b> Codex <code>xhigh</code>, 74 confirmed at $0.75/100KB, or Codex <code>max</code>, 78 at $0.86. Codex <code>medium</code> costs least per confirmed finding ($0.07) but finds only 41.</li>
+<li><b>Most raw findings, not the best:</b> Opus <code>max</code>, 86 confirmed at $5.89/100KB, about 7× Codex <code>max</code>. Its extra findings are mostly low severity once triage re-graded them (22 low, 16 high, against 8 low, 20 high for Codex <code>max</code>; see <i>conf.</i> columns under Columns: Findings by severity), so its recall is lower: 0.35, against 0.40 for Codex <code>xhigh</code> and 0.41 for <code>max</code>. Recall = severity-weighted share of the 217 issues any scan confirmed; no single scan reaches half.</li>
+<li><b>Most coverage:</b> run several scans. All six Codex levels together reach recall 0.76 for $35 in total; Opus <code>max</code> + Codex <code>xhigh</code> reaches 0.66 for $66; all four Opus levels only 0.45 for $88. More combinations in <a href="effort.html#study">Pick effort</a>.</li>
+<li><b>Quickest:</b> Opus <code>low</code> to <code>high</code>, 16–41 reviewer-minutes (summed agent time) for the 995KB, against 93–217 for Codex and 231 for Opus <code>max</code>. Wall clock ranks them the same (4–11 min against 24–53 and 80), but parallelism was not recorded, so treat it as approximate. They confirm only 29–39.</li>
+</ul>
+<p>Confirmed = an auto-triage agent agreed (see note below). For a recommendation see <a href="provider.html">Pick a provider</a>, <a href="model.html">Pick a model</a> and <a href="effort.html">Pick effort</a>.</p></div>
 <section id="explore">
 <h2>All configurations</h2>
-<p class="muted">Every full scan as one row: model, effort, language and repository, with price, findings, confirmed findings, false positives, unique findings and review time.
-Filter to what matters to you and sort by any column. Rates per 100KB make repositories of different size comparable.</p>
-<div class="presets"><span class="muted">I care most about:</span><button data-preset="cheap">Cheapest</button><button data-preset="most">Most findings</button><button data-preset="value" class="on">Best value</button><button data-preset="quick">Quickest</button></div>
+<p class="note"><b>Confirmed</b> and <b>false positive</b> are verdicts of an auto-triage agent, mostly Codex, that re-read each finding against the code: read them as an agent's agreement, not reproduced bugs. Codex may judge its own findings leniently. <b>Price</b> is the API list price of every token of every reviewer agent, cached input at the cache-read rate. Details in <a href="method.html">Method &amp; data</a>.</p>
+<div class="presets"><span class="muted">Sort by:</span><button data-preset="natural" class="on">Model, effort</button><button data-preset="cheap">Cheapest <span class="m">$/100KB</span></button><button data-preset="most">Most found <span class="m">conf./100KB</span></button><button data-preset="value">Cheapest per finding <span class="m">$/conf.</span></button><button data-preset="quick">Quickest <span class="m">min/100KB</span></button></div>
 <div class="picker">
+  <label>Repository <select id="ex-repo"></select></label>
   <label>Language <select id="ex-lang"></select></label>
   <label>Model <select id="ex-model"></select></label>
   <label>Effort <select id="ex-effort"></select></label>
@@ -30,19 +39,17 @@ Filter to what matters to you and sort by any column. Rates per 100KB make repos
     <option value="all">All columns</option>
   </select></label>
 </div>
+<p class="note scroll-cue">Scroll the table sideways for more columns.</p>
 <div class="table-wrap"><table id="ex-table" class="sortable"></table></div>
-<p class="note" id="ex-note"></p>
+<div class="note" id="ex-note"></div>
 <h3>Plot any two measures</h3>
 <div class="picker">
   <label>Horizontal <select id="ex-x"></select></label>
   <label>Vertical <select id="ex-y"></select></label>
+  <label>Repository <select id="ex-chart-repo"></select></label>
 </div>
+<p class="note chart-cue">Scroll the chart sideways to see all of it.</p>
 <figure><div class="chart" id="ex-chart"></div><figcaption id="ex-cap"></figcaption></figure>
-</section>
-<section id="scans">
-<h2>Price per 100KB, every scan</h2>
-<figure><div class="chart" id="cost-chart"></div>
-<figcaption>Review price per 100KB of code, every full scan with a known cost. Price is list price of every token of every reviewer agent.</figcaption></figure>
 </section>
 
 <footer>code-scan · MIT · data snapshot <span class="generated">…</span> · <a href="data.json">data.json</a> ·
