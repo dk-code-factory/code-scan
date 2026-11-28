@@ -40,8 +40,10 @@ nameWithOwner,parent` in the repo: the upstream is `parent` (owner/name) if the 
 `report-config dedupe_trackers` lists a `jira:` tracker) add `--jira <PROJ>`; agents search it with their Jira tool.
 `start` checks that `gh` reaches the repo and refuses otherwise. Each agent reports per finding and tracker whether
 its search ran (`done` with the queries) or `failed`; `render` will not file a finding without a `done` search of
-every dedupe tracker. Workflow agents inherit the Claude session's configured MCP tools, with
-`Edit`, `Write`, `NotebookEdit` and `Agent` denied; use Jira tools only to search and read issues. A printed `RUN` command
+every dedupe tracker. The named `code-scan:triager` Workflow agent inherits the Claude session's
+configured MCP tools, with `Edit`, `Write`, `NotebookEdit` and `Agent` denied; use Jira tools only to
+search and read issues. If the plugin agent is unavailable, Workflow uses the default agent with the
+host's tool permissions and the same read-only triage instructions. A printed `RUN` command
 starts a separate CLI: configure the Jira connection and read-tool permissions in that runner too.
 For Claude CLI, preapprove the exact Jira search/read tool names in its permission settings; the
 runner's `--allowedTools` flags add preapprovals rather than hiding other tools. A connection available
