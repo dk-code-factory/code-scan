@@ -13,8 +13,9 @@ Use as few turns as possible: put independent tool calls in the same turn.
    listed: what the bug actually is once traced, not what the title says), and fix_loc — the production
    lines (not tests) a minimal correct fix would add, change or remove, counted from the code you read.
 4. For real or unsure findings, search every tracker the text lists for an existing report (at least two
-   different queries each, open and closed, issues and PRs; open every issue number cited in the code near
-   the finding). Link a hit only if it describes the same bug. Record in `issue_search` what really ran:
+   different queries each). For GitHub include open and closed issues and PRs; for Jira include all issue
+   statuses. Open every issue number cited near the finding. Link a hit only if it describes the same
+   bug. Record in `issue_search` what really ran:
    `done` with the queries only if the searches returned results (an empty list counts); `failed` with the
    error if `gh` or the Jira tool could not run (network, auth, rate limit, missing tool). Never report
    `done` for a search that errored: that files a duplicate.

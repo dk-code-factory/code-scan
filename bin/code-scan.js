@@ -4888,9 +4888,10 @@ function atClaim(a) {
   out('\n== EXISTING ISSUES (duplicate search) ==');
   if (trackers.length) {
     out('For EVERY finding you judge real or unsure, search each tracker below for an existing report of the same bug —');
-    out('open and closed, issues and PRs — with at least two different queries (function/type names, file name, symptom,');
-    out('error text), batched in one Bash call. Open every issue number cited in the code near the finding, and every');
-    out('plausible hit, before deciding. A finding filed as new when it was already reported is the costliest mistake here.');
+    out('with at least two different queries (function/type names, file name, symptom, error text). For GitHub include');
+    out('open and closed issues and PRs; for Jira include all issue statuses. Batch GitHub shell searches in one Bash call');
+    out('and independent Jira tool calls in the same turn. Open every cited issue number and plausible hit before deciding.');
+    out('A finding filed as new when it was already reported is the costliest mistake here.');
     for (const t of trackers) {
       if (t.startsWith('gh:')) {
         const repo = t.slice(3);

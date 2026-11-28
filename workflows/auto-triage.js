@@ -1,6 +1,6 @@
 export const meta = {
   name: 'code-scan-auto-triage',
-  description: 'Triage code-scan findings in groups: one agent per group checks each finding, corrects severity, estimates fix size, links existing GitHub issues',
+  description: 'Triage code-scan findings in groups: one agent per group checks each finding, corrects severity, estimates fix size, links existing GitHub or Jira issues',
   whenToUse: 'Started by the code-scan:auto-triage skill with the NEXT args printed by `code-scan.js auto-triage start`',
   phases: [
     { title: 'Triage', detail: 'one agent per group of findings; each claims, checks, searches issues and submits' },
@@ -11,7 +11,7 @@ export const meta = {
 const shw = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
 const CLI = `${args.home ? `CODESCAN_HOME=${shw(args.home)} ` : ''}node ${shw(args.cli)} -C ${shw(args.root)}`
 
-// Standing instructions live in agents/triager.md (minimal-tool agent); the prompt only carries the command.
+// Standing instructions live in agents/triager.md; host MCP tools stay available for tracker searches.
 const PROMPT = `Run: ${CLI} auto-triage claim ${args.runId}
 Then follow your instructions. Final reply: {"group": <id or null>, "findings": <findings submitted>}.`
 

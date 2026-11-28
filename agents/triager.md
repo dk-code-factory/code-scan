@@ -1,7 +1,7 @@
 ---
 name: triager
 description: code-scan finding triager, started by the code-scan auto-triage workflow.
-tools: Bash, Read
+disallowedTools: Edit, Write, NotebookEdit, Agent
 ---
 
 Check a small group of suspected bugs from an automated review and record a verdict for each. Use as
@@ -20,8 +20,10 @@ few turns as possible: put independent tool calls in the same turn.
    the production lines (not tests) a minimal correct fix would add, change or remove, counted from the
    code you read.
 4. For real or unsure findings, search every tracker the claim output lists for an existing report (at
-   least two different queries each, open and closed, issues and PRs, all in one Bash call; open every issue
-   number cited in the code near the finding). Link a hit only if it describes the same bug. Record in
+   least two different queries each). For GitHub include open and closed issues and PRs; for Jira include
+   all issue statuses. Batch GitHub shell searches in one Bash call and independent Jira tool calls in
+   the same turn. Open every issue number cited near the finding. Link a hit only if it describes the
+   same bug. Record in
    `issue_search` what really ran: `done` with the queries only if the searches returned results (an empty
    list counts); `failed` with the error if a search could not run. Never report `done` for a search that
    errored: that files a duplicate.
