@@ -323,7 +323,13 @@ cp -r "$CODESCAN_HOME" "$W/state-claims"
   B submit "$live" "$held" <<<'{"src/net/buf.c": [], "src/net/buf.h": []}' >/dev/null
   has "$(B status --scan "$live")" '\[done\]' && ok continue-held-submits || bad continue-held-submits
   B restart --profile net40 --force >/dev/null; live=$(sidof)
-  held=$(B claim "$live" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p'); B stop >/dev/null
+  held=$(B claim "$live" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p')
+  B set-run "$live" "pid:$$" >/dev/null
+  o=$(B continue)
+  [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && has "$o" 'still claimed' && ok continue-active-live-runner || bad "continue-active-live-runner: $o"
+  B set-run "$live" workflow-test >/dev/null
+  B stop >/dev/null
   node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"update chunks set claimed_at='2000-01-01T00:00:00.000Z' where id=$held\")"
   B continue >/dev/null
   [ "$(B sql "select state from chunks where id=$held" | tail -1)" = void ] && ok continue-stale-claim || bad continue-stale-claim

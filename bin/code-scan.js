@@ -1281,10 +1281,10 @@ function cmdContinue(a) {
   const scan = pickScan(a.f);
   if (!scan) die('no active or stopped scan — use `start` or `restart`');
   if (!['active', 'stopped'].includes(scan.status)) die(`scan ${scan.id} is ${scan.status}`);
-  // A stopped scan can still have in-flight reviewers, including after a spending-limit stop.
+  // A live PID runner or a stopped scan can still have in-flight reviewers (including limit stops).
   // Preserve their fresh claims; --reclaim, a dead PID runner, or an expired claim releases them.
   const pidRun = /^pid:/.test(scan.workflow_task || '');
-  const mayBeRunning = scan.status === 'stopped' && !a.f.reclaim && (!pidRun || pidAlive(scan.workflow_task));
+  const mayBeRunning = !a.f.reclaim && (pidRun ? pidAlive(scan.workflow_task) : scan.status === 'stopped');
   const keepClaimedSince = mayBeRunning ? new Date(Date.now() - CLAIM_LIVE_MS).toISOString() : null;
   const head = git(['rev-parse', 'HEAD']).trim();
   setScanStatus(scan.id, 'active');
@@ -1320,7 +1320,7 @@ function cmdContinue(a) {
   const unplanned = !s1.plan_json && !so.noPlan && !so.planFrom && !so.replay;
   out(`scan ${scan.id} @ ${scan.commit_sha.slice(0, 12)} profile=${scan.profile_name}: ${pk.files} files (${kb(pk.bytes)}) left in ${pk.chunks} chunks`);
   if (head !== scan.commit_sha) out(`note: HEAD is ${head.slice(0, 12)}; this scan reviews ${scan.commit_sha.slice(0, 12)} (use \`restart\` for HEAD)`);
-  if (pk.keptClaims) out(`note: ${pk.keptClaims} chunk(s) still claimed by running reviewers are left to them (\`continue --reclaim\` repacks them now)`);
+  if (pk.keptClaims) out(`note: ${pk.keptClaims} chunk(s) still claimed by running reviewers are left to them (\`continue --reclaim\` re-queues them now)`);
   if (pk.chunks === 0 && !pk.keptClaims && !unplanned) { setScanStatus(scan.id, 'done'); out('nothing left — scan marked done'); }
   out(nextLine(getScan(scan.id), unplanned && pk.files > 0));
 }
