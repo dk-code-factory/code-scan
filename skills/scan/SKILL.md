@@ -24,7 +24,11 @@ agent fan-out it launches, at whatever size the repo needs.
 runner, runner CLI args, chunk size, scope and planner, frozen under a version and hash so every result
 traces back to exactly how it ran. Scans never take `--model`, `--runner`, `--prompt-file`, `--chunk-kb`,
 `--only`, `--include`, `--exclude`, `--no-plan` — those go into a profile (`/code-scan:profiles`). Without
-`--profile`, `start` uses the default profile (set by `init pick` or `$CS profile default <ref>`).
+`--profile`, `start` uses this host's default profile (set by `init pick` or `$CS profile default <ref>`).
+Codex uses Codex models and Claude Code uses Claude agents unless the user explicitly selects another
+runner, model, profile or existing scan. A saved default from another host is not an override.
+All hosts share the same repo store, scans, findings, triage and progress; never create a host-specific
+state directory. An explicitly selected existing scan keeps its frozen profile and runner.
 
 **Runner.** Reviewer agents are either Claude Code `Workflow` agents or headless agent CLI processes
 started by code-scan itself (`claude`, `codex`, `gemini`, `agy`, `copilot`, `cursor`, `opencode`); the
@@ -33,7 +37,8 @@ what is installed.
 
 ## 1. Pick the verb from the user's words
 
-- no verb → `continue` if `$CS status` shows a scan `[active]` or `[stopped]`, else `start`
+- no verb → `continue` if `$CS status` shows a scan `[active]` or `[stopped]` using this host's runner,
+  else `start`; leave other hosts' open scans intact. Use `--scan <id>` when selecting among shared scans.
 - "start"/"scan" → `start`; if it refuses because that profile already has an open scan, ask the user:
   continue it, or `restart --profile <name>` (new HEAD)
 - "continue"/"resume" → `continue` (same commit; `--scan <id|label|profile>` when several are open —

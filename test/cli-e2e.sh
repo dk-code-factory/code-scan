@@ -6,6 +6,9 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 W=${1:-$(mktemp -d)}
 rm -rf "$W"; mkdir -p "$W/repo" "$W/bin"
 export CODESCAN_HOME=$W/state PATH=$W/bin:$PATH FAKEGH_LOG=$W/gh.log FAKEGH_ISSUES=$W/issues.json
+export CODESCAN_DETECT=env
+unset CODESCAN_RUNNER CLAUDECODE CLAUDE_CODE_ENTRYPOINT CODEX_SANDBOX CODEX_SANDBOX_NETWORK_DISABLED CODEX_THREAD_ID
+unset GEMINI_CLI ANTIGRAVITY_CLI ANTIGRAVITY_AGENT COPILOT_CLI COPILOT_AGENT CURSOR_AGENT CURSOR_CLI OPENCODE
 B() { node "$HERE/bin/code-scan.js" "$@"; }
 FAILS=0
 ok()   { echo "PASS $1"; }

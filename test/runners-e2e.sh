@@ -6,7 +6,9 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 W=${1:-$(mktemp -d)}
 rm -rf "$W"; mkdir -p "$W/repo" "$W/bin" "$W/home"
 export PATH=$W/bin:$PATH FAKE_LOG=$W/argv.log HOME=$W/home
-unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+export CODESCAN_DETECT=env
+unset CODESCAN_RUNNER CLAUDECODE CLAUDE_CODE_ENTRYPOINT CODEX_SANDBOX CODEX_SANDBOX_NETWORK_DISABLED CODEX_THREAD_ID
+unset GEMINI_CLI ANTIGRAVITY_CLI ANTIGRAVITY_AGENT COPILOT_CLI COPILOT_AGENT CURSOR_AGENT CURSOR_CLI OPENCODE
 B() { node "$HERE/bin/code-scan.js" "$@"; }
 FAILS=0
 ok()   { echo "PASS $1"; }
@@ -36,6 +38,60 @@ o=$(CODESCAN_RUNNER=opencode B runners); has "$o" 'would use: opencode' && ok ru
 o=$(B runners --model codex:gpt-6.2-sol); has "$o" 'would use: codex model codex:gpt-6.2-sol' && ok runner-from-model || bad "runner-from-model: $o"
 o=$(B runners --runner nope 2>&1); has "$o" "unknown runner 'nope'" && ok runner-unknown || bad "runner-unknown: $o"
 o=$(B runners --runner codex --model gemini:x 2>&1); has "$o" 'conflicts' && ok runner-conflict || bad "runner-conflict: $o"
+
+# --- host-native defaults, explicit overrides and one shared store
+CX() { CODEX_THREAD_ID=test-codex B "$@"; }
+CL() { CLAUDECODE=1 B "$@"; }
+export CODESCAN_HOME=$W/state-hosts CODEX_HOME=$W/codex-config
+mkdir -p "$CODEX_HOME"
+printf 'model = "host-model"\n' > "$CODEX_HOME/config.toml"
+CL init pick opus --force >/dev/null
+# Old stores only have the global keys; match them to the host without moving any state.
+node -e 'const {DatabaseSync}=require("node:sqlite"); const d=new DatabaseSync(process.env.CODESCAN_HOME+"/codescan.db"); d.exec("DELETE FROM config WHERE key LIKE '\''default_%:%'\''")'
+o=$(CL init status); has "$o" 'default reviewer model: claude-opus-5-5' && ok legacy-default-matches-host || bad "legacy-default-matches-host: $o"
+o=$(CX init status); has "$o" 'not initialized' && ok host-ignores-foreign-model || bad "host-ignores-foreign-model: $o"
+o=$(CX runners); has "$o" 'would use: codex' && ! has "$o" 'would use: claude' && ok host-before-stored-default || bad "host-before-stored-default: $o"
+o=$(CX start 2>&1); has "$o" '^INIT' && ok host-ignores-foreign-profile || bad "host-ignores-foreign-profile: $o"
+o=$(CX profile register wrong --prompt default --model default 2>&1); has "$o" 'no model was picked' && ok host-model-default-filtered || bad "host-model-default-filtered: $o"
+o=$(CX init start --efforts low --sizes 8 --sample-kb 40 --medium 8)
+has "$o" 'codex:host-model low' && ! has "$o" 'claude-' && ok init-codex-default || bad "init-codex-default: $o"
+o=$(CL init start --efforts low --sizes 8 --sample-kb 40 --medium 8)
+has "$o" '4 model(s), 4 candidate(s)' && ! has "$o" 'codex:' && ok init-claude-default || bad "init-claude-default: $o"
+o=$(CX init start --models sonnet --efforts low --sizes 8 --sample-kb 40 --medium 8)
+has "$o" 'claude-sonnet-5-5 low' && ! has "$o" 'codex:' && ok init-explicit-foreign-model || bad "init-explicit-foreign-model: $o"
+o=$(CODEX_HOME="$W/no-config" CX init start 2>&1)
+has "$o" 'pass --models codex:<model>' && ok init-no-foreign-fallback || bad "init-no-foreign-fallback: $o"
+CX init pick codex:host-model --force --effort low >/dev/null
+o=$(CX profile register override --prompt default --runner claude --model default)
+has "$o" 'claude-opus-5-5 via claude' && ok explicit-runner-default-model || bad "explicit-runner-default-model: $o"
+o=$(CL init status); has "$o" 'default reviewer model: claude-opus-5-5' && ok host-model-kept || bad "host-model-kept: $o"
+o=$(CX init status); has "$o" 'default reviewer model: codex:host-model effort low' && ok host-model-scoped || bad "host-model-scoped: $o"
+o=$(CL start); has "$o" 'runner: claude model claude-opus-5-5' && ok host-profile-claude || bad "host-profile-claude: $o"
+cl_id=$(Q "SELECT MAX(id) FROM scans WHERE kind='scan'")
+o=$(CX start); has "$o" 'runner: codex model codex:host-model' && ok host-profile-codex || bad "host-profile-codex: $o"
+cx_id=$(Q "SELECT MAX(id) FROM scans WHERE kind='scan'")
+[ "$(CL scans --json)" = "$(CX scans --json)" ] && ok hosts-share-scans || bad hosts-share-scans
+# A scan selected by id retains its immutable runner even when launched from the other host.
+: > "$FAKE_LOG"
+o=$(CX run "$cl_id" 2>&1)
+has "$o" 'runner claude' && has "$(CL status --scan "$cl_id")" '\[done\]' && ok explicit-scan-keeps-runner || bad "explicit-scan-keeps-runner: $o"
+o=$(CL run "$cx_id" 2>&1)
+has "$o" 'runner codex' && has "$(CX status --scan "$cx_id")" '\[done\]' && ok hosts-share-progress || bad "hosts-share-progress: $o"
+[ "$(CL query --format json)" = "$(CX query --format json)" ] && [ "$(Q 'SELECT COUNT(*) FROM findings')" != 0 ] && ok hosts-share-findings || bad hosts-share-findings
+CL triage --triage open --set confirmed >/dev/null
+has "$(CX query --triage confirmed)" 'src/net/buf.c' && ok hosts-share-triage || bad hosts-share-triage
+o=$(CX start --profile default --new); has "$o" 'runner: claude' && ok explicit-profile-cross-host || bad "explicit-profile-cross-host: $o"
+o=$(CODESCAN_RUNNER=claude CX runners); has "$o" 'would use: claude' && ok explicit-env-cross-host || bad "explicit-env-cross-host: $o"
+CL init pick opus --name shared --force >/dev/null
+CX init pick codex:host-model --name shared --force --effort low >/dev/null
+has "$(CL profile default)" 'shared@1' && has "$(CX profile default)" 'shared@2' && ok host-default-version-pinned || bad host-default-version-pinned
+# Default state location also ignores host and plugin installation path.
+export CODESCAN_HOME= XDG_CACHE_HOME=$W/cache
+CL init pick opus --force >/dev/null
+o=$(CX profile list); has "$o" 'default@1' && ok hosts-share-default-state-dir || bad "hosts-share-default-state-dir: $o"
+CL start >/dev/null
+o=$(CX status); has "$o" 'scan 1' && has "$o" '\[active\]' && ok hosts-share-default-progress || bad "hosts-share-default-progress: $o"
+unset XDG_CACHE_HOME
 
 # --- a full scan per runner (planner + reviewers), usage and dollars recorded
 for r in claude codex gemini agy copilot cursor opencode; do

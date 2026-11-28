@@ -1,7 +1,7 @@
 # code-scan
 
 Repository-wide bug scanning for agentic coding CLIs: Claude Code, OpenAI Codex CLI, Gemini CLI,
-Antigravity (`agy`), GitHub Copilot CLI, Cursor CLI and OpenCode. MIT. Version 2.0.0.
+Antigravity (`agy`), GitHub Copilot CLI, Cursor CLI and OpenCode. MIT. Version 2.1.1.
 
 Almost all coordination is done by a deterministic CLI (`bin/code-scan.js`, Node 22.5+, no
 dependencies, SQLite via `node:sqlite`), so tokens go to reviewing code rather than orchestrating it.
@@ -70,10 +70,23 @@ agents are read-only: they get the code and reply with JSON.
 
 Which runner a scan uses is fixed by its review profile's model (see below): `<runner>:<model>` (e.g.
 `codex:gpt-6.2-sol`, `gemini:gemini-3.1-pro-preview`, `opencode:anthropic/claude-sonnet-5-5`) runs on that
-CLI, bare ids like `opus` on Claude. Auto-triage, calibration and `run-prompt` still pick with `--runner` /
-`--model` → the model chosen at init → `$CODESCAN_RUNNER` → the agent CLI the command runs inside (parent
-processes, then the variables hosts set such as `CLAUDECODE`, `CODEX_SANDBOX`, `GEMINI_CLI`, `OPENCODE`) →
-the first CLI on `PATH`; `code-scan.js runners` shows what is installed.
+CLI, bare ids like `opus` on Claude. Without an explicit selection, Codex uses Codex models and Claude
+Code uses Claude agents. `init start` benchmarks the configured Codex model inside Codex, or the four
+Claude models inside Claude Code; `--models` explicitly selects other models or vendors. If another
+host has no configured benchmark model, the CLI asks for `--models <runner>:<model>`.
+
+New scans use a default profile for the current runner; a saved choice from another host does not
+override it. Explicit `--profile`, `--model`, `--runner` and `$CODESCAN_RUNNER` selections take precedence.
+Existing scans retain their frozen runner when resumed or repeated, including from another host.
+For agents without a frozen scan, selection is explicit flags → `$CODESCAN_RUNNER` → the current agent
+CLI (parent processes, then host variables such as `CLAUDECODE`, `CODEX_THREAD_ID`) → a stored model →
+the first CLI on `PATH`. A stored model is reused within the selected runner only.
+`code-scan.js runners` shows what is installed.
+
+Both hosts share one repository store at `~/.cache/code-scan/<repoKey>/codescan.db` (or the same
+`CODESCAN_HOME` override): scans, findings, triage, calibration, claims and progress are shared.
+Runner-specific default choices live in that same database; state is never split by host or plugin
+installation. This also lets one host inspect or explicitly resume a scan started by the other.
 
 ```text
 code-scan.js profile register sec-codex --prompt security --model codex:gpt-6.2-sol
@@ -153,7 +166,8 @@ version). Registering an unchanged spec returns the existing version, a changed 
 Scans refuse spec flags (`--model`, `--only`, `--chunk-kb`, …): those belong to a profile, so every scan
 traces back to exactly how it ran. The hash keys the "already reviewed" ledger (a new model or prompt
 re-reviews everything; the same profile skips unchanged files). `init pick` registers the `default`
-profile. Run-time knobs (lanes, `--max-usd`, `--max-5h-pct`, commit) stay on the scan. Stores made by
+profile for Claude, or `default-<runner>` for another runner, and saves the default for that runner.
+Run-time knobs (lanes, `--max-usd`, `--max-5h-pct`, commit) stay on the scan. Stores made by
 1.x get `legacy-<prompt>@N` profiles for their past scans on first use.
 
 ## Parallel scans, repeating, comparing

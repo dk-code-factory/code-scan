@@ -497,6 +497,48 @@ function cfgSet(key, value) {
     .run(key, String(value));
 }
 
+function preferredRunner() {
+  try { return RN.preferredRunner()?.runner || null; } catch (e) { die(e.message); }
+}
+
+/** Defaults share the repo database, but one host must not inherit another runner's choice. */
+function defaultModelChoice(runner = preferredRunner()) {
+  const scoped = runner && cfgGet(`default_model:${runner}`);
+  const model = scoped || cfgGet('default_model');
+  if (!model || (runner && RN.splitModel(model).runner !== runner)) return { model: null, effort: null };
+  return { model, effort: cfgGet(scoped ? `default_effort:${runner}` : 'default_effort') };
+}
+
+function defaultProfileRef() {
+  const runner = preferredRunner();
+  for (const ref of [runner && cfgGet(`default_profile:${runner}`), cfgGet('default_profile')]) {
+    const p = ref && findProfile(ref);
+    if (p && (!runner || p.spec.runner === runner)) return ref;
+  }
+  return null;
+}
+
+/** Keep choices made before defaults were scoped when another host makes its first pick. */
+function preserveLegacyDefaults() {
+  const model = cfgGet('default_model');
+  const runner = model && RN.splitModel(model).runner;
+  if (runner && !cfgGet(`default_model:${runner}`)) {
+    cfgSet(`default_model:${runner}`, model);
+    const effort = cfgGet('default_effort');
+    if (effort) cfgSet(`default_effort:${runner}`, effort);
+  }
+  const ref = cfgGet('default_profile');
+  const p = ref && findProfile(ref);
+  if (p && !cfgGet(`default_profile:${p.spec.runner}`)) cfgSet(`default_profile:${p.spec.runner}`, profileLabel(p));
+}
+
+function setDefaultProfile(p, ref, pin = false) {
+  preserveLegacyDefaults();
+  cfgSet('default_profile', ref);
+  // Pin the version: another host can pick a new version under the same profile name.
+  cfgSet(`default_profile:${p.spec.runner}`, pin ? profileLabel(p) : ref);
+}
+
 function getScan(id) {
   const s = db().prepare('SELECT * FROM scans WHERE id=?').get(Number(id));
   if (!s) die(`no scan ${id}`);
@@ -626,13 +668,14 @@ function specFromFlags(f) {
   if (!f.prompt && !f['prompt-file']) die('profile register needs --prompt <name> (see `prompt list`) or --prompt-file <file>');
   if (!f.model) die('profile register needs --model <model> (opus, sonnet, codex:gpt-6.2-sol, gemini:gemini-3.1-pro-preview, …; `default` = the model picked at init)');
   const pr = promptFromFlags(f);
-  const model = f.model === 'default' ? cfgGet('default_model') : modelId(f.model);
+  const choice = f.model === 'default' ? defaultModelChoice(f.runner) : null;
+  const model = choice ? choice.model : modelId(f.model);
   if (!model) die('--model default: no model was picked at init (`init start`, then `init pick <model>`)');
   let r;
   try { r = RN.resolve({ flagRunner: f.runner, flagModel: model }); } catch (e) { die(e.message); }
   if (!r.model || !RN.splitModel(r.model).model) die(`--model ${f.model}: name the model, not just the runner (e.g. ${r.runner}:<model>)`);
   // --model default also takes the effort picked at init, unless --effort is given
-  const effort = f.effort !== undefined ? f.effort : f.model === 'default' ? cfgGet('default_effort') || undefined : undefined;
+  const effort = f.effort !== undefined ? f.effort : choice ? choice.effort || undefined : undefined;
   const cal = (effort && cfgGet(chunkKey(modelId(r.model), effort))) || cfgGet(chunkKey(modelId(r.model)));
   const effErr = RN.effortError(r.runner, effort, r.model);
   if (effErr) die(effErr);
@@ -1284,7 +1327,7 @@ function createBatch(items, f, supersede = []) {
   out('NEXT ' + JSON.stringify(o));
 }
 
-/** Profiles a start names, else the repo default; prints INIT and exits when there is none. */
+/** Explicit profiles can use any runner; an implicit default must belong to this host. */
 function startProfiles(f) {
   const refs = listFlag(f.profile);
   if (refs && refs.length) {
@@ -1294,9 +1337,9 @@ function startProfiles(f) {
     if (dup) die(`profile ${dup} given twice — one scan per profile name at a time`);
     return ps;
   }
-  const def = cfgGet('default_profile');
+  const def = defaultProfileRef();
   if (def && findProfile(def)) return [runnableProfile(def)];
-  out(cfgGet('default_model')
+  out(defaultModelChoice().model
     ? `INIT no default review profile — register one: \`profile register default --prompt default --model default\` (or \`init pick <model>\`), or pass --profile <name>`
     : 'INIT this repo has no review profile — run `init start` to compare models and pick one (`init pick` registers the default profile), or `profile register <name> --prompt <prompt> --model <runner:model>` and pass --profile <name>');
   process.exit(2);
@@ -2090,6 +2133,14 @@ function calLine(cal, round) {
 
 const MODEL_IDS = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', haiku: 'claude-haiku-5-5', fable: 'claude-fable-5-2' };
 const INIT_DEFAULT_MODELS = 'opus,sonnet,haiku,fable';
+function initDefaultModels() {
+  let r;
+  try { r = RN.resolve({}); } catch (e) { die(e.message); }
+  if (!r.runner || r.runner === 'claude') return INIT_DEFAULT_MODELS;
+  const model = RN.defaultModel(r.runner);
+  if (!model) die(`the ${r.runner} host has no configured benchmark model — pass --models ${r.runner}:<model>; other runners are used only when explicitly requested`);
+  return RN.joinModel(r.runner, model);
+}
 const INIT_BIG_KB = 160;
 const INIT_SMALL_KB = 160;
 const INIT_KEEP = 3;
@@ -2567,7 +2618,7 @@ function cmdInit(a) {
   if (sub === 'run') return cmdInitRun(a);
   const d = db();
   if (sub === 'start') {
-    const models = [...new Set(listFlag(a.f.models || INIT_DEFAULT_MODELS).map(modelId))];
+    const models = [...new Set(listFlag(a.f.models || initDefaultModels()).map(modelId))];
     const prof = promptFromFlags(a.f);
     const commit = git(['rev-parse', 'HEAD']).trim();
     const medium = Number(a.f.medium || DEFAULT_CHUNK_KB);
@@ -2675,21 +2726,24 @@ function cmdInit(a) {
       size = row && row.chunkKb;
     }
     if (!size && !a.f.force) die(`${model}${effort ? ` at effort ${effort}` : ''} has no calibration in this repo — run \`init start --models ${modelAlias(model) || model}${effort ? ` --efforts ${effort}` : ''}\` (or --force to use the default chunk size)`);
+    preserveLegacyDefaults();
     cfgSet('default_model', model);
     if (effort) cfgSet('default_effort', effort); else d.prepare("DELETE FROM config WHERE key='default_effort'").run();
+    const runner = RN.splitModel(model).runner;
+    cfgSet(`default_model:${runner}`, model);
+    if (effort) cfgSet(`default_effort:${runner}`, effort); else d.prepare('DELETE FROM config WHERE key=?').run(`default_effort:${runner}`);
     cfgSet(chunkKey(model, effort), size || DEFAULT_CHUNK_KB);
     out(`default reviewer model: ${model}${effort ? ` effort ${effort}` : ''}, chunk size ${size || DEFAULT_CHUNK_KB}KB`);
-    // scans run registered profiles: the pick becomes (a new version of) the `default` profile
-    const name = a.f.name || 'default';
+    // Separate default lineages let both hosts scan without superseding each other's work.
+    const name = a.f.name || (runner === 'claude' ? 'default' : `default-${runner}`);
     const { spec, promptSource } = specFromFlags({ prompt: a.f.prompt || 'default', model, effort: effort || undefined, 'chunk-kb': size || DEFAULT_CHUNK_KB });
     const { p, created } = registerSpec(validProfileName(name), spec, { promptSource, note: `init pick ${model}${effort ? ` --effort ${effort}` : ''}` });
-    cfgSet('default_profile', name);
+    setDefaultProfile(p, name, true);
     out(`review profile ${profileLabel(p)} #${p.id} ${p.hash} ${created ? 'registered' : 'already registered'} — the default for \`start\``);
     return;
   }
   if (sub === 'status') {
-    const m = cfgGet('default_model');
-    const e = cfgGet('default_effort');
+    const { model: m, effort: e } = defaultModelChoice();
     out(m ? `default reviewer model: ${m}${e ? ` effort ${e}` : ''}, chunk size ${cfgGet(chunkKey(m, e)) || cfgGet(chunkKey(m)) || DEFAULT_CHUNK_KB}KB` : 'not initialized — no default reviewer model (run `init start`)');
     if (initId) for (const c of initCals(initId)) out(`init ${initId}: ${candLabel(c)} [${c.status}${c.status === 'running' && c.stage ? ` ${c.stage}` : ''}]${c.result_kb ? ` → ${c.result_kb}KB` : ''}${c.decision && c.status !== 'done' ? ` (${c.decision})` : ''}`);
     return;
@@ -3631,7 +3685,7 @@ function cmdProfile(a) {
   const [sub, ref] = a.pos;
   const d = db();
   if (!sub || sub === 'list') {
-    const def = cfgGet('default_profile');
+    const def = defaultProfileRef();
     const defP = def ? findProfile(def) : null;
     let rows = d.prepare('SELECT * FROM review_profiles ORDER BY name, version').all().map(profileRow);
     if (!a.f.retired) rows = rows.filter((r) => !r.retired);
@@ -3654,6 +3708,7 @@ function cmdProfile(a) {
   if (sub === 'register') {
     const name = validProfileName(ref);
     const { spec, chunkSource, promptSource } = specFromFlags(a.f);
+    preserveLegacyDefaults();
     const { p, created } = registerSpec(name, spec, { promptSource, note: a.f.note || null });
     out(`${created ? 'registered' : 'unchanged, already registered as'} ${profileLabel(p)} #${p.id} ${p.hash}`);
     out(`  ${specModel(p.spec)} via ${p.spec.runner}${p.spec.runnerArgs && p.spec.runnerArgs.length ? ` (args: ${p.spec.runnerArgs.join(' ')})` : ''}; chunk ${p.spec.chunkKb}KB (${chunkSource}); ${scopeText(p.spec.scope)}; planner ${p.spec.planner ? 'on' : 'off'}; dismissed context ${p.spec.dismissedContext ? 'on' : 'off'}`);
@@ -3664,11 +3719,15 @@ function cmdProfile(a) {
     }
     if (!RN.binOf(p.spec.runner || 'claude')) out(`  warning: the ${p.spec.runner} CLI is not on PATH here`);
     if (chunkSource.startsWith('default')) out(`  note: ${p.spec.model} has no chunk-size calibration in this repo (\`calibrate start --model ${p.spec.model}\`, then register again)`);
-    if (!cfgGet('default_profile')) { cfgSet('default_profile', name); out(`  default profile for \`start\`: ${name}`); }
+    if (!cfgGet(`default_profile:${p.spec.runner}`)) {
+      if (!cfgGet('default_profile')) cfgSet('default_profile', name);
+      cfgSet(`default_profile:${p.spec.runner}`, name);
+      out(`  default profile for ${p.spec.runner}: ${profileLabel(p)}`);
+    }
     return;
   }
   if (sub === 'show') {
-    const p = getProfile(ref || cfgGet('default_profile') || die('usage: profile show <ref>'));
+    const p = getProfile(ref || defaultProfileRef() || die('usage: profile show <ref>'));
     if (a.f.json) { out(JSON.stringify({ id: p.id, ref: profileLabel(p), hash: p.hash, created: p.created, prompt_source: p.prompt_source, note: p.note, spec: p.spec }, null, 1)); return; }
     const s = p.spec;
     out(`${profileLabel(p)} #${p.id} ${p.hash}${p.retired ? ' (retired)' : ''}${p.legacy ? ' (legacy)' : ''} registered ${p.created.slice(0, 16).replace('T', ' ')}`);
@@ -3697,8 +3756,8 @@ function cmdProfile(a) {
     return;
   }
   if (sub === 'default') {
-    if (ref) { const p = getProfile(ref); cfgSet('default_profile', ref); out(`default profile for \`start\`: ${ref} (now ${profileLabel(p)} ${p.hash})`); return; }
-    const def = cfgGet('default_profile');
+    if (ref) { const p = getProfile(ref); setDefaultProfile(p, ref); out(`default profile for \`start\` on ${p.spec.runner}: ${ref} (now ${profileLabel(p)} ${p.hash})`); return; }
+    const def = defaultProfileRef();
     const p = def ? findProfile(def) : null;
     out(p ? `default profile: ${def} (${profileLabel(p)} ${p.hash})` : 'no default profile (`profile default <ref>`)');
     return;
@@ -5580,7 +5639,7 @@ function cmdRunners(a) {
     out(`${n.padEnd(9)}${bin ? `${bin}  ${RN.version(n) || '(--version failed)'}` : 'not installed'}`);
   }
   let r;
-  try { r = RN.resolve({ flagRunner: a.f.runner, flagModel: a.f.model ? modelId(a.f.model) : null, storedModel: cfgGet('default_model') }); } catch (e) { die(e.message); }
+  try { r = RN.resolve({ flagRunner: a.f.runner, flagModel: a.f.model ? modelId(a.f.model) : null, storedModel: defaultModelChoice().model }); } catch (e) { die(e.message); }
   out(`a new scan would use: ${r.runner || 'none'}${r.model ? ` model ${r.model}` : ''} — ${r.why}`);
 }
 
