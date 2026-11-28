@@ -34,7 +34,7 @@ body {
   margin: 0; background: var(--bg); color: var(--text-primary);
   font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-main { max-width: 980px; margin: 0 auto; padding: 32px 16px 80px; }
+main { max-width: 980px; margin: 0 auto; padding: 8px 16px 80px; }
 header.hero { padding: 24px 0 8px; }
 h1 { font-size: 2rem; margin: 0 0 8px; letter-spacing: -0.01em; }
 h2 { font-size: 1.4rem; margin: 48px 0 8px; padding-top: 8px; border-top: 1px solid var(--border); }
@@ -106,3 +106,21 @@ table.sortable th.sorted::after { content: " \2193"; }
 table.sortable th.sorted.asc::after { content: " \2191"; }
 table.sortable td.sticky, table.sortable th.sticky { position: sticky; left: 0; background: var(--surface-1); z-index: 1; }
 th.grp { text-align: center; border-bottom: 1px solid var(--border); }
+
+nav.site { position: sticky; top: 0; z-index: 3; background: var(--surface-1); border-bottom: 1px solid var(--border); }
+nav.site .in { max-width: 980px; margin: 0 auto; padding: 0 16px; display: flex; gap: 2px 18px; flex-wrap: wrap; align-items: center; font-size: 0.9rem; }
+nav.site a { text-decoration: none; color: var(--text-secondary); padding: 12px 0 10px; border-bottom: 2px solid transparent; }
+nav.site a:hover { color: var(--text-primary); }
+nav.site a[aria-current="page"] { color: var(--text-primary); border-bottom-color: var(--accent); }
+nav.site a.brand { color: var(--text-primary); font-weight: 600; margin-right: 8px; }
+.goals { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 12px 0; }
+.goal { display: block; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; text-decoration: none; color: var(--text-primary); }
+.goal:hover { border-color: var(--accent); }
+.goal b { display: block; margin-bottom: 4px; color: var(--accent); }
+.goal span { font-size: 0.9rem; color: var(--text-secondary); }
+table.pref td.l { white-space: normal; }
+.presets { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 4px; }
+.presets button { font: inherit; font-size: 0.9rem; color: var(--text-primary); background: var(--surface-1); border: 1px solid var(--border); border-radius: 999px; padding: 5px 14px; cursor: pointer; }
+.presets button:hover { border-color: var(--accent); }
+.presets button.on { border-color: var(--accent); background: var(--accent); color: #fff; }
+@media (max-width: 520px) { nav.site .in { gap: 0 14px; } }
