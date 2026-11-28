@@ -132,3 +132,9 @@ severity, and "see /code-scan:findings"; with several scans, add "compare with /
 chunks finish and are recorded. If the user wants it stopped immediately: `$CS stop --now` — it kills a
 `RUN` runner itself; for a Workflow it prints `TASK <id>`: `TaskStop` that task. Everything unfinished
 stays pending for `continue`. "Abandon"/"close" a scan for good: `$CS stop --scan s --close`.
+
+`continue` preserves claims younger than one hour when resuming a stopped scan, including a spending-limit
+stop, while it queues other unfinished files. A live `RUN` runner's fresh claims are preserved on active
+scans too. A dead `RUN` runner's claims are released immediately.
+Use `continue --reclaim` to release all claims when their reviewers have been stopped.
+Planning is deferred while chunks remain claimed; remaining heuristic chunks can still proceed.

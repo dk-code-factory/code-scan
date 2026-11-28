@@ -64,7 +64,14 @@ has "$(B claim 1)" 'SUBSYSTEM FOCUS' && ok claim-priority-unit || bad claim-prio
 
 # --- continue must not re-queue a chunk an in-flight reviewer still holds after a plain stop
 B stop >/dev/null
-o=$(B continue 2>&1); has "$o" 'still claimed by in-flight reviewers' && ok continue-waits-for-inflight || bad "continue-waits-for-inflight: $o"
+held=$(B sql "select id from chunks where scan_id=1 and state='claimed'" | tail -1)
+o=$(B continue 2>&1)
+has "$o" 'still claimed by running reviewers' && [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+  && [ "$(B sql "select count(*) from chunks where scan_id=1 and state='pending'" | tail -1)" -gt 0 ] \
+  && ok continue-keeps-inflight || bad "continue-keeps-inflight: $o"
+B stop >/dev/null
+o=$(B continue --reclaim); [ "$(B sql "select state from chunks where id=$held" | tail -1)" = void ] \
+  && ! has "$o" 'still claimed' && ok continue-reclaim || bad "continue-reclaim: $o"
 
 # --- simulated dead worker then continue
 B stop --now >/dev/null
@@ -301,6 +308,119 @@ B submit "$sid" "$c" <<<'{"src/net/buf.c": [{"line":1,"end_line":3,"severity":"h
 after=$(B sql "select count(*) from findings" | tail -1)
 [ "$before" = "$after" ] && ok refound-range-shift || bad "refound-range-shift: $before -> $after"
 
+# --- preserving claims also covers limit stops, stale/dead claims, and all-held scans
+cp -r "$CODESCAN_HOME" "$W/state-claims"
+(
+  claim_failures=$FAILS
+  export CODESCAN_HOME=$W/state-claims
+  fresh; B restart --profile net40 --force >/dev/null; live=$(sidof)
+  held=$(B claim "$live" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p')
+  B stop >/dev/null; node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"insert or replace into config(key,value) values('stop_reason:$live','test limit')\")"
+  o=$(B continue)
+  has "$o" '"workers":0' && has "$(B status)" '\[active\]' && has "$o" 'still claimed' \
+    && [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && ok continue-limit-keeps-live || bad "continue-limit-keeps-live: $o"
+  B submit "$live" "$held" <<<'{"src/net/buf.c": [], "src/net/buf.h": []}' >/dev/null
+  has "$(B status --scan "$live")" '\[done\]' && ok continue-held-submits || bad continue-held-submits
+  B restart --profile net40 --force >/dev/null; live=$(sidof)
+  held=$(B claim "$live" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p')
+  B set-run "$live" "pid:$$" >/dev/null
+  o=$(B continue)
+  [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && has "$o" 'still claimed' && ok continue-active-live-runner || bad "continue-active-live-runner: $o"
+  B set-run "$live" workflow-test >/dev/null
+  B stop >/dev/null
+  node -e "const {DatabaseSync}=require('node:sqlite');new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db').exec(\"update chunks set claimed_at='2000-01-01T00:00:00.000Z' where id=$held\")"
+  B continue >/dev/null
+  [ "$(B sql "select state from chunks where id=$held" | tail -1)" = void ] && ok continue-stale-claim || bad continue-stale-claim
+  fresh; B restart --profile net40 --force >/dev/null; live=$(sidof)
+  held=$(B claim "$live" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p'); B stop >/dev/null
+  B set-run "$live" pid:2147483647 >/dev/null; B continue >/dev/null
+  [ "$(B sql "select state from chunks where id=$held" | tail -1)" = void ] && ok continue-dead-runner || bad continue-dead-runner
+  # Persisted legacy slices remain a supported input even though new scans pack whole files.
+  P legacy --prompt default --model opus --no-plan --only src/store/big.c --chunk-kb 40
+  fresh; B restart --profile legacy --force >/dev/null; live=$(sidof)
+  legacy_chunks() { node - "$1" "${2:-mixed}" <<'JS'
+const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(process.env.CODESCAN_HOME+'/codescan.db'), sid=Number(process.argv[2]);
+const c=d.prepare("select * from chunks where scan_id=? and state='pending' order by ord limit 1").get(sid);
+const base=JSON.parse(c.items_json)[0], slices=[0,1,2].map(slice=>({...base,slice,start:slice*500+1,end:(slice+1)*500,bytes:Math.ceil(base.bytes/3)}));
+d.prepare('update files set slices_json=?, slices_done=? where scan_id=? and path=?').run(JSON.stringify(slices),'[]',sid,base.path);
+d.prepare('update chunks set items_json=?,bytes=? where id=?').run(JSON.stringify([slices[0]]),slices[0].bytes,c.id);
+const add=d.prepare('insert into chunks(scan_id,ord,unit,items_json,bytes,state,claimed_at) values(?,?,?,?,?,?,?)');
+const expired=add.run(sid,1,c.unit,JSON.stringify([slices[1]]),slices[1].bytes,process.argv[3]==='failed'?'pending':'claimed','2000-01-01T00:00:00.000Z').lastInsertRowid;
+const pending=add.run(sid,2,c.unit,JSON.stringify([slices[2]]),slices[2].bytes,'pending',null).lastInsertRowid;
+console.log(c.id,Number(expired),Number(pending));
+JS
+  }
+  read -r held expired pending < <(legacy_chunks "$live")
+  o=$(B claim "$live"); has "$o" "CHUNK $held " && has "$o" 'slice 0' || bad "legacy-claim: $o"
+  B stop >/dev/null; o=$(B continue)
+  [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && [ "$(B sql "select count(*) from chunks where id in ($expired,$pending) and state='pending'" | tail -1)" = 2 ] \
+    && has "$o" 'left in 2 chunks' && ok continue-legacy-siblings || bad "continue-legacy-siblings: $o"
+  B submit "$live" "$held" --file src/store/big.c --slice 0 <<<'[]' >/dev/null
+  [ "$(B sql "select slices_done from files where scan_id=$live and path='src/store/big.c'" | tail -1)" = '[0]' ] \
+    && ok continue-legacy-progress || bad continue-legacy-progress
+  o=$(B claim "$live"); has "$o" "CHUNK $expired " || bad "legacy-expired-claim: $o"
+  B submit "$live" "$expired" --file src/store/big.c --slice 1 <<<'[]' >/dev/null
+  o=$(B claim "$live"); has "$o" "CHUNK $pending " || bad "legacy-pending-claim: $o"
+  B submit "$live" "$pending" --file src/store/big.c --slice 2 <<<'[]' >/dev/null
+  has "$(B status --scan "$live")" '\[done\]' \
+    && [ "$(B sql "select slices_done from files where scan_id=$live and path='src/store/big.c'" | tail -1)" = '[0,1,2]' ] \
+    && ok continue-legacy-completes || bad continue-legacy-completes
+  # A manual reviewer holds one slice while a real runner fails its sibling twice.
+  printf '#!/bin/sh\nexec node "%s" codex "$@"\n' "$HERE/test/fake-runners/fake-agent.js" > "$W/bin/legacy-codex"
+  chmod +x "$W/bin/legacy-codex"; export CODESCAN_CODEX_BIN=$W/bin/legacy-codex
+  P legacy-fail --prompt default --model codex:m1 --no-plan --only src/store/big.c --chunk-kb 40
+  fresh; B start --profile legacy-fail --force >/dev/null; live=$(sidof)
+  read -r held failed pending < <(legacy_chunks "$live" failed)
+  B claim "$live" >/dev/null
+  o=$(FAKE_FAIL='expected legacy sibling failure' B run "$live" --concurrency 1 2>&1)
+  [ "$(B sql "select state from chunks where id=$failed" | tail -1)" = void ] \
+    && has "$o" '2 failed agent(s)' && ok legacy-runner-voids-slice || bad "legacy-runner-voids-slice: $o"
+  B stop >/dev/null; o=$(B continue)
+  [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && [ "$(B sql "select count(*) from chunks where id in ($failed,$pending) and state='pending'" | tail -1)" = 2 ] \
+    && ok continue-legacy-failed-sibling || bad "continue-legacy-failed-sibling: $o"
+  B submit "$live" "$held" --file src/store/big.c --slice 0 <<<'[]' >/dev/null
+  o=$(B claim "$live"); has "$o" "CHUNK $failed " || bad "legacy-failed-claim: $o"
+  B submit "$live" "$failed" --file src/store/big.c --slice 1 <<<'[]' >/dev/null
+  o=$(B claim "$live"); has "$o" "CHUNK $pending " || bad "legacy-after-failure-pending: $o"
+  B submit "$live" "$pending" --file src/store/big.c --slice 2 <<<'[]' >/dev/null
+  has "$(B status --scan "$live")" '\[done\]' && ok continue-legacy-failed-completes || bad continue-legacy-failed-completes
+  # Failed planning can leave heuristic reviewers running; neither Workflow nor RUN may replan over them.
+  P heuristic --prompt default --model codex:m1 --only src/net/ --only src/store/big.c --chunk-kb 8
+  fresh; B start --profile heuristic --replan --force >/dev/null; live=$(sidof)
+  printf '%s\n' '{"exclude":[{"glob":"missing-plan-path/","reason":"bad planner output"}]}' > "$W/heuristic-bad.json"
+  o=$(B apply-plan "$live" --file "$W/heuristic-bad.json" 2>&1)
+  has "$o" 'globs match no tracked file' && ok heuristic-planner-failed || bad "heuristic-planner-failed: $o"
+  held=$(B claim "$live" | sed -n 's/^CHUNK \([0-9]*\).*/\1/p'); B stop >/dev/null
+  o=$(B continue)
+  has "$o" '"plan":false' && [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && [ "$(B sql "select count(*) from chunks where scan_id=$live and state='pending'" | tail -1)" -gt 0 ] \
+    && ok continue-heuristic-defers-plan || bad "continue-heuristic-defers-plan: $o"
+  printf '%s\n' '{}' > "$W/heuristic-good.json"
+  o=$(B apply-plan "$live" --file "$W/heuristic-good.json" 2>&1)
+  has "$o" 'finish or release them before applying a plan' \
+    && [ "$(B sql "select plan_json is null from scans where id=$live" | tail -1)" = 1 ] \
+    && [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && ok apply-plan-keeps-inflight || bad "apply-plan-keeps-inflight: $o"
+  o=$(B run "$live" --concurrency 1 2>&1)
+  [ "$(B sql "select count(*) from agent_runs where scan_id=$live and kind='plan'" | tail -1)" = 0 ] \
+    && [ "$(B sql "select state from chunks where id=$held" | tail -1)" = claimed ] \
+    && [ "$(B sql "select count(*) from chunks where scan_id=$live and state='pending'" | tail -1)" = 0 ] \
+    && ok run-heuristic-keeps-inflight || bad "run-heuristic-keeps-inflight: $o"
+  B submit "$live" "$held" --file src/store/big.c <<<'[]' >/dev/null
+  o=$(B apply-plan "$live" --file "$W/heuristic-good.json")
+  has "$o" 'plan applied:' && has "$(B status --scan "$live")" '\[done\]' \
+    && [ "$(B sql "select plan_json is not null from scans where id=$live" | tail -1)" = 1 ] \
+    && ok heuristic-planning-after-held-completes || bad "heuristic-planning-after-held-completes: $o"
+  [ "$FAILS" = "$claim_failures" ]
+)
+# Include failures from the isolated scenario block in the outer test result.
+[ $? -eq 0 ] || bad continue-claim-scenarios
+
 # --- limits: dollar cap from the scan's own agent transcripts, 5-hour cap from the status-line snapshot
 export CLAUDE_CONFIG_DIR=$W/claude XDG_CACHE_HOME=$W/xdg
 P pat1 --prompt default --model opus --no-plan --only src/pat/ --chunk-kb 1
@@ -315,18 +435,18 @@ mkdir -p "$W/claude/projects/p/s/subagents/workflows/wf_x"
 printf '{"type":"user","message":{"content":"node x -C %s claim --inline 999"}}\n{"type":"assistant","message":{"id":"z","model":"claude-opus-5-5","usage":{"output_tokens":9000000}}}\n' "$W/repo" > "$W/claude/projects/p/s/subagents/workflows/wf_x/agent-b.jsonl"
 has "$(B limits)" 'spend: \$1.20 of \$1 limit' && ok usd-from-transcripts || bad "usd-from-transcripts: $(B limits)"
 o=$(B claim --inline "$sid"); has "$o" 'NONE (spend \$1.20 reached the \$1 limit)' && has "$(B status)" '\[stopped\]' && has "$(B status)" 'stopped by limit' && ok usd-stops || bad "usd-stops: $o"
-B limits --max-usd 0 >/dev/null; has "$(B continue)" '"workers"' && has "$(B claim --inline "$sid")" '^CHUNK' && ok usd-limit-lifted || bad usd-limit-lifted
+B limits --max-usd 0 >/dev/null; has "$(B continue --reclaim)" '"workers"' && has "$(B claim --inline "$sid")" '^CHUNK' && ok usd-limit-lifted || bad usd-limit-lifted
 B limits --max-5h-pct 80 >/dev/null
 o=$(B claim --inline "$sid"); has "$o" 'NONE (5-hour usage is unknown' && ok pct-unknown-stops || bad "pct-unknown-stops: $o"
 RL=$(B statusline-path); mkdir -p "$(dirname "$RL")"; now=$(date +%s%3N)
 echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":50,\"resets_at\":9999999999}}}" > "$RL"
-B continue >/dev/null; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-under-limit || bad pct-under-limit
+B continue --reclaim >/dev/null; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-under-limit || bad pct-under-limit
 echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":85,\"resets_at\":9999999999}}}" > "$RL"
 o=$(B claim --inline "$sid"); has "$o" 'NONE (5-hour subscription usage 85% reached the 80% limit' && ok pct-stops || bad "pct-stops: $o"
 echo "{\"ts\":$((now-3600000)),\"rate_limits\":{\"five_hour\":{\"used_percentage\":10,\"resets_at\":9999999999}}}" > "$RL"
 o=$(B continue 2>&1); has "$o" 'not resuming' && has "$o" 'unknown' && ok pct-stale-stops || bad "pct-stale-stops: $o"
 echo "{\"ts\":$now,\"rate_limits\":{\"five_hour\":{\"used_percentage\":95,\"resets_at\":1000}}}" > "$RL"
-B continue >/dev/null 2>&1; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-window-reset || bad pct-window-reset
+B continue --reclaim >/dev/null 2>&1; has "$(B claim --inline "$sid")" '^CHUNK' && ok pct-window-reset || bad pct-window-reset
 o=$(echo '{"model":{"display_name":"M"},"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":5},"seven_day":{"used_percentage":2}}}' | B statusline)
 has "$o" '5h 40%' && has "$(cat "$RL")" '"used_percentage":40' && ok statusline-snapshot || bad "statusline-snapshot: $o"
 has "$(echo '{}' | B statusline -- echo wrapped)" 'wrapped' && ok statusline-wraps || bad statusline-wraps
@@ -524,6 +644,16 @@ B triage --path src/store/kv.go --triage all --set false_positive --note "repeat
 o=$(B repeat par-sec-a --label again); r=$(sed -n 's/^scan \([0-9]*\) (again) repeats scan.*/\1/p' <<<"$o")
 [ -n "$r" ] && has "$o" 'the same 2 chunk(s)' && [ "$(B sql "select group_concat(items_json,'|') from (select items_json from chunks where scan_id=$sa and state!='void' order by ord)" | tail -1)" = "$(B sql "select group_concat(items_json,'|') from (select items_json from chunks where scan_id=$r order by ord)" | tail -1)" ] && ok repeat-same-chunks || bad "repeat-same-chunks: $o"
 o=$(B claim --inline "$r"); ! has "$o" 'repeat test' && ok repeat-replays-context || bad "repeat-replays-context: $(head -c 500 <<<"$o")"
+replay_held=$(B sql "select id from chunks where scan_id=$r and state='claimed'" | tail -1)
+replay_items=$(B sql "select items_json from chunks where scan_id=$r order by ord limit 1" | tail -1)
+B stop --scan "$r" >/dev/null
+o=$(B continue --scan "$r")
+[ "$(B sql "select state from chunks where id=$replay_held" | tail -1)" = claimed ] \
+  && has "$o" 'still claimed' && ok repeat-continue-keeps-live || bad "repeat-continue-keeps-live: $o"
+B stop --scan "$r" >/dev/null; B continue --scan "$r" --reclaim >/dev/null
+[ "$(B sql "select state from chunks where id=$replay_held" | tail -1)" = pending ] \
+  && [ "$(B sql "select items_json from chunks where id=$replay_held" | tail -1)" = "$replay_items" ] \
+  && ok repeat-continue-reclaims-same-chunk || bad repeat-continue-reclaims-same-chunk
 B stop --scan "$r" --close >/dev/null
 o=$(CODESCAN_CLAUDE_BIN=/bin/true B repeat "$sa" 2>&1); has "$o" 'drift: runner binary' && ok repeat-drift || bad "repeat-drift: $o"
 B stop --scan again --close >/dev/null 2>&1; B stop --all --close >/dev/null 2>&1
