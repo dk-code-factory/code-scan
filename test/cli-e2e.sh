@@ -495,6 +495,17 @@ for empty_trackers in ' ' ','; do
   has "$r" 'HELD 1 finding(s)' && has "$r" '#7 .*gh:acme/toy: failed' && has "$r" '1 draft' && ok render-empty-trackers || bad "render-empty-trackers: $r"
 done
 B report-config unset dedupe_trackers >/dev/null
+r=$(B render --target jira:AA --ids 7 --triage confirmed --min-severity low)
+retry=$(sed -n 's/^  search them: `\(.*\)`, then render again$/\1/p' <<<"$r")
+read -r -a retry_args <<<"$retry"
+touch "$FAKEGH_LOG.noapi"
+o=$(B "${retry_args[@]}" 2>&1)
+rm -f "$FAKEGH_LOG.noapi"
+has "$o" 'duplicates searched in jira:AA' && ! has "$retry" '--repo' && ok render-jira-only-retry || bad "render-jira-only-retry: $retry // $o"
+B report-config set dedupe_trackers gh:acme/toy,jira:AA,jira:BB >/dev/null
+r=$(B render --ids 7 --triage confirmed --min-severity low)
+has "$r" '--repo acme/toy --jira AA --jira BB' && ok render-retry-trackers || bad "render-retry-trackers: $r"
+B report-config unset dedupe_trackers >/dev/null
 B triage 7 --set open >/dev/null; B link 8 gh:acme/toy 42 --kind linked_existing >/dev/null
 # start refuses when gh cannot reach the repo
 touch "$FAKEGH_LOG.noapi"; o=$(B auto-triage start 7 --recheck --repo acme/toy 2>&1); rm -f "$FAKEGH_LOG.noapi"

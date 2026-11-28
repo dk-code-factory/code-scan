@@ -4557,7 +4557,8 @@ function cmdRender(a) {
     out(`HELD ${unsearched.length} finding(s): no successful duplicate search in ${mustSearch.join(', ')} — they may already be reported:`);
     for (const u of unsearched.slice(0, 50)) out(`  #${u.r.id} ${loc(u.r)} — ${u.miss.join('; ')}`);
     if (unsearched.length > 50) out(`  … ${unsearched.length - 50} more`);
-    out(`  search them: \`auto-triage start --ids ${unsearched.map((u) => u.r.id).join(',')} --recheck --repo <owner/name>${mustSearch.some((t) => t.startsWith('jira:')) ? ' --jira <PROJ>' : ''}\`, then render again`);
+    const retry = triageRetryCommands(mustSearch, unsearched.map((u) => u.r.id).join(',')).map((cmd) => `\`${cmd}\``).join(' then ');
+    out(`  search them: ${retry}, then render again`);
   }
   for (const w of warn) out(`warning: ${w}`);
   out(`manifest: ${path.join(dir, 'manifest.json')}`);
@@ -4686,6 +4687,14 @@ function atListing(groups) {
 function runTrackers(run) {
   if (run.trackers) { try { return JSON.parse(run.trackers); } catch (e) { /* fall through */ } }
   return run.repo ? [`gh:${run.repo}`] : [];
+}
+
+/** Commands preserve every tracker, using separate runs when multiple GitHub repos are required. */
+function triageRetryCommands(trackers, ids) {
+  const repos = trackers.filter((t) => t.startsWith('gh:')).map((t) => t.slice(3));
+  const jira = trackers.filter((t) => t.startsWith('jira:')).map((t) => ` --jira ${shw(t.slice(5))}`).join('');
+  return (repos.length ? repos : [null]).map((repo) =>
+    `auto-triage start --ids ${ids} --recheck${repo ? ` --repo ${shw(repo)}` : ''}${jira}`);
 }
 
 /** Issue numbers cited in the code around a finding (`#8682`, `issues/8682`): often the existing report itself. */
@@ -5046,8 +5055,8 @@ function atStatus(a) {
     for (const t of trk) {
       const st = need.map((r) => { try { return (JSON.parse(r.issue_search || '{}')[t] || {}).status || 'missing'; } catch (e) { return 'missing'; } });
       const c = (s) => st.filter((x) => x === s).length;
-      const retry = trk.map((tracker) => tracker.startsWith('gh:') ? `--repo ${tracker.slice(3)}` : `--jira ${tracker.slice(5)}`).join(' ');
-      out(`duplicate search in ${t}: done ${c('done')}, FAILED ${c('failed')}, missing ${c('missing')} (of ${need.length} real/unsure)${c('failed') + c('missing') ? ` — those cannot be filed until searched: \`auto-triage start --ids <ids> --recheck ${retry}\`` : ''}`);
+      const retry = triageRetryCommands(trk, '<ids>').map((cmd) => `\`${cmd}\``).join(' then ');
+      out(`duplicate search in ${t}: done ${c('done')}, FAILED ${c('failed')}, missing ${c('missing')} (of ${need.length} real/unsure)${c('failed') + c('missing') ? ` — those cannot be filed until searched: ${retry}` : ''}`);
     }
   }
   for (const r of rs) {
