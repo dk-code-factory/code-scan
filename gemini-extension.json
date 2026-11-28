@@ -1,5 +1,5 @@
 {
   "name": "code-scan",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Repository-wide bug scanning: scan, status, findings, triage, auto-triage, dupes, report, profiles. Reviewer agents run as headless CLI processes started by bin/code-scan.js."
 }

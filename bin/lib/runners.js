@@ -375,9 +375,20 @@ function detectHost(env = process.env) {
   return null;
 }
 
+/** Explicit runner preference, else the CLI hosting this invocation; no PATH fallback. */
+function preferredRunner() {
+  const pref = process.env.CODESCAN_RUNNER;
+  if (pref) {
+    if (!RUNNERS[pref]) throw new Error(`CODESCAN_RUNNER=${pref} is not a runner (one of ${ORDER.join(', ')})`);
+    return { runner: pref, why: '$CODESCAN_RUNNER' };
+  }
+  return detectHost();
+}
+
 /**
- * Pick the runner: explicit flag / model prefix → stored model → host we run inside → first
- * installed CLI. Returns {runner, model (stored form), why}.
+ * Pick the runner: explicit flag / model → frozen run → runner preference / host → stored model
+ * → first installed CLI. Only reuse a stored default model when it belongs to the chosen host.
+ * Returns {runner, model (stored form), why}.
  */
 function resolve({ flagRunner, flagModel, storedModel, storedRunner }) {
   if (flagRunner && !RUNNERS[flagRunner]) throw new Error(`unknown runner '${flagRunner}' (one of ${ORDER.join(', ')})`);
@@ -397,14 +408,9 @@ function resolve({ flagRunner, flagModel, storedModel, storedRunner }) {
   }
   if (flagModel) return { runner: 'claude', model: String(flagModel), why: `--model ${flagModel}` };
   if (storedRunner && RUNNERS[storedRunner]) return { runner: storedRunner, model: storedModel || null, why: 'chosen when the scan started' };
+  const h = preferredRunner();
+  if (h) return { runner: h.runner, model: storedModel && splitModel(storedModel).runner === h.runner ? storedModel : null, why: h.why };
   if (storedModel) return { runner: splitModel(storedModel).runner, model: storedModel, why: `model ${storedModel}` };
-  const pref = process.env.CODESCAN_RUNNER;
-  if (pref) {
-    if (!RUNNERS[pref]) throw new Error(`CODESCAN_RUNNER=${pref} is not a runner (one of ${ORDER.join(', ')})`);
-    return { runner: pref, model: null, why: '$CODESCAN_RUNNER' };
-  }
-  const h = detectHost();
-  if (h) return { runner: h.runner, model: null, why: h.why };
   const inst = installed();
   if (inst.length) return { runner: inst[0], model: null, why: `first agent CLI found on PATH (${inst.join(', ')})` };
   return { runner: null, model: null, why: `no agent CLI found on PATH (looked for ${ORDER.map((n) => RUNNERS[n].bins.join('/')).join(', ')})` };
@@ -537,4 +543,4 @@ function defaultModel(name) {
   return null;
 }
 
-module.exports = { EFFORT, effortLevels, effortError, stdinFd, spawnSyncIn, extraArgs, defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, resolve, extractJson, runAgent, killAll };
+module.exports = { EFFORT, effortLevels, effortError, stdinFd, spawnSyncIn, extraArgs, defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, preferredRunner, resolve, extractJson, runAgent, killAll };

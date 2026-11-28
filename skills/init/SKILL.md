@@ -15,13 +15,19 @@ If the plugin root above was not filled in by your agent CLI (Codex, Copilot, �
 
 Do not read source files or the database; the CLI does the work.
 
-1. `$CS init status`. If a model is already chosen and the user did not ask to re-run, report it and stop.
+State is shared between hosts: scans, findings, triage, calibration and progress use the same repo
+store. Default model and profile choices are saved per runner in that store. Use Codex models when
+invoked from Codex and Claude agents when invoked from Claude Code, unless the user explicitly names
+other models or a runner. Do not select a foreign model merely because an old benchmark used it.
+
+1. `$CS init status`. If a model is already chosen for this host and the user did not ask to re-run, report it and stop.
 2. `$CS init start [--models opus,sonnet,haiku,fable] [--efforts e1,e2] [--matrix] [--sizes 20,40,90] [--only <dir/>]`
-   — default: the four Claude models.
+   — default: the configured Codex model inside Codex; the four Claude models inside Claude Code.
+   Omit `--models` unless the user specifies models; the CLI detects the host. If a non-Claude host
+   has no configured benchmark model, use the CLI's diagnostic to request a model for that runner.
    Other vendors' models run through their own CLI and are compared the same way: `codex:<model>`
    (e.g. `codex:gpt-6.2-sol`), `gemini:<model>` (e.g. `gemini:gemini-3.1-pro-preview`), `agy:`, `copilot:`,
-   `cursor:`, `opencode:<provider/model>`. If you are not Claude Code, suggest adding your own CLI's main
-   model(s) to the list; `$CS runners` shows which CLIs are installed (a model whose CLI is missing fails).
+   `cursor:`, `opencode:<provider/model>`. `$CS runners` shows which CLIs are installed (a model whose CLI is missing fails).
    Reasoning effort: by default each model whose CLI has effort levels (claude, codex) is tried at its
    lowest, middle and highest level, plus one level in between where quality differs; models without
    effort control get one candidate. Pass `--efforts` only when the user names levels ("only high and max").
@@ -46,8 +52,9 @@ Do not read source files or the database; the CLI does the work.
 5. Ask the user which model and effort to use (recommended first, each option showing quality and
    $/100KB; use your question/choice tool if you have one). Then `$CS init pick <model> [--effort <level>]`
    (without `--effort` it takes the recommended effort for that model, or the only one) and report the
-   model, effort, chunk size and the registered profile (`default@N`) in one line.
+   model, effort, chunk size and the registered profile in one line.
 
 `init pick` registers that model, effort and chunk size with the default prompt as (a new version of) the
-`default` review profile and makes it the default for `start`. Other candidates stay usable: register a
+`default` (Claude) or `default-<runner>` (other runners) review profile and makes it the default for
+`start` on that runner. Other candidates stay usable: register a
 profile for them (`/code-scan:profiles`, with `--effort`) and run several side by side.

@@ -32,7 +32,9 @@ Refs everywhere: `name` (latest version), `name@2`, `#12`, or a hash prefix.
    `$CS prompt add <name> --file <f>`.
 2. `$CS profile register <name> --prompt <prompt> | --prompt-file <f> --model <model> [flags]`
    - `--model`: `opus`/`sonnet`/`haiku`/`fable`, `codex:<model>`, `gemini:<model>`, `agy:`, `copilot:`,
-     `cursor:`, `opencode:<provider/model>`; `default` = the model picked at init.
+     `cursor:`, `opencode:<provider/model>`; `default` = the model picked at init for this host's runner.
+     Unless the user names a model or runner, use the host's runner: Codex models inside Codex, Claude
+     agents inside Claude Code. All profiles, scans and findings remain in the same shared repo store.
    - `--effort <level>` — reasoning effort, part of the profile ("high effort", "think harder" → `high`/`xhigh`):
      claude `low|medium|high|xhigh|max`, codex `minimal|low|medium|high|xhigh`, opencode any `--variant`;
      other runners have none. Omitted = the CLI's own default.
@@ -48,7 +50,8 @@ Refs everywhere: `name` (latest version), `name@2`, `#12`, or a hash prefix.
 
 - `$CS profile list [--all-versions] [--retired]` · `$CS profile show <ref> [--full]` (spec, prompt, scans that used it)
 - `$CS profile diff <ref> <ref>` — which spec fields differ, prompt lines added/removed
-- `$CS profile default [<ref>]` — what `start` runs without `--profile` (a bare name follows new versions)
+- `$CS profile default [<ref>]` — what `start` runs without `--profile` on that profile's runner
+  (a bare name follows new versions); `--profile <ref>` explicitly selects any runner
 - `$CS profile retire|unretire <ref>` — hide from `list`; scans and results stay
 - Prompts: `$CS prompt list | show <name> | add <name> --file f | rm <name>` — editing a prompt does not
   change any registered profile; register again to use the new text.
