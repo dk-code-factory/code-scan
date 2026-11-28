@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pick a provider</title>
+<meta name="description" content="Codex (OpenAI) against Claude (Anthropic) as code-scan reviewers: share of issues found on the same code, price and precision.">
+<link rel="stylesheet" href="style.css">
+<style>
+@media (max-width: 600px) {
+  table.lab, table.lab tbody, table.lab tr { display: block; width: 100%; }
+  table.lab tr:has(th) { display: none; }
+  table.lab tr { padding: 6px 0; border-bottom: 1px solid var(--grid); }
+  table.lab td { display: inline-block; border: none; padding: 2px 12px 2px 0; white-space: nowrap; text-align: left; }
+  table.lab td.l { display: block; white-space: normal; }
+  #prov-effort tr { display: flex; flex-wrap: wrap; align-items: baseline; }
+  #prov-effort tr:has(th) { display: none; }
+  #prov-effort td.l:first-child { display: inline-block; width: auto; }
+  #prov-effort td.l:nth-child(2) { flex: 1 0 50%; }
+  #prov-effort td[colspan] { flex-basis: 100%; }
+  table.lab td[data-l]::before { content: attr(data-l) " "; color: var(--text-secondary); font-size: 0.85em; }
+}
+</style>
+</head>
+<body>
+<nav class="site"><div class="in"><a class="brand" href="index.html">code-scan</a><a href="index.html">Overview</a><a href="compare.html">Compare configurations</a><a href="provider.html" aria-current="page">Pick a provider</a><a href="model.html">Pick a model</a><a href="effort.html">Pick effort</a><a href="method.html">Method & data</a></div></nav>
+<main>
+<header class="hero">
+  <h1>Pick a provider</h1>
+  <p class="lede">OpenAI's Codex <code>gpt-6.1-sol</code> (run through the Codex CLI) against Anthropic's Claude models (run through Claude Code), reviewing the same files with the same review prompt.</p>
+</header>
+<nav class="toc"><a href="#verdict">Verdict</a><a href="#prov-effort-sec">Codex vs Opus, every effort level</a><a href="#prov-same">Full scans of the same code</a><a href="#h2h">Severity labels</a><a href="#prov-summary">All full scans</a></nav>
+<section id="verdict">
+<h2>Verdict</h2>
+<p class="muted">The numbers in this table come from one test: ten scans of the same 995KB TypeScript + Rust repository, Codex at six effort levels and Opus at four, every finding triaged (mostly by Codex auto-triage, which rejects almost nothing). They are all in <a href="#prov-effort-sec">the table below</a>. Prices are API list prices of every token the reviewer agents used (prompt, coordination, re-reads), not subscription cost; triage is not included.</p>
+<div class="table-wrap"><table class="pref stack"><tr><th class="l">you want</th><th class="l">pick</th><th class="l">why</th></tr>
+<tr><td class="l"><b>Cheapest</b></td><td class="l">OpenAI · Codex <code>low</code></td><td class="l">$0.24 per 100KB of code at recall 0.17. One step up, <code>medium</code> costs $0.30 and reaches 0.23. The cheapest Opus level (<code>low</code>) costs $0.78.</td></tr>
+<tr><td class="l"><b>Most findings</b></td><td class="l">Two scans, findings merged: Codex <code>xhigh</code> + Opus <code>max</code></td><td class="l">Together they found 0.66 of the confirmed issues (severity-weighted recall), against 0.41 for the best single run (Codex <code>max</code>), at $6.64 per 100KB ($0.75 + $5.89).</td></tr>
+<tr><td class="l"><b>Best value</b></td><td class="l">OpenAI · Codex <code>xhigh</code></td><td class="l">Where recall stops climbing: 0.40 at $0.10 per confirmed bug. Codex <code>max</code> did as well (0.41, within one run's noise) for $0.11 more per 100KB. If only $ per bug matters, Codex <code>medium</code> is lowest ($0.07) but finds about half as much (0.23).</td></tr>
+<tr><td class="l"><b>Quickest</b></td><td class="l">Anthropic · Opus <code>low</code></td><td class="l">4 minutes wall clock for the 995KB repository against 24–53 for Codex. Wall clock also depends on parallelism and retries, but total agent time agrees: 16 agent-minutes against 93–217 for Codex. Worth it only for a quick first pass when you need results in minutes: it has the lowest recall of all ten runs (0.12); Codex <code>low</code> finds more (0.17) for less money.</td></tr>
+</table></div>
+<div class="rec"><strong>Pick OpenAI (Codex <code>gpt-6.1-sol</code> at <code>xhigh</code>) for full scans.</strong>
+<p><b>Why Codex:</b> in all three <a href="#prov-same">head-to-head full scans</a> it found the larger share (0.81 vs Opus 0.29, 0.76 vs Fable 0.43, 0.59 vs Fable 0.55) and, where both prices were recorded, cost less. Share counts only the issues the two scans found between them, so it runs higher than recall in the effort test (measured against everything ten runs found); the two are not comparable. Part of the gap, in share and in effort-test recall, comes from Codex rating findings more severe (<a href="#h2h">Severity labels</a>). <b>Which effort:</b> <code>xhigh</code> is where recall stops climbing in the effort test (0.40 at $0.75 per 100KB); to save money, <code>high</code> (the Codex default) gets 0.31 at $0.43. Codex against Opus rests on one full scan and the effort test.</p></div>
+<div class="rec"><strong>Pick Anthropic when you need a Claude-only pipeline: Opus 5.5.</strong>
+<p>On a small benchmark (107KB of Go, 7 known bugs) Opus at default effort found all 7 (Fable 6, Sonnet 4, Haiku 2). That sample is small: on the 995KB effort test Opus found only 0.12–0.17 of the confirmed issues (severity-weighted) below <code>max</code>, no more than Codex <code>low</code> (0.17). So run Opus at <code>max</code>: it doubles recall (0.35 vs 0.17 at <code>high</code>) for about 5x the price ($5.89 vs $1.20 per 100KB) and 80 minutes wall clock. Fable 5.2 costs more: $1.93 per 100KB in its one priced full scan, against $0.38–$0.73 for Opus at default effort on other repositories (<a href="#prov-summary">All full scans</a>). Sonnet and Haiku are cheaper but missed most of the known bugs. See <a href="model.html">Pick a model</a>.</p></div>
+<div class="rec"><strong>For critical code, use both.</strong>
+<p>The two providers mostly find different issues: Codex <code>xhigh</code> alone found 0.40 of the confirmed issues (severity-weighted), merged with Opus <code>max</code> 0.66, at $6.64 instead of $0.75 per 100KB. Register one profile per configuration, then start both on the same commit (<code>code-scan.js</code> commands; the <code>/code-scan:profiles</code> and <code>/code-scan:scan</code> skills do the same):</p>
+<pre class="cmd"><code>code-scan.js profile register codex-xhigh \
+  --prompt default --model codex:gpt-6.1-sol --effort xhigh --chunk-kb 40
+code-scan.js profile register opus-max \
+  --prompt default --model opus --effort max --chunk-kb 40
+code-scan.js start --profile codex-xhigh,opus-max</code></pre>
+<p>A bare model name such as <code>opus</code> runs on Claude Code (<code>opus</code> = Opus 5.5; a full id like <code>claude-opus-5-5</code> also works); a <code>runner:</code> prefix such as <code>codex:</code> picks another CLI. <code>--chunk-kb 40</code> (KB of code per reviewer agent) matches the effort test; other chunk sizes were not tested for this pair. <code>code-scan.js compare</code> then shows what only one of them found.</p></div>
+</section>
+<section id="prov-effort-sec">
+<h2>Codex vs Opus, every effort level</h2>
+<p class="muted" id="prov-effort-desc"></p>
+<div class="table-wrap"><table id="prov-effort" class="lab"></table></div>
+<p class="muted"><b>Price on the same code:</b> Opus costs about 3x as much as Codex per 100KB at <code>low</code>–<code>high</code> ($0.78–$1.20 vs $0.24–$0.43) and about 7–8x at <code>max</code> ($5.89 vs $0.75–$0.86 for Codex <code>xhigh</code>/<code>max</code>).</p>
+<p class="note">Recall is measured against the issues these ten runs found and triage confirmed, not against every bug in the code. One run per level, so small gaps (Codex <code>max</code> 0.41, <code>xhigh</code> 0.40, <code>ultra</code> 0.36) may be run-to-run noise. Wall clock depends on how many reviewer agents ran in parallel and how many failed and were retried more than on effort. Merged row: * wall clock is the slower of the two runs, if both run at once; † $/confirmed bug not computed for the merged pair. More on effort levels: <a href="effort.html">Pick effort</a>.</p>
+</section>
+<section id="prov-same">
+<h2>Full scans of the same code</h2>
+<p class="muted">Two full scans of one repository, compared only on files both reviewed with identical content. Share = share of all distinct issues either scan found, weighting critical 4, high 3, medium 2, low 1; an issue both found counts for both, so the two shares add up to more than 1. Share counts every reported finding, confirmed or not; on these files triage rejected at most 6 findings per scan. Only seastar has an Opus full scan next to Codex; the other two pair Codex with Fable 5.2.</p>
+<div class="table-wrap"><table id="prov-table" class="lab"></table></div>
+<p class="note">$/100KB is for each whole scan, which covered more than the compared files. Codex "default" is the Codex CLI default effort; Claude "default" means no effort was set. "–" = price not recorded.</p>
+</section>
+<section id="h2h">
+<h2>Severity labels</h2>
+<p class="muted">The same pairs (share is in the table above), findings on the compared files split by the severity each reviewer gave. Codex labels almost nothing low; Claude models label many findings low. Share weights each issue by its highest label, so part of Codex's lead in share comes from how it labels severity, not only from finding more. "Only this one" counts findings the other scan did not report: in every pair most findings were found by one model only, which is why merging two scans finds more.</p>
+<div id="h2h-body"></div>
+</section>
+<section id="prov-summary">
+<h2>All full scans</h2>
+<p class="muted">How much data stands behind each model: every full scan in the data set, on different repositories per model. Because the code differs, don't compare price or findings across rows here; use <a href="#prov-effort-sec">the effort test</a> for that. Price varies by repository, which is why Opus here ($0.38–$0.73) can come in below Opus <code>low</code> in the effort test ($0.78).</p>
+<div class="table-wrap"><table id="prov-sum" class="lab"></table></div>
+<p class="note" id="prov-sum-note">Code reviewed and findings are summed over scans, so a repository scanned more than once counts each time. $/100KB covers default-effort scans with a recorded price. Precision = confirmed / (confirmed + false positive) among triaged findings.</p>
+<p class="note" id="prov-prec-note"></p>
+</section>
+
+<footer>code-scan · MIT · data snapshot <span class="generated">…</span> · <a href="data.json">data.json</a> ·
+  <a href="https://github.com/dk-code-factory/code-scan">GitHub</a> · <a href="https://github.com/dk-code-factory/code-scan#readme">README</a></footer>
+</main>
+<div class="tip" id="tip"></div>
+<script src="app.js"></script>
+</body>
+</html>

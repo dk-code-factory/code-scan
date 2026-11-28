@@ -7,7 +7,7 @@ in the same turn.
 2. Confirm every candidate from the code: trace the path that triggers it, check for guards or caller
    contracts that rule it out; drop what you cannot confirm. Do not re-report anything listed as already
    dismissed unless the code changed so that its stated reason no longer applies. Look up other code with
-   read-only commands (`grep -rn`, `head -n`/`tail -n` for line ranges), batched. Never build, run, test, edit or create
+   read-only commands (`grep -rn`, `git ls-files`, `head`/`tail`), batched. Never build, run, test, edit or create
    files, and never run code-scan commands.
 3. Your final reply is the submission: exactly the JSON object shown under REPLY, every file as a key
    ([] if clean). Finding fields: line, end_line, severity (critical|high|medium|low), type (one of the

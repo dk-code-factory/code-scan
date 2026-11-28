@@ -14,18 +14,44 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
-// Read-only shell command prefixes reviewers use; `gh` search/view for issue lookup during triage.
-// Allowlists match by prefix and any arguments may follow, so a tool is listed only if no option
-// of it writes a file or runs a program: code under review may carry prompt injection. Left out:
-// find -delete/-exec, awk system(), sed w/e (even under -n), rg --pre, sort -o, uniq IN OUT,
-// git log/show --output=FILE, git grep -O<cmd>, git push/reset, gh api/pr merge.
-// Only codex enforces read-only with an OS sandbox.
+// Read-only shell command prefixes reviewers may run; `gh` read subcommands for issue search during triage.
+// Prefix rules cannot constrain flags, so every command listed must be safe with ANY arguments: no
+// sed/awk/find/sort/uniq/file (write files or run commands), no rg (--pre runs a command), no git grep
+// (--open-files-in-pager runs one), no git log/show/diff (--output writes any file); git/gh only through
+// read subcommands. Prompt-injected code under review cannot modify the checkout, other files or remote
+// state through the allowlist.
 const RO_CMDS = ['git blame', 'git ls-files', 'git rev-parse', 'git cat-file',
-  'grep', 'cat', 'head', 'tail', 'wc', 'ls', 'cut', 'nl',
+  'grep', 'cat', 'head', 'tail', 'wc', 'ls', 'cut', 'tr', 'nl',
   'gh search', 'gh issue list', 'gh issue view', 'gh pr list', 'gh pr view', 'gh label list'];
 const ARG_PROMPT_MAX = 96 * 1024; // one argv string is capped at 128KB on Linux
 
-function extraArgs(name) {
+/**
+ * A child's stdin as a file descriptor holding `data`, instead of a pipe. Under the Codex CLI sandbox
+ * (seccomp) a child given stdin through a Node pipe (`input:` or `child.stdin.end()`) never sees EOF,
+ * so `git check-attr --stdin` and agent CLIs reading their prompt from stdin hang forever. The file is
+ * unlinked at once; the open fd keeps it readable until close().
+ */
+function stdinFd(data) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-scan-in-'));
+  const f = path.join(dir, 'stdin');
+  fs.writeFileSync(f, data ?? '', { mode: 0o600 });
+  const fd = fs.openSync(f, 'r');
+  fs.rmSync(dir, { recursive: true, force: true });
+  let open = true;
+  return { fd, close() { if (open) { open = false; try { fs.closeSync(fd); } catch (e) { /* closed */ } } } };
+}
+
+/** spawnSync with `opts.input` delivered through stdinFd (see there). */
+function spawnSyncIn(cmd, args, opts = {}) {
+  const { input, ...rest } = opts;
+  if (input === undefined) return spawnSync(cmd, args, rest);
+  const s = stdinFd(input);
+  try { return spawnSync(cmd, args, { ...rest, stdio: [s.fd, 'pipe', 'pipe'] }); } finally { s.close(); }
+}
+
+/** Extra CLI arguments: the list a review profile froze (o.extra), else CODESCAN_<RUNNER>_ARGS. */
+function extraArgs(name, o) {
+  if (o && Array.isArray(o.extra)) return o.extra;
   const v = process.env[`CODESCAN_${name.toUpperCase()}_ARGS`];
   return v ? v.split(/\s+/).filter(Boolean) : [];
 }
@@ -48,14 +74,53 @@ function firstJson(s) {
 }
 const num = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
 
+/**
+ * Reasoning effort per runner: the levels its CLI accepts (null = any string, passed through) and the
+ * arguments that set it. Runners without an entry have no effort control.
+ */
+const EFFORT = {
+  claude: { levels: ['low', 'medium', 'high', 'xhigh', 'max'], args: (e) => ['--effort', e] },
+  codex: { levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'], args: (e) => ['-c', `model_reasoning_effort="${e}"`] },
+  opencode: { levels: null, args: (e) => ['--variant', e] },
+};
+/** Effort levels a codex model supports, from the CLI's own model catalog; null when it is not listed. */
+function codexModelLevels(model) {
+  if (!model) return null;
+  try {
+    const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    const cat = JSON.parse(fs.readFileSync(path.join(home, 'models_cache.json'), 'utf8'));
+    const m = (cat.models || cat || []).find((x) => (x.slug || x.id) === model);
+    const lv = m && (m.supported_reasoning_levels || []).map((x) => x.effort || x).filter((x) => typeof x === 'string');
+    return lv && lv.length ? lv : null;
+  } catch (e) { return null; }
+}
+/** Effort levels `runner` accepts, narrowed to what `model` supports when the CLI says (null = any string). */
+function effortLevels(runner, model) {
+  const e = EFFORT[runner];
+  if (!e || !e.levels) return null;
+  const bare = model ? splitModel(model).model : null;
+  return (runner === 'codex' && codexModelLevels(bare)) || e.levels;
+}
+/** Error text when `effort` is not usable with `runner` (and `model`, when given), else null. */
+function effortError(runner, effort, model) {
+  if (effort === undefined || effort === null || effort === '') return null;
+  const e = EFFORT[runner];
+  if (!e) return `the ${runner} runner has no reasoning-effort setting (supported: ${Object.keys(EFFORT).join(', ')})`;
+  if (!/^[\w-]+$/.test(String(effort))) return `--effort ${effort}: not a level name`;
+  const lv = effortLevels(runner, model);
+  if (lv && !lv.includes(String(effort))) return `--effort ${effort}: ${model ? splitModel(model).model || runner : runner} accepts ${lv.join(', ')}`;
+  return null;
+}
+const effortArgs = (runner, o) => (o.effort && EFFORT[runner] ? EFFORT[runner].args(String(o.effort)) : []);
+
 const RUNNERS = {
   claude: {
     bins: ['claude'], vendor: 'anthropic', stdin: true,
-    argv: (o) => ['-p', '--output-format', 'json', ...(o.model ? ['--model', o.model] : []),
+    argv: (o) => ['-p', '--output-format', 'json', ...(o.model ? ['--model', o.model] : []), ...effortArgs('claude', o),
       ...(o.full ? ['--dangerously-skip-permissions']
         : ['--allowedTools', ['Read', 'Grep', 'Glob', ...RO_CMDS.map((c) => `Bash(${c}:*)`)].join(','),
           '--disallowedTools', 'Edit,Write,NotebookEdit']),
-      ...extraArgs('claude')],
+      ...extraArgs('claude', o)],
     parse(stdout) {
       const j = firstJson(stdout);
       if (!j) return { text: stdout };
@@ -72,9 +137,14 @@ const RUNNERS = {
   },
   codex: {
     bins: ['codex'], vendor: 'openai', stdin: true,
-    argv: (o) => ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-C', o.cwd,
-      ...(o.full ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--sandbox', 'read-only']),
-      ...(o.model ? ['-m', o.model] : []), ...extraArgs('codex'), '-'],
+    argv: (o) => {
+      const extra = extraArgs('codex', o);
+      // codex rejects a repeated --sandbox: a sandbox given in the extra args replaces the read-only default
+      const ownSandbox = extra.some((x) => /^(-s|--sandbox|--sandbox=.*|--dangerously-bypass-approvals-and-sandbox|--yolo)$/.test(x));
+      return ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-C', o.cwd,
+        ...(o.full ? ['--dangerously-bypass-approvals-and-sandbox'] : ownSandbox ? [] : ['--sandbox', 'read-only']),
+        ...(o.model ? ['-m', o.model] : []), ...effortArgs('codex', o), ...extra, '-'];
+    },
     parse(stdout) {
       let text = '', err = null;
       const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -99,7 +169,7 @@ const RUNNERS = {
       ...(o.full ? ['--approval-mode=yolo']
         : ['--approval-mode=default', '--allowed-tools', ['read_file', 'read_many_files', 'glob', 'search_file_content', 'list_directory',
           ...RO_CMDS.map((c) => `run_shell_command(${c})`)].join(',')]),
-      ...(o.model ? ['-m', o.model] : []), ...extraArgs('gemini')],
+      ...(o.model ? ['-m', o.model] : []), ...extraArgs('gemini', o)],
     parse(stdout) {
       const j = firstJson(stdout);
       if (!j) return { text: stdout };
@@ -119,7 +189,7 @@ const RUNNERS = {
   agy: {
     bins: ['agy'], vendor: 'google', stdin: false,
     argv: (o) => ['-p', o.prompt, '--output-format', 'json', ...(o.full ? ['--dangerously-skip-permissions'] : []),
-      ...(o.model ? ['--model', o.model] : []), ...extraArgs('agy')],
+      ...(o.model ? ['--model', o.model] : []), ...extraArgs('agy', o)],
     parse(stdout) {
       const j = firstJson(stdout);
       if (!j) return { text: stdout };
@@ -136,7 +206,7 @@ const RUNNERS = {
     bins: ['copilot'], vendor: null, stdin: false,
     argv: (o) => ['-p', o.prompt, '-s', '--no-ask-user', '--output-format=json',
       ...(o.full ? ['--allow-all-tools'] : [...RO_CMDS.flatMap((c) => ['--allow-tool', `shell(${c}:*)`]), '--deny-tool', 'write']),
-      ...(o.model ? [`--model=${o.model}`] : []), ...extraArgs('copilot')],
+      ...(o.model ? [`--model=${o.model}`] : []), ...extraArgs('copilot', o)],
     parse(stdout) {
       let text = '';
       const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -160,7 +230,7 @@ const RUNNERS = {
   cursor: {
     bins: ['cursor-agent', 'agent'], vendor: null, stdin: false,
     argv: (o) => ['-p', o.prompt, '--output-format', 'json', '--workspace', o.cwd, '--trust', ...(o.full ? ['-f'] : []),
-      ...(o.model ? ['--model', o.model] : []), ...extraArgs('cursor')],
+      ...(o.model ? ['--model', o.model] : []), ...extraArgs('cursor', o)],
     parse(stdout) {
       const j = firstJson(stdout);
       if (!j) return { text: stdout };
@@ -174,7 +244,7 @@ const RUNNERS = {
   },
   opencode: {
     bins: ['opencode'], vendor: null, stdin: false,
-    argv: (o) => ['run', '--format', 'json', '--dir', o.cwd, ...(o.model ? ['-m', o.model] : []), ...extraArgs('opencode'), o.prompt],
+    argv: (o) => ['run', '--format', 'json', '--dir', o.cwd, ...(o.model ? ['-m', o.model] : []), ...effortArgs('opencode', o), ...extraArgs('opencode', o), o.prompt],
     env: (o) => (o.full ? {} : { OPENCODE_PERMISSION: JSON.stringify({ edit: 'deny', webfetch: 'deny', bash: Object.fromEntries([...RO_CMDS.map((c) => [`${c} *`, 'allow']), ['*', 'deny']]) }) }),
     parse(stdout) {
       let text = '', cost = 0, sawCost = false, err = null;
@@ -349,9 +419,9 @@ function extractJson(text) {
     for (let i = end; i >= 0; i--) {
       const ch = s[i];
       if (ch === '"') {
-        let bs = 0; // a quote is escaped only by an odd run of backslashes ("C:\\\\" ends a string)
-        for (let k = i - 1; k >= 0 && s[k] === '\\'; k--) bs++;
-        if (bs % 2 === 0) inStr = !inStr;
+        let bs = 0;
+        while (i - 1 - bs >= 0 && s[i - 1 - bs] === '\\') bs++;
+        if (bs % 2 === 0) inStr = !inStr; // an even run of backslashes escapes itself, not the quote
       }
       if (inStr) continue;
       if (ch === c) depth++;
@@ -372,29 +442,36 @@ function killAll(sig = 'SIGTERM') {
 /**
  * Run one agent. Resolves (never rejects) with {ok, text, usage, costUsd, model, exit, error, ms, pid}.
  */
-function runAgent({ runner, model, prompt, cwd, full = false, timeoutMs = 45 * 60 * 1000, tmpDir, onSpawn }) {
+function runAgent({ runner, model, effort, prompt, cwd, full = false, extra, timeoutMs = 45 * 60 * 1000, tmpDir, onSpawn }) {
   const r = RUNNERS[runner];
   const bin = binOf(runner);
   if (!r || !bin) return Promise.resolve({ ok: false, error: `${runner} CLI not found`, exit: null, ms: 0 });
-  let p = prompt, promptFile = null;
+  let p = prompt, promptFile = null, ownDir = null;
   if (!r.stdin && Buffer.byteLength(p) > ARG_PROMPT_MAX) {
     // too long for one argv string: hand it over as a file the agent reads first
-    const dir = tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), 'code-scan-'));
+    const dir = tmpDir || (ownDir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-scan-')));
     fs.mkdirSync(dir, { recursive: true });
     const f = path.join(dir, `prompt-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`);
     fs.writeFileSync(f, prompt);
     promptFile = f;
     p = `Read the file ${f} completely (it is long; read all of it) and follow the instructions in it exactly. Your final reply is what that file asks for.`;
   }
-  const o = { prompt: p, model, cwd, full };
+  const cleanup = () => {
+    if (promptFile) { try { fs.unlinkSync(promptFile); } catch (e) { /* already gone */ } }
+    if (ownDir) { try { fs.rmSync(ownDir, { recursive: true, force: true }); } catch (e) { /* already gone */ } }
+  };
+  const o = { prompt: p, model, effort, cwd, full, extra };
   const args = r.argv(o);
   const env = { ...process.env, ...(r.env ? r.env(o) : {}) };
   const t0 = Date.now();
   return new Promise((res) => {
-    let child;
+    let child, sin = null;
     try {
-      child = spawn(bin, args, { cwd, env, detached: true, stdio: [r.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+      sin = r.stdin ? stdinFd(prompt) : null;
+      child = spawn(bin, args, { cwd, env, detached: true, stdio: [sin ? sin.fd : 'ignore', 'pipe', 'pipe'] });
     } catch (e) {
+      if (sin) sin.close();
+      cleanup();
       res({ ok: false, error: e.message, exit: null, ms: 0 });
       return;
     }
@@ -403,7 +480,7 @@ function runAgent({ runner, model, prompt, cwd, full = false, timeoutMs = 45 * 6
     const so = [], se = [];
     child.stdout.on('data', (b) => so.push(b));
     child.stderr.on('data', (b) => { se.push(b); if (se.length > 200) se.splice(0, se.length - 200); });
-    if (r.stdin) { child.stdin.on('error', () => {}); child.stdin.end(prompt); }
+    if (sin) sin.close(); // the child has its own copy of the fd
     const kill = (sig) => { try { process.kill(-child.pid, sig); } catch (e) { try { child.kill(sig); } catch (e2) { /* gone */ } } };
     let killTimer = null;
     // SIGTERM, then SIGKILL if the group (or a child holding our pipes) ignores it
@@ -414,7 +491,7 @@ function runAgent({ runner, model, prompt, cwd, full = false, timeoutMs = 45 * 6
       finished = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
-      if (promptFile) { try { fs.unlinkSync(promptFile); } catch (e) { /* already gone */ } }
+      cleanup();
       live.delete(child);
       const stdout = Buffer.concat(so).toString('utf8');
       const stderr = Buffer.concat(se).toString('utf8');
@@ -443,4 +520,4 @@ function defaultModel(name) {
   return null;
 }
 
-module.exports = { defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, resolve, extractJson, runAgent, killAll };
+module.exports = { EFFORT, effortLevels, effortError, stdinFd, spawnSyncIn, extraArgs, defaultModel, RUNNERS, ORDER, splitModel, joinModel, binOf, installed, version, detectHost, resolve, extractJson, runAgent, killAll };

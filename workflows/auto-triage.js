@@ -7,8 +7,9 @@ export const meta = {
   ],
 }
 
-const shArg = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
-const CLI = `${args.home ? `CODESCAN_HOME=${shArg(args.home)} ` : ''}node ${shArg(args.cli)} -C ${shArg(args.root)}`
+// shell word: bare when plainly safe, single-quoted otherwise (same rule as the CLI's own command lines)
+const shw = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
+const CLI = `${args.home ? `CODESCAN_HOME=${shw(args.home)} ` : ''}node ${shw(args.cli)} -C ${shw(args.root)}`
 
 // Standing instructions live in agents/triager.md (minimal-tool agent); the prompt only carries the command.
 const PROMPT = `Run: ${CLI} auto-triage claim ${args.runId}
@@ -47,7 +48,7 @@ await parallel(Array.from({ length: LANES }, () => async () => {
   let failures = 0
   while (started < groups + LANES * 2) {
     const n = ++started
-    const r = await run(PROMPT, { label: `triage ${n}`, phase: 'Triage', schema: SCHEMA, ...(args.model ? { model: args.model } : {}) })
+    const r = await run(PROMPT, { label: `triage ${n}`, phase: 'Triage', schema: SCHEMA, ...(args.model ? { model: args.model } : {}), ...(args.effort ? { effort: args.effort } : {}) })
     results.push(r)
     if (!r) { if (++failures >= 2) break; continue }
     failures = 0

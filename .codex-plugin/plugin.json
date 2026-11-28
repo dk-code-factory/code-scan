@@ -1,0 +1,9 @@
+{
+  "name": "code-scan",
+  "version": "2.1.0",
+  "description": "Repository-wide bug scanning: scan, status, findings, triage, auto-triage, dupes, report, profiles. Reviewer agents run as headless agent CLI processes (codex exec, …) started by bin/code-scan.js.",
+  "author": { "name": "Dmitry Kropachev" },
+  "license": "MIT",
+  "repository": "https://github.com/dk-code-factory/code-scan",
+  "skills": "./skills/"
+}

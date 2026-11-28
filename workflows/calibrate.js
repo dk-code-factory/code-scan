@@ -9,8 +9,9 @@ export const meta = {
 }
 
 // args: NEXT object from `calibrate start` plus {scanScript: absolute path of workflows/scan.js}
-const shArg = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
-const CLI = `${args.home ? `CODESCAN_HOME=${shArg(args.home)} ` : ''}node ${shArg(args.cli)} -C ${shArg(args.root)}`
+// shell word: bare when plainly safe, single-quoted otherwise (same rule as the CLI's own command lines)
+const shw = (t) => (/^[\w@%+=:,./-]+$/.test(String(t)) ? String(t) : `'${String(t).replace(/'/g, `'\\''`)}'`)
+const CLI = `${args.home ? `CODESCAN_HOME=${shw(args.home)} ` : ''}node ${shw(args.cli)} -C ${shw(args.root)}`
 const DECIDE_SCHEMA = {
   type: 'object',
   properties: {

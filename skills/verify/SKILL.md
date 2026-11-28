@@ -9,7 +9,9 @@ description: Double-check a single code-scan finding (or each of several, separa
 CS="node ${CLAUDE_PLUGIN_ROOT}/bin/code-scan.js"
 ```
 
-If the plugin root above was not filled in by your agent CLI, the CLI is `bin/code-scan.js` two directories above this SKILL.md file.
+If the plugin root above was not filled in by your agent CLI (Codex, Copilot, …), the plugin root is the directory two levels above this SKILL.md: use its absolute path wherever this file says `${CLAUDE_PLUGIN_ROOT}`.
+
+**Codex:** `$CS` writes its store under `~/.cache/code-scan` and starts agent CLIs that need the network, so the Codex sandbox blocks it. Run every `$CS` command outside the sandbox: request escalation (`sandbox_permissions: "require_escalated"`, proposing the prefix rule `["node", "<plugin root>/bin/code-scan.js"]` so the user approves it once). If escalation is unavailable (approval policy `never`, e.g. `codex exec`), do not work around it: tell the user to rerun Codex with `--sandbox danger-full-access` (or approvals on).
 
 For each finding id the user gives (one agent per finding, never batched into one agent):
 
@@ -41,10 +43,10 @@ Filing issues is public: only do it because the user asked for verification and 
 
 ## Status tools (for the agent and for later updates)
 
-- `$CS triage <id> --set confirmed|false_positive|wontfix|fixed|open --note "<why>"` — verdict; the note is
+- `$CS triage <id> --set confirmed|false_positive|wontfix|fixed|duplicate|open --note "<why>"` — verdict; the note is
   shown to future reviewers of the file for dismissed findings, so always give the reason.
 - `$CS link <id> gh:<owner/repo> <number> --kind filed|linked_existing --url <url>` / `$CS unlink <id> [tracker] [key]`
   — which issue covers the finding.
 - `$CS issues-sync` — refresh the state of every linked GitHub issue or PR: closed as completed (or PR merged) →
-  finding `fixed`, closed as not planned → `wontfix`, reopened → back to `confirmed`; duplicates and closes
+  finding `fixed`, closed as not planned → `wontfix`, closed as a duplicate → `duplicate`, reopened → back to `confirmed`; closes
   without a reason are recorded but leave the finding alone. `$CS show <id>` prints the state.
