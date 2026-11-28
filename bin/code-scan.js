@@ -4467,7 +4467,8 @@ function cmdRender(a) {
   const covered = rows.filter((r) => groupsOf.has(r.id) && reportedGroups.has(groupsOf.get(r.id)));
   rows = rows.filter((r) => !covered.includes(r));
   // a finding is filed only after a triager really searched every dedupe tracker for an existing report
-  const mustSearch = listFlag(cfgGet('dedupe_trackers', '')) || [target];
+  const configuredSearch = listFlag(cfgGet('dedupe_trackers', '')) || [];
+  const mustSearch = configuredSearch.length ? configuredSearch : [target];
   const unsearched = [];
   if (!a.f['allow-unsearched']) {
     rows = rows.filter((r) => {
@@ -4696,7 +4697,7 @@ function codeIssueRefs(r, span = 80) {
   const res = [];
   const seen = new Set();
   for (let i = lo; i < hi; i++) {
-    for (const m of lines[i].matchAll(/(?:^|[^\w&])#(\d{2,7})\b|issues\/(\d{2,7})\b/g)) {
+    for (const m of lines[i].matchAll(/(?:^|[^\w&])#(\d+)\b|issues\/(\d+)\b/g)) {
       const n = m[1] || m[2];
       if (seen.has(n)) continue;
       seen.add(n);
