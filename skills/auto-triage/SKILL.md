@@ -40,7 +40,7 @@ nameWithOwner,parent` in the repo: the upstream is `parent` (owner/name) if the 
 `report-config dedupe_trackers` lists a `jira:` tracker) add `--jira <PROJ>`; agents search it with their Jira tool.
 `start` checks that `gh` reaches the repo and refuses otherwise. Each agent reports per finding and tracker whether
 its search ran (`done` with the queries) or `failed`; `render` will not file a finding without a `done` search of
-every dedupe tracker. Without `--repo` the search is skipped and those findings cannot be filed from this run.
+every dedupe tracker. With neither `--repo` nor `--jira` the search is skipped and those findings cannot be filed from this run.
 
 ## 3. Start and launch
 

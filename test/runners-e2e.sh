@@ -134,7 +134,22 @@ has "$st" 'groups: 1 done' && has "$st" 'real 1' && ok auto-triage-run || bad "a
 : > "$FAKE_LOG"
 o=$(B auto-triage start --recheck --triage all --group-size 5 --runner codex --repo acme/toy --no-preflight 2>&1); o=$(B auto-triage run 2>&1); st=$(B auto-triage status)
 l=$(grep '^codex ' "$FAKE_LOG" | head -1)
-has "$l" 'workspace-write -c sandbox_workspace_write.network_access=true' && ! has "$l" "-C $W/repo " && has "$st" 'duplicate search in gh:acme/toy: done 1, FAILED 0' && ok codex-triage-network || bad "codex-triage-network: $l // $st"
+has "$l" 'workspace-write -c sandbox_workspace_write.network_access=true' && has "$l" 'sandbox_workspace_write.writable_roots=\[\]' && has "$l" 'sandbox_workspace_write.exclude_slash_tmp=true' && has "$l" 'sandbox_workspace_write.exclude_tmpdir_env_var=true' && ! has "$l" "-C $W/repo " && has "$st" 'duplicate search in gh:acme/toy: done 1, FAILED 0' && ok codex-triage-network || bad "codex-triage-network: $l // $st"
+
+# A real detached triage cancellation must remove its network workspace before runner exit.
+: > "$FAKE_LOG"
+B auto-triage start --recheck --triage all --group-size 5 --runner codex --repo acme/toy --no-preflight >/dev/null
+o=$(FAKE_SLEEP_MS=20000 B auto-triage run --detach)
+net_scratch=''
+for i in $(seq 1 50); do
+  net_scratch=$(awk '/^codex / { for(i=1;i<=NF;i++) if($i=="-C") { print $(i+1); exit } }' "$FAKE_LOG")
+  [ -n "$net_scratch" ] && break
+  sleep 0.2
+done
+[ -n "$net_scratch" ] && [ -d "$net_scratch" ] || bad "triage-stop-started: $o"
+o=$(B auto-triage stop --now)
+for i in $(seq 1 50); do [ -n "$net_scratch" ] && [ ! -d "$net_scratch" ] && break; sleep 0.2; done
+[ -n "$net_scratch" ] && [ ! -d "$net_scratch" ] && has "$o" 'killed' && ok triage-stop-cleans-scratch || bad "triage-stop-cleans-scratch: $o $net_scratch"
 
 # --- calibration and a mixed-vendor init
 export CODESCAN_HOME=$W/state-init

@@ -269,7 +269,7 @@ const BOOL_FLAGS = new Set(['reclaim', 'close', 'no-dismissed', 'all-versions', 
   'ambiguous', 'dry-run', 'json', 'help', 'include-reported', 'include-stale', 'gone', 'include-gone', 'reset-scope', 'inline', 'rules', 'recheck',
   'detach', 'reply', 'full', 'uninstall', 'user', 'project', 'matrix', 'allow-unsearched', 'no-preflight']);
 const MULTI_FLAGS = new Set(['include', 'exclude', 'only', 'force-path', 'path', 'severity',
-  'category', 'triage', 'confirmation', 'sort', 'label']);
+  'category', 'triage', 'confirmation', 'sort', 'label', 'jira']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -4712,13 +4712,22 @@ function ghPreflight(repo) {
   if (r.status !== 0) die(`cannot reach GitHub repo ${repo} with \`gh\` (${String(r.stderr || r.error || '').trim().split('\n')[0] || 'failed'}) — the duplicate search would fail; fix \`gh auth\`/network or drop --repo`);
 }
 
-/** Latest recorded search status per tracker for a finding, from every triage result. */
+/** Validate the search evidence before recording it or using it to permit rendering. */
+function searchResultError(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v) || !['done', 'failed'].includes(v.status)) return 'status must be done or failed';
+  if (v.status === 'done' && !(Array.isArray(v.queries) && v.queries.every((q) => typeof q === 'string' && q.trim())
+    && new Set(v.queries.map((q) => q.trim())).size >= 2)) return 'done needs the queries you ran (at least 2 different nonempty strings)';
+  if (v.status === 'failed' && !(typeof v.error === 'string' && v.error.trim())) return 'failed needs the error';
+  return null;
+}
+
+/** Any validated successful search wins; otherwise return the latest failure per tracker. */
 function searchStatus(findingId) {
   const st = {};
   for (const r of db().prepare('SELECT issue_search, ts FROM triage_results WHERE finding_id=? AND issue_search IS NOT NULL ORDER BY ts').all(findingId)) {
     let j;
     try { j = JSON.parse(r.issue_search); } catch (e) { continue; }
-    for (const [t, v] of Object.entries(j || {})) if (v && v.status) st[t] = v.status === 'done' || st[t] !== 'done' ? v.status : st[t];
+    for (const [t, v] of Object.entries(j || {})) if (!searchResultError(v)) st[t] = v.status === 'done' || st[t] !== 'done' ? v.status : st[t];
   }
   return st;
 }
@@ -4876,10 +4885,10 @@ function atClaim(a) {
       if (t.startsWith('gh:')) {
         const repo = t.slice(3);
         out(`${t}:`);
-        out(`  gh search issues --repo ${repo} --state all --limit 10 --json number,title,url,state "<keywords>"`);
-        out(`  gh search prs --repo ${repo} --state all --limit 10 --json number,title,url,state "<keywords>"`);
+        out(`  gh search issues --repo ${repo} --limit 10 --json number,title,url,state "<keywords>"`);
+        out(`  gh search prs --repo ${repo} --limit 10 --json number,title,url,state "<keywords>"`);
         out(`  gh issue view N --repo ${repo} --json number,title,state,body,url`);
-        out('  (rate-limited: fall back to `gh issue list --state all --search "<keywords>"`)');
+        out(`  (rate-limited: fall back to \`gh issue list --repo ${repo} --state all --search "<keywords>"\`)`);
       } else if (t.startsWith('jira:')) {
         out(`${t}: search with your Jira tool (e.g. a jira_search tool, JQL \`project = ${t.slice(5)} AND text ~ "<keywords>"\`).`);
         out('  No Jira tool available, or it errors → that tracker\'s search failed.');
@@ -4952,15 +4961,16 @@ function atSubmit(a) {
       } else if (!/^\d+$/.test(String(x.issue.number || ''))) errs.push(`${at}: issue must be null or {"number":N,"url":"..."}`);
       else if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) errs.push(`${at}: issue needs "repo":"owner/name" (the run has no --repo)`);
     }
-    if (trackers.length && (x.verdict === 'real' || x.verdict === 'unsure')) {
+    if (trackers.length && (x.verdict === 'real' || x.verdict === 'unsure' || x.issue_search !== undefined)) {
+      const required = x.verdict === 'real' || x.verdict === 'unsure';
       const s = x.issue_search;
       if (!s || typeof s !== 'object' || Array.isArray(s)) errs.push(`${at}: issue_search is required: {${trackers.map((t) => `"${t}": {"status":"done|failed", ...}`).join(', ')}}`);
       else {
         for (const t of trackers) {
           const v = s[t];
-          if (!v || !['done', 'failed'].includes(v.status)) errs.push(`${at}: issue_search["${t}"].status must be done or failed`);
-          else if (v.status === 'done' && !(Array.isArray(v.queries) && v.queries.filter((q) => typeof q === 'string' && q.trim()).length >= 2)) errs.push(`${at}: issue_search["${t}"] done needs the queries you ran (at least 2)`);
-          else if (v.status === 'failed' && !(typeof v.error === 'string' && v.error.trim())) errs.push(`${at}: issue_search["${t}"] failed needs the error`);
+          if (v === undefined && !required) continue;
+          const error = searchResultError(v);
+          if (error) errs.push(`${at}: issue_search["${t}"] ${error}`);
         }
       }
     }
@@ -5035,7 +5045,8 @@ function atStatus(a) {
     for (const t of trk) {
       const st = need.map((r) => { try { return (JSON.parse(r.issue_search || '{}')[t] || {}).status || 'missing'; } catch (e) { return 'missing'; } });
       const c = (s) => st.filter((x) => x === s).length;
-      out(`duplicate search in ${t}: done ${c('done')}, FAILED ${c('failed')}, missing ${c('missing')} (of ${need.length} real/unsure)${c('failed') + c('missing') ? ' — those cannot be filed until searched: `auto-triage start --ids <ids> --recheck`' : ''}`);
+      const retry = trk.map((tracker) => tracker.startsWith('gh:') ? `--repo ${tracker.slice(3)}` : `--jira ${tracker.slice(5)}`).join(' ');
+      out(`duplicate search in ${t}: done ${c('done')}, FAILED ${c('failed')}, missing ${c('missing')} (of ${need.length} real/unsure)${c('failed') + c('missing') ? ` — those cannot be filed until searched: \`auto-triage start --ids <ids> --recheck ${retry}\`` : ''}`);
     }
   }
   for (const r of rs) {

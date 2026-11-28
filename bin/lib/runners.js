@@ -142,10 +142,12 @@ const RUNNERS = {
       // codex rejects a repeated --sandbox: a sandbox given in the extra args replaces the read-only default
       const ownSandbox = extra.some((x) => /^(-s|--sandbox|--sandbox=.*|--dangerously-bypass-approvals-and-sandbox|--yolo)$/.test(x));
       // read-only has no network; agents that must search issues (o.network) get workspace-write with network on,
-      // run from a scratch directory (runAgent) so the writable workspace is not the checkout
+      // run from scratch (runAgent), excluding other configured/temp roots so even /tmp checkouts stay read-only
       return ['exec', '--json', '--skip-git-repo-check', '--ephemeral', '-C', o.cwd,
         ...(o.full ? ['--dangerously-bypass-approvals-and-sandbox'] : ownSandbox ? []
-          : o.network ? ['--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true'] : ['--sandbox', 'read-only']),
+          : o.network ? ['--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true',
+            '-c', 'sandbox_workspace_write.writable_roots=[]', '-c', 'sandbox_workspace_write.exclude_slash_tmp=true',
+            '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true'] : ['--sandbox', 'read-only']),
         ...(o.model ? ['-m', o.model] : []), ...effortArgs('codex', o), ...extra, '-'];
     },
     parse(stdout) {
@@ -437,6 +439,11 @@ function extractJson(text) {
 }
 
 const live = new Set();
+const networkScratchDirs = new Set();
+// The runner exits synchronously on stop signals, before child close callbacks can clean up.
+process.once('exit', () => {
+  for (const dir of networkScratchDirs) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best effort */ } }
+});
 /** Kill every agent still running (on SIGTERM/SIGINT of the runner). */
 function killAll(sig = 'SIGTERM') {
   for (const c of live) { try { process.kill(-c.pid, sig); } catch (e) { try { c.kill(sig); } catch (e2) { /* gone */ } } }
@@ -462,10 +469,11 @@ function runAgent({ runner, model, effort, prompt, cwd, full = false, network = 
   let scratch = null;
   if (network && !full && r.networkScratchCwd) {
     scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'code-scan-net-'));
+    networkScratchDirs.add(scratch);
     cwd = scratch;
   }
   const cleanup = () => {
-    if (scratch) { try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) { /* already gone */ } }
+    if (scratch) { try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) { /* already gone */ } networkScratchDirs.delete(scratch); }
     if (promptFile) { try { fs.unlinkSync(promptFile); } catch (e) { /* already gone */ } }
     if (ownDir) { try { fs.rmSync(ownDir, { recursive: true, force: true }); } catch (e) { /* already gone */ } }
   };

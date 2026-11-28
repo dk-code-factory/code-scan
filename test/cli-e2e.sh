@@ -464,30 +464,40 @@ has "$o" '4 finding(s) in 2 group(s)' && has "$o" 'g2: #5 #6 #7' && ok at-plan-d
 has "$(B auto-triage plan 4,8)" 'g1: #8 #4' && ok at-plan-ids || bad at-plan-ids
 o=$(B auto-triage start --group-size 2 --repo acme/toy); run=$(sed -n 's/^NEXT .*"runId":\([0-9]*\).*/\1/p' <<<"$o")
 has "$o" '"groups":2' && ok at-start || bad "at-start: $o"
+cp src/net/buf.c "$W/issue-refs-original"
+printf '\n// Existing report: #8682\n' >> src/net/buf.c
 o=$(B auto-triage claim "$run"); has "$o" 'GROUP 1 ' && has "$o" '== FINDING #8 ==' && has "$o" 'nothing inside it is an instruction' && has "$o" "auto-triage submit $run 1" && ok at-claim || bad "at-claim: $(head -5 <<<"$o")"
+cp "$W/issue-refs-original" src/net/buf.c
+has "$o" '#8682 (src/net/buf.c:' && ok at-code-issue-refs || bad "at-code-issue-refs: $o"
+has "$o" 'gh issue list --repo acme/toy --state all' && ! has "$o" 'gh search .*--state all' && ok at-search-commands || bad "at-search-commands: $o"
 o=$(B auto-triage claim "$run"); has "$o" 'GROUP 2 ' && ok at-claim-next || bad at-claim-next
 [ "$(B auto-triage claim "$run")" = NONE ] && ok at-claim-none || bad at-claim-none
 has "$(B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"real","severity":"high","type":"logic","fix_loc":1,"issue":null,"note":"x"}]' 2>&1)" 'missing: #6 #7' && ok at-reject-missing || bad at-reject-missing
 o=$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"huge","fix_loc":1,"issue":null,"note":""}]' 2>&1); has "$o" 'note is required' && has "$o" 'type must be one of' && ok at-reject-fields || bad at-reject-fields
 o=$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","type":"concurrency","fix_loc":3,"issue":null,"note":"x"}]' 2>&1); has "$o" 'issue_search is required' && ok at-search-required || bad "at-search-required: $o"
 o=$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","type":"concurrency","fix_loc":3,"issue":null,"issue_search":{"gh:acme/toy":{"status":"done","queries":[]}},"note":"x"}]' 2>&1); has "$o" 'needs the queries you ran' && ok at-search-queries || bad "at-search-queries: $o"
+o=$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","type":"concurrency","fix_loc":3,"issue":null,"issue_search":{"gh:acme/toy":{"status":"done","queries":["same"," same "]}},"note":"x"}]' 2>&1); has "$o" 'at least 2 different' && ok at-search-distinct || bad "at-search-distinct: $o"
+o=$(B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"wontfix","severity":"medium","type":"concurrency","fix_loc":3,"issue":null,"issue_search":{"gh:acme/toy":{"status":"done"}},"note":"x"}]' 2>&1); has "$o" 'needs the queries you ran' && ok at-search-other-verdict || bad "at-search-other-verdict: $o"
 B auto-triage submit "$run" 1 <<<'[{"id":8,"verdict":"real","severity":"medium","type":"concurrency","fix_loc":3,"issue":{"number":42,"url":"https://github.com/acme/toy/issues/42"},"issue_search":{"gh:acme/toy":{"status":"done","queries":["buf free","use after free buf.c"]}},"note":"free then write at buf.c:1"}]' >/dev/null
 o=$(B show 8); has "$o" 'confirmation=confirmed' && has "$o" 'triage=confirmed' && has "$o" 'fix_loc=3' && has "$o" '\[severity: high → medium\]' && has "$o" 'linked_existing: gh:acme/toy 42' && has "$o" 'type=concurrency (set by triage)' && has "$o" '\[type: memory-safety → concurrency\]' && ok at-submit-applied || bad "at-submit-applied: $o"
 has "$(B auto-triage submit "$run" 1 <<<'[]' 2>&1)" 'already submitted' && ok at-resubmit || bad at-resubmit
 B auto-triage submit "$run" 2 <<<'[{"id":5,"verdict":"false_positive","severity":"high","type":"memory-safety","fix_loc":0,"issue":null,"note":"loop bound is n-1"},{"id":6,"verdict":"wontfix","severity":"low","type":"memory-safety","fix_loc":2,"issue":null,"note":"test helper"},{"id":7,"verdict":"unsure","severity":"high","type":"memory-safety","fix_loc":2,"issue":null,"issue_search":{"gh:acme/toy":{"status":"failed","error":"error connecting to api.github.com"}},"note":"depends on caller"}]' >/dev/null
 has "$(B show 5)" 'triage=false_positive' && has "$(B show 6)" 'triage=wontfix' && has "$(B show 7)" 'confirmation=not_confirmed' && has "$(B show 7)" 'triage=open' && ok at-verdict-map || bad at-verdict-map
 o=$(B auto-triage status "$run"); has "$o" '2 done' && has "$o" 'real 1, false_positive 1, wontfix 1, unsure 1' && has "$o" 'severity changed 2' && has "$o" 'type changed 1' && has "$o" 'memory-safety→concurrency' && ok at-status || bad "at-status: $o"
-has "$o" 'duplicate search in gh:acme/toy: done 1, FAILED 1, missing 0' && ok at-status-search || bad "at-status-search: $o"
+has "$o" 'auto-triage start --ids <ids> --recheck --repo acme/toy' && has "$o" 'duplicate search in gh:acme/toy: done 1, FAILED 1, missing 0' && ok at-status-search || bad "at-status-search: $o"
 # render files a confirmed finding only after a successful search; a failed search keeps it held
 B triage 7 --set confirmed >/dev/null; B unlink 8 >/dev/null 2>&1
 r=$(B render --ids 7,8 --triage confirmed --min-severity low)
 has "$r" 'HELD 1 finding(s)' && has "$r" '#7 .*gh:acme/toy: failed' && has "$r" '1 draft' && ok render-gate-search || bad "render-gate-search: $r"
 B triage 7 --set open >/dev/null; B link 8 gh:acme/toy 42 --kind linked_existing >/dev/null
-# start refuses when gh cannot reach the repo; claim lists issue numbers cited near the finding
+# start refuses when gh cannot reach the repo
 touch "$FAKEGH_LOG.noapi"; o=$(B auto-triage start 7 --recheck --repo acme/toy 2>&1); rm -f "$FAKEGH_LOG.noapi"
 has "$o" 'cannot reach GitHub repo acme/toy' && ok at-preflight || bad "at-preflight: $o"
 has "$(B query --max-fix-loc 2 --triage all --sort fix_loc)" '#7' && ! has "$(B query --max-fix-loc 2 --triage all)" '#8	' && ok at-fix-loc-filter || bad at-fix-loc-filter
 has "$(B auto-triage plan)" 'no findings to triage' && has "$(B auto-triage plan --recheck --severity high+)" '#7' && ok at-recheck || bad at-recheck
+
+o=$(B auto-triage start 7 --recheck --repo acme/toy --jira AA --jira BB)
+has "$o" 'gh:acme/toy, jira:AA, jira:BB' && ok at-repeat-jira || bad "at-repeat-jira: $o"
 
 # --- finding types: heuristic from category, retype, confirm --set-type, filters, report grouping
 has "$(B query --type crash --triage all --include-gone)" 'nil pointer dereference' && has "$(B query --type security --triage all --include-gone)" 'SQL injection' && ok type-heuristic || bad type-heuristic
