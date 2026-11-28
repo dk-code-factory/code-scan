@@ -8,11 +8,11 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<nav class="site"><div class="in"><a class="brand" href="index.html">code-scan</a><a href="index.html" aria-current="page">Overview</a><a href="compare.html">Compare configurations</a><a href="provider.html">OpenAI vs Anthropic</a><a href="model.html">Pick a model</a><a href="effort.html">Pick effort</a><a href="method.html">Method & data</a></div></nav>
+<nav class="site"><div class="in"><a class="brand" href="index.html">code-scan</a><a href="index.html" aria-current="page">Overview</a><a href="compare.html">Compare configurations</a><a href="provider.html">Pick a provider</a><a href="model.html">Pick a model</a><a href="effort.html">Pick effort</a><a href="method.html">Method & data</a></div></nav>
 <main>
 <header class="hero">
   <h1>code-scan</h1>
-  <p class="lede">Repository-wide bug scanning with parallel reviewer agents from Claude Code, Codex, Gemini, Antigravity, Copilot, Cursor or OpenCode. These pages show how reviewer models performed on real repositories and which to pick.</p>
+  <p class="lede">Repository-wide bug scanning with parallel reviewer agents from Claude Code, Codex, Gemini, Antigravity, Copilot, Cursor or OpenCode. These pages show how reviewer models performed on real repositories and which to pick. Only Claude and Codex models have been benchmarked so far.</p>
 </header>
 <div class="cards" id="headline"></div>
 <section id="goals">
@@ -20,22 +20,22 @@
 <div class="goals">
   <a class="goal" href="provider.html"><b>OpenAI or Anthropic?</b><span>Codex vs Claude on the same code: share of issues found, price, precision.</span></a>
   <a class="goal" href="model.html"><b>Which model?</b><span>Opus, Fable, Sonnet, Haiku and Codex by language, the known-bug benchmark and chunk size.</span></a>
-  <a class="goal" href="effort.html"><b>Which effort level?</b><span>low → ultra on one repository: what more effort buys and where it stops paying.</span></a>
+  <a class="goal" href="effort.html"><b>Which effort level?</b><span>Codex low → ultra and Opus low → max on one repository: what more effort buys and where it stops paying.</span></a>
   <a class="goal" href="compare.html"><b>Compare everything</b><span>Every full scan as a sortable row with price, findings, false positives and time; plot any two measures.</span></a>
 </div>
 </section>
 <section id="find">
 <h2>Find your setup</h2>
-<p class="muted">Pick the language of the code you scan and what matters most to you: price, number of findings, findings per dollar or speed. The recommendation comes from the scans below; the evidence list shows what was actually measured on that language.</p>
+<p class="muted">Pick the language of the code you scan and what matters most to you: price, number of findings, findings per dollar or speed. The card's figures come from one effort study on TypeScript + Rust; the evidence below it shows what was compared on your language.</p>
 <div class="picker">
   <label>Language <select id="pick-lang"></select></label>
   <label>What matters most <select id="pick-goal">
-    <option value="cheap">Cheapest: lowest price per 100KB</option>
-    <option value="most">Most findings: budget allows</option>
-    <option value="value" selected>Best value: most confirmed bugs per dollar</option>
-    <option value="quick">Quickest: shortest review time</option>
-    <option value="claude">Claude models only</option>
+    <option value="cheap">Cheapest (lowest $/100KB)</option>
+    <option value="most">Most findings (any budget)</option>
+    <option value="value" selected>Best value (bugs per $)</option>
+    <option value="quick">Quickest (shortest time)</option>
   </select></label>
+  <label class="check"><input type="checkbox" id="pick-claude"> Claude models only</label>
 </div>
 <div id="pick-out"></div>
 </section>
@@ -51,7 +51,7 @@ codex plugin add code-scan@code-scan
 
 # Any Agent Skills host
 git clone https://github.com/dk-code-factory/code-scan &amp;&amp; node code-scan/bin/code-scan.js install</code></pre>
-<p>Then run <code>/code-scan:init</code> once per repository: it benchmarks models on a sample of that repo and picks a chunk size for each.</p>
+<p>Then either use the setup from the card above, or run <code>/code-scan:init</code> in your repository to benchmark Claude models on a sample of your own code and pick one there. The card's CLI commands need no <code>init</code> and use a fixed 40KB chunk; only <code>/code-scan:scan</code> or <code>/code-scan:init</code> calibrates the chunk size for a Claude model.</p>
 </section>
 
 <footer>code-scan · MIT · data snapshot <span class="generated">…</span> · <a href="data.json">data.json</a> ·
