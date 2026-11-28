@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenAI vs Anthropic</title>
+<meta name="description" content="Codex (OpenAI) against Claude (Anthropic) as code-scan reviewers: share of issues found on the same code, price and precision.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="site"><div class="in"><a class="brand" href="index.html">code-scan</a><a href="index.html">Overview</a><a href="compare.html">Compare configurations</a><a href="provider.html" aria-current="page">OpenAI vs Anthropic</a><a href="model.html">Pick a model</a><a href="effort.html">Pick effort</a><a href="method.html">Method & data</a></div></nav>
+<main>
+<header class="hero">
+  <h1>OpenAI vs Anthropic</h1>
+  <p class="lede">Codex <code>gpt-6.1-sol</code> through the Codex CLI against Claude models through Claude Code, reviewing the same code with the same prompt and plan.</p>
+</header>
+<nav class="toc"><a href="#verdict">Verdict</a><a href="#prov-summary">At a glance</a><a href="#prov-same">Same code, both providers</a><a href="#h2h">Head-to-head details</a></nav>
+<section id="verdict">
+<h2>Verdict</h2>
+<div class="table-wrap"><table class="pref"><tr><th class="l">you want</th><th class="l">pick</th><th class="l">why</th></tr>
+<tr><td class="l"><b>Cheapest</b></td><td class="l">OpenAI · Codex <code>medium</code></td><td class="l">$0.30/100KB vs $0.78 for the cheapest usable Claude run (Opus <code>low</code>)</td></tr>
+<tr><td class="l"><b>Most findings</b></td><td class="l">Both · Codex <code>xhigh</code> + Opus <code>max</code></td><td class="l">recall 0.66 together; best single run of each: Codex 0.41, Opus 0.35</td></tr>
+<tr><td class="l"><b>Best value</b></td><td class="l">OpenAI · Codex <code>xhigh</code></td><td class="l">$0.10 per confirmed bug vs $0.27–0.28 for Opus <code>low</code>/<code>medium</code></td></tr>
+<tr><td class="l"><b>Quickest</b></td><td class="l">Anthropic · Opus <code>low</code></td><td class="l">1.6 reviewer-min/100KB vs 10–22 for Codex; 4 min wall clock on 995KB vs 28–53</td></tr>
+</table></div>
+<div class="rec"><strong>Pick OpenAI (Codex <code>gpt-6.1-sol</code> at <code>xhigh</code>) for full scans.</strong>
+<p>Everywhere both providers reviewed the same code, Codex found the larger share of issues, and at a lower price per 100KB than any Claude model except Sonnet and Haiku.</p></div>
+<div class="rec"><strong>Pick Anthropic when you need a Claude-only pipeline: Opus 5.5.</strong>
+<p>Opus found all 7 known bugs on the gocql benchmark and has 0.81–1.00 precision after triage. Fable 5.2 finds more on small samples but costs several times as much at scale. See <a href="model.html">Pick a model</a>.</p></div>
+<div class="rec"><strong>For critical code, use both.</strong>
+<p>The providers overlap little: in the effort study Codex <code>xhigh</code> alone found 0.40 of the confirmed issues and 0.66 together with Opus <code>max</code>.
+<code>start --profile codex-default,opus-default</code> runs both on the same commit and plan; <code>compare</code> shows what only one found.</p></div>
+<p class="note">Most triage was done by Codex auto-triage, which may favour Codex findings (4 false positives in 1,623 Codex verdicts), so read Codex precision as an upper bound.</p>
+</section>
+<section id="prov-summary">
+<h2>At a glance</h2>
+<div class="table-wrap"><table id="prov-sum"></table></div>
+<p class="note">Price range at the recommended levels (Codex <code>xhigh</code>, Opus <code>medium</code>) plus scans run without an explicit effort. Precision = confirmed / (confirmed + false positive) among triaged findings.</p>
+</section>
+<section id="prov-same">
+<h2>Same code, both providers</h2>
+<p class="muted">Share = severity-weighted share of every distinct issue either scan found on the files both reviewed; in the effort-study rows it is recall of the 217 confirmed issues all ten runs found together. Codex scans without an effort ran at the CLI default, <code>high</code>.</p>
+<div class="table-wrap"><table id="prov-table" class="pref"></table></div>
+</section>
+<section id="h2h">
+<h2>Head-to-head details</h2>
+<p class="muted">Two full scans of the same repository by different models, compared only on files both reviewed with identical content (<code>code-scan.js compare</code>).
+Share = severity-weighted share of every distinct issue either scan found. Precision = confirmed / (confirmed + false positive) among triaged findings.</p>
+<div id="h2h-body"></div>
+</section>
+
+<footer>code-scan · MIT · data snapshot <span class="generated">…</span> · <a href="data.json">data.json</a> ·
+  <a href="https://github.com/dk-code-factory/code-scan">GitHub</a> · <a href="https://github.com/dk-code-factory/code-scan#readme">README</a></footer>
+</main>
+<div class="tip" id="tip"></div>
+<script src="app.js"></script>
+</body>
+</html>

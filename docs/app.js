@@ -47,14 +47,14 @@
   };
   const nice = (max) => { const p = Math.pow(10, Math.floor(Math.log10(max))); return [1, 2, 2.5, 5, 10].map((m) => m * p).find((v) => v >= max); };
 
-  $('generated').textContent = data.generated;
+  for (const el of document.querySelectorAll('.generated')) el.textContent = data.generated;
 
   // ---------- headline cards
   const allScans = data.repos.flatMap((r) => r.scans.map((s) => ({ ...s, repo: r })));
   const totalKb = allScans.reduce((s, x) => s + x.kb, 0);
   const totalFindings = allScans.reduce((s, x) => s + x.findings, 0);
   const triaged = allScans.reduce((s, x) => s + x.triaged, 0);
-  $('headline').innerHTML = [
+  if ($('headline')) $('headline').innerHTML = [
     ['repositories', data.repos.length, 'scanned with code-scan'],
     ['code reviewed', kb(totalKb), `${allScans.length} full scans`],
     ['findings', totalFindings.toLocaleString(), `${triaged.toLocaleString()} triaged`],
@@ -88,7 +88,7 @@
 
   // ---------- benchmark
   const b = data.bench;
-  if (b) {
+  if (b && $('bench-chart')) {
     $('bench-desc').innerHTML = `${esc(b.repo)} @ ${esc(b.commit)}: ${b.sampleKb}KB / ${b.lines.toLocaleString()} lines of Go with ${b.knownBugs} verified bugs
       (filed upstream) and ${b.distinctIssues} distinct issues found across all models. Each model at the chunk size its own calibration chose (${esc(b.date)}).`;
     scatter($('bench-chart'), b.rows.map((r) => ({ x: r.usdPer100Kb, y: r.quality, model: r.model,
@@ -107,10 +107,10 @@
       c.scans.map((x) => { const s = scanOf(x.id); return `<tr><td>${withEffort(x.model, s.effort)}</td>${sevTd(x.findings, x.severity)}<td>${x.unique}</td><td><b>${f2(x.share)}</b></td><td>${x.confirmed}</td><td>${x.falsePositive}</td><td>${f2(x.precision)}</td><td>${usd(s.usd)}</td><td>${usd(s.usdPer100Kb)}</td></tr>`; }).join('') +
       '</table></div>');
   }
-  $('h2h-body').innerHTML = h2h.join('') || '<p class="muted">No head-to-head scans yet.</p>';
+  if ($('h2h-body')) $('h2h-body').innerHTML = h2h.join('') || '<p class="muted">No head-to-head scans yet.</p>';
 
   // ---------- cost bars
-  (function () {
+  if ($('cost-chart')) (function () {
     const rows = allScans.filter((s) => s.usdPer100Kb).sort((a, b) => a.usdPer100Kb - b.usdPer100Kb);
     const W = 640, rowH = 24, L = 210, R = 60, T = 4;
     const H = T + rows.length * rowH + 22;
@@ -135,7 +135,7 @@
   })();
 
   // ---------- calibration small multiples
-  (function () {
+  if ($('cal-charts')) (function () {
     const curveRepos = data.repos.filter((r) => r.curves.length);
     const seen = new Set();
     for (const r of curveRepos) {
@@ -170,7 +170,7 @@
   })();
 
   // ---------- init tables
-  $('init-body').innerHTML = data.repos.flatMap((r) => r.inits.map((i) =>
+  if ($('init-body')) $('init-body').innerHTML = data.repos.flatMap((r) => r.inits.map((i) =>
     `<h3>${repoLink(r)} <span class="muted">— ${kb(i.sampleKb)} sample, ${i.issues} distinct issues (${esc(i.created)})</span></h3>
      <div class="table-wrap"><table><tr><th>model</th><th>chunk</th><th>quality</th><th>findings</th><th>$/100KB</th><th>calibration $</th><th class="l">status</th></tr>` +
     i.rows.sort((a, b) => (b.quality ?? -1) - (a.quality ?? -1)).map((x) => `<tr><td>${withEffort(x.model, x.effort)}</td><td>${x.chunkKb ? x.chunkKb + 'KB' : '–'}</td><td><b>${f2(x.quality)}</b></td><td>${x.findings ?? '–'}</td><td>${usd(x.usdPer100Kb)}</td><td>${usd(x.calibrationUsd)}</td><td class="l">${esc(x.status)}</td></tr>`).join('') +
@@ -178,7 +178,7 @@
 
   // ---------- triage
   const tri = data.repos.flatMap((r) => r.triage.map((t) => ({ ...t, repo: r })));
-  $('triage-table').innerHTML = `<tr><th>repository</th><th>triage model</th><th>findings</th><th>real</th><th>false pos.</th><th>won't fix</th><th>unsure</th><th>severity changed</th><th>$/finding</th></tr>` +
+  if ($('triage-table')) $('triage-table').innerHTML = `<tr><th>repository</th><th>triage model</th><th>findings</th><th>real</th><th>false pos.</th><th>won't fix</th><th>unsure</th><th>severity changed</th><th>$/finding</th></tr>` +
     tri.map((t) => `<tr><td>${repoLink(t.repo)}</td><td>${t.model ? withEffort(t.model, t.effort) : '<span class="muted">not recorded</span>'}</td><td>${t.findings}</td><td>${t.verdicts.real || 0}</td><td>${t.verdicts.false_positive || 0}</td><td>${t.verdicts.wontfix || 0}</td><td>${t.verdicts.unsure || 0}</td><td>${t.severityChanged}</td><td>${t.usdPerFinding === null ? '–' : '$' + t.usdPerFinding.toFixed(3)}</td></tr>`).join('');
 
   // ---------- languages
@@ -230,15 +230,17 @@
   // ---------- goal picker
   const CX = 'codex:gpt-6.1-sol', OP = 'claude-opus-5-5';
   const GOALS = {
-    value: { title: 'Codex gpt-6.1-sol at <code>xhigh</code>', runs: [['codex-xhigh', CX, 'xhigh']], recall: '0.40', price: '$0.75', perBug: '$0.10',
+    value: { title: 'Codex gpt-6.1-sol at <code>xhigh</code>', runs: [['codex-xhigh', CX, 'xhigh']], recall: '0.40', price: '$0.75', perBug: '$0.10', time: '21.8',
       why: 'Highest recall per dollar in the effort study, and the largest share of issues on every repository where it ran next to a Claude model.' },
-    most: { title: 'Codex <code>xhigh</code> + Opus <code>max</code>, side by side', runs: [['codex-xhigh', CX, 'xhigh'], ['opus-max', OP, 'max']], recall: '0.66', price: '$6.64', perBug: '$0.46',
+    most: { title: 'Codex <code>xhigh</code> + Opus <code>max</code>, side by side', runs: [['codex-xhigh', CX, 'xhigh'], ['opus-max', OP, 'max']], recall: '0.66', price: '$6.64', perBug: '$0.46', time: '45.0',
       why: 'No single run found more than 41% of the confirmed issues; two different reviewers overlap little. Cheaper pair: Codex <code>high</code> + <code>xhigh</code>, recall 0.49 at $1.18/100KB.' },
-    cheap: { title: 'Codex gpt-6.1-sol at <code>medium</code>', runs: [['codex-medium', CX, 'medium']], recall: '0.23', price: '$0.30', perBug: '$0.07',
+    cheap: { title: 'Codex gpt-6.1-sol at <code>medium</code>', runs: [['codex-medium', CX, 'medium']], recall: '0.23', price: '$0.30', perBug: '$0.07', time: '11.7',
       why: 'The cheapest level that still finds a useful share; <code>low</code> saves $0.06/100KB but drops recall to 0.17. Precision is the same at every level.' },
-    claude: { title: 'Opus 5.5 at <code>medium</code>', runs: [['opus-medium', OP, 'medium']], recall: '0.15', price: '$1.01', perBug: '$0.28',
+    claude: { title: 'Opus 5.5 at <code>medium</code>', runs: [['opus-medium', OP, 'medium']], recall: '0.15', price: '$1.01', perBug: '$0.28', time: '2.7',
       why: 'Opus at low, medium and high found about the same; medium is the cheap middle. For depth use <code>max</code> (recall 0.35 at $5.89/100KB). Fable 5.2 scores higher on small samples but costs ~2× Opus.' },
   };
+  GOALS.quick = { title: 'Opus 5.5 at <code>low</code>', runs: [['opus-low', OP, 'low']], recall: '0.12', price: '$0.78', perBug: '$0.27', time: '1.6',
+    why: 'Opus reviewers finish 6–14× faster than Codex per 100KB: the 995KB effort-study scan took 4 minutes of wall clock at <code>low</code> against 53 for Codex <code>xhigh</code>. You trade recall for it (0.12 vs 0.40). Fastest Codex level: <code>low</code>, 10.2 reviewer-min/100KB, recall 0.17.' };
   const NOTES = {
     'Go|claude': 'On Go, Opus is the strongest Claude reviewer: 7/7 known gocql bugs and the top score (0.74) on the private Go sample. Sonnet came close there (0.68 at $0.31/100KB) but found only 4/7 known bugs.',
     'Go|value': 'On gocql Codex found share 0.76 vs Fable 0.43 on the same 1.4MB.',
@@ -261,18 +263,20 @@
     $('pick-out').innerHTML = `<div class="setup">
       <h3>${g.title}${ev.compared ? '<span class="badge strong">compared on this language</span>' : L === 'any' ? '' : '<span class="badge">general recommendation</span>'}</h3>
       <p>${g.why}</p>${note ? `<p>${note}</p>` : ''}
-      <div class="facts"><div><b>${g.recall}</b>recall in the effort study</div><div><b>${g.price}</b>per 100KB of code</div><div><b>${g.perBug}</b>per confirmed bug</div><div><b>0.94–0.99</b>precision after triage</div></div>
+      <div class="facts"><div><b>${g.recall}</b>recall in the effort study</div><div><b>${g.price}</b>per 100KB of code</div><div><b>${g.perBug}</b>per confirmed bug</div><div><b>${g.time}</b>reviewer min per 100KB</div><div><b>0.94–0.99</b>precision after triage</div></div>
       <p class="muted" style="margin:4px 0">Chunk size</p><ul>${chunks.map((c) => `<li>${c}</li>`).join('')}</ul>
       <pre><code>${esc(cmds)}</code></pre>
       <p class="muted" style="margin:4px 0">Evidence for ${L === 'any' ? 'all languages' : esc(L)}</p>
       <ul>${ev.items.map((x) => `<li>${x}</li>`).join('') || '<li class="muted">No scans in this language yet.</li>'}</ul></div>`;
   }
-  $('pick-lang').innerHTML = `<option value="any">Any language</option>` + langNames.map((l) => `<option>${esc(l)}</option>`).join('') + '<option value="other">Other</option>';
-  for (const id of ['pick-lang', 'pick-goal']) $(id).addEventListener('change', renderPick);
-  renderPick();
+  if ($('pick-lang')) {
+    $('pick-lang').innerHTML = `<option value="any">Any language</option>` + langNames.map((l) => `<option>${esc(l)}</option>`).join('') + '<option value="other">Other</option>';
+    for (const id of ['pick-lang', 'pick-goal']) $(id).addEventListener('change', renderPick);
+    renderPick();
+  }
 
   // ---------- configuration explorer
-  (function () {
+  if ($('ex-table')) (function () {
     const per100 = (v, s) => (v === null || v === undefined || !s.kb ? null : (v / s.kb) * 100);
     const sev = (o, k) => (o && o[k]) || 0;
     const fpRate = (s) => (s.confirmed + s.falsePositive ? s.falsePositive / (s.confirmed + s.falsePositive) : null);
@@ -368,11 +372,19 @@
       $('ex-cap').innerHTML = `<div class="legend">${[...new Set(pts.map((p) => p.s.model))].map((m) => modelInfo(m).name).filter((v, i, a) => a.indexOf(v) === i).map((n) => `<span>${sw(MODELS.find((x) => x[1] === n)?.[0] || n)}</span>`).join('')}</div>${esc(Y[1])} against ${esc(X[1])}, one dot per scan; labels are effort levels.`;
     }
     for (const id of ['ex-lang', 'ex-model', 'ex-effort', 'ex-view', 'ex-x', 'ex-y']) $(id).addEventListener('change', render);
+    // preference presets: sort key, direction, plot axes
+    const PRESETS = { cheap: ['usd100', true, 'usd100', 'confPer100'], most: ['confPer100', false, 'usd100', 'confPer100'],
+      value: ['usdConf', true, 'usdConf', 'confPer100'], quick: ['agent100', true, 'agent100', 'confPer100'] };
+    document.querySelectorAll('[data-preset]').forEach((btn) => btn.addEventListener('click', () => {
+      [sortK, asc, $('ex-x').value, $('ex-y').value] = PRESETS[btn.dataset.preset];
+      document.querySelectorAll('[data-preset]').forEach((b) => b.classList.toggle('on', b === btn));
+      render();
+    }));
     render();
   })();
 
   // ---------- models by language
-  $('lang-table').innerHTML = `<tr><th class="l">language</th><th class="l">repositories</th><th class="l">models run</th><th class="l">compared?</th><th>Codex $/100KB</th><th>Opus $/100KB</th><th>Opus precision</th><th class="l">Opus chunk</th></tr>` +
+  if ($('lang-table')) $('lang-table').innerHTML = `<tr><th class="l">language</th><th class="l">repositories</th><th class="l">models run</th><th class="l">compared?</th><th>Codex $/100KB</th><th>Opus $/100KB</th><th>Opus precision</th><th class="l">Opus chunk</th></tr>` +
     langNames.map((L) => {
       const rs = reposOf(L), ev = evidence(L);
       const scans = rs.flatMap((r) => r.scans).filter(atRecommended);
@@ -387,6 +399,7 @@
   (function () {
     const studies = data.repos.flatMap((r) => (r.efforts || []).map((e) => ({ ...e, repo: r })));
     const host = $('effort-body');
+    if (!host) return;
     if (!studies.length) { host.innerHTML = '<p class="muted">No effort study yet.</p>'; return; }
     const ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
     for (const st of studies) {
@@ -450,5 +463,41 @@
       }
       host.appendChild(sec);
     }
+  })();
+
+  // ---------- provider: OpenAI (Codex) vs Anthropic (Claude)
+  if ($('prov-sum')) (function () {
+    const isOpenAI = (m) => family(m) === 'Codex gpt-6.1-sol';
+    const PROV = [['OpenAI', 'Codex CLI', isOpenAI], ['Anthropic', 'Claude Code', (m) => !isOpenAI(m)]];
+    $('prov-sum').innerHTML = `<tr><th class="l">provider</th><th class="l">runner</th><th class="l">models</th><th>full scans</th><th>code reviewed</th><th>$/100KB</th><th>precision</th><th>confirmed</th><th>false pos.</th></tr>` +
+      PROV.map(([p, runner, is]) => {
+        const ss = allScans.filter((s) => is(s.model));
+        const priced = ss.filter(atRecommended);
+        const sum = (k) => ss.reduce((a, s) => a + (s[k] || 0), 0);
+        return `<tr><td class="l"><b>${p}</b></td><td class="l">${runner}</td><td class="l">${[...new Set(ss.map((s) => s.model))].map(sw).join(' &nbsp;')}</td><td>${ss.length}</td><td>${kb(sum('kb'))}</td>
+          <td>${range(priced.map((s) => s.usdPer100Kb), usd)}</td><td>${range(ss.map((s) => s.precision), f2)}</td><td>${sum('confirmed').toLocaleString()}</td><td>${sum('falsePositive')}</td></tr>`;
+      }).join('');
+    const rows = [];
+    for (const r of data.repos) {
+      for (const c of r.compares) {
+        const o = c.scans.find((x) => isOpenAI(x.model)), a = c.scans.find((x) => !isOpenAI(x.model));
+        if (!o || !a) continue;
+        const so = r.scans.find((s) => s.id === o.id && s.store === c.store) || {}, sa = r.scans.find((s) => s.id === a.id && s.store === c.store) || {};
+        rows.push(`<tr><td class="l">${repoLink(r)}</td><td class="l">${esc(langsOf(r).join(' + '))}</td><td class="l">full scans, same ${kb(c.basisKb)}</td>
+          <td class="l">${withEffort(o.model, so.effort || 'high')}</td><td><b>${f2(o.share)}</b></td><td>${usd(so.usdPer100Kb)}</td>
+          <td class="l">${withEffort(a.model, sa.effort)}</td><td><b>${f2(a.share)}</b></td><td>${usd(sa.usdPer100Kb)}</td></tr>`);
+      }
+      for (const e of r.efforts || []) {
+        const best = (is, eff) => e.rows.filter((x) => is(x.model) && (!eff || x.effort === eff)).sort((x, y) => y.confirmedRecall - x.confirmedRecall)[0];
+        for (const [label, o, a] of [['effort study, recommended levels', best(isOpenAI, 'xhigh'), best((m) => !isOpenAI(m), 'medium')], ['effort study, best of each', best(isOpenAI), best((m) => !isOpenAI(m))]]) {
+          if (!o || !a) continue;
+          rows.push(`<tr><td class="l">${repoLink(r)}</td><td class="l">${esc(langsOf(r).join(' + '))}</td><td class="l">${label}</td>
+            <td class="l">${withEffort(o.model, o.effort)}</td><td><b>${f2(o.confirmedRecall)}</b></td><td>${usd(o.usdPer100Kb)}</td>
+            <td class="l">${withEffort(a.model, a.effort)}</td><td><b>${f2(a.confirmedRecall)}</b></td><td>${usd(a.usdPer100Kb)}</td></tr>`);
+        }
+      }
+    }
+    $('prov-table').innerHTML = `<tr><th class="l" rowspan="2">repository</th><th class="l" rowspan="2">language</th><th class="l" rowspan="2">what was compared</th><th class="grp" colspan="3">OpenAI</th><th class="grp" colspan="3">Anthropic</th></tr>
+      <tr><th class="l">model</th><th>share</th><th>$/100KB</th><th class="l">model</th><th>share</th><th>$/100KB</th></tr>` + rows.join('');
   })();
 })();

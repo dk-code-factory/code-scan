@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pick an effort level</title>
+<meta name="description" content="Which reasoning effort to run code-scan reviewers at: Codex low to ultra and Opus low to max on one repository.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="site"><div class="in"><a class="brand" href="index.html">code-scan</a><a href="index.html">Overview</a><a href="compare.html">Compare configurations</a><a href="provider.html">OpenAI vs Anthropic</a><a href="model.html">Pick a model</a><a href="effort.html" aria-current="page">Pick effort</a><a href="method.html">Method & data</a></div></nav>
+<main>
+<header class="hero">
+  <h1>Pick an effort level</h1>
+  <p class="lede">Ten full scans of scylladb/nodejs-rs-driver on one commit, plan and chunk size: Codex <code>gpt-6.1-sol</code> at low → ultra and Opus 5.5 at low → max, all triaged by the same judge.</p>
+</header>
+<nav class="toc"><a href="#by-goal">By preference</a><a href="#findings">Findings</a><a href="#study">The study</a></nav>
+<section id="by-goal">
+<h2>By preference</h2>
+<div class="table-wrap"><table>
+<tr><th class="l">your goal</th><th class="l">Codex gpt-6.1-sol</th><th class="l">Opus 5.5</th></tr>
+<tr><td class="l"><b>cheapest</b></td><td class="l"><code>medium</code> · recall 0.23 · $0.30/100KB</td><td class="l"><code>low</code> · 0.12 · $0.78/100KB</td></tr>
+<tr><td class="l"><b>best value</b></td><td class="l"><b><code>xhigh</code></b> · 0.40 · $0.75/100KB</td><td class="l"><code>medium</code> · 0.15 · $1.01/100KB</td></tr>
+<tr><td class="l">most findings, one run</td><td class="l"><code>xhigh</code> (<code>max</code>: 0.41, +14% price)</td><td class="l"><code>max</code> · 0.35 · $5.89/100KB</td></tr>
+<tr><td class="l"><b>most findings</b></td><td class="l" colspan="2">two runs: Codex <code>xhigh</code> + Opus <code>max</code> · 0.66 · $6.64/100KB; cheaper: Codex <code>high</code> + <code>xhigh</code> · 0.49 · $1.18/100KB</td></tr>
+<tr><td class="l"><b>quickest</b></td><td class="l"><code>low</code> · 0.17 · 10.2 reviewer-min/100KB</td><td class="l"><code>low</code> · 0.12 · 1.6 reviewer-min/100KB</td></tr>
+<tr><td class="l">not worth it</td><td class="l"><code>ultra</code>: 0.36 for $0.95/100KB</td><td class="l"><code>high</code>: same recall as medium, +18% price</td></tr>
+</table></div>
+<p class="note">Recall = share of the 217 confirmed issues all ten runs found together on nodejs-rs-driver (TypeScript + Rust). Effort was measured on that one repository; the trend (recall up, precision flat) is what to expect elsewhere, not the exact numbers.</p>
+</section>
+<section id="findings">
+<h2>Findings</h2>
+<div class="rec"><strong>Codex: use <code>xhigh</code>. Use <code>high</code> on a tight budget. Skip <code>ultra</code>.</strong>
+<p>Recall rises steadily with effort up to <code>xhigh</code>: 0.17 at low ($2.41), 0.23 medium, 0.31 high ($4.28), 0.40 xhigh ($7.49).
+<code>max</code> adds almost nothing (0.41 for $8.54), and <code>ultra</code> found less (0.36) for more money ($9.44).
+<code>xhigh</code> costs $0.75 per 100KB and about $0.10 per confirmed bug.</p></div>
+
+<div class="rec"><strong>Opus: low, medium and high find about the same. <code>max</code> costs five times as much for twice the recall.</strong>
+<p>Opus scored 0.12, 0.15 and 0.17 at low, medium and high ($7.72 → $11.93), so if you scan with Opus, <code>low</code> or <code>medium</code> is enough.
+<code>max</code> doubled recall to 0.35 but cost $58.61 ($5.89/100KB, 1.4M output tokens), eight times Codex <code>xhigh</code>, which found more.</p></div>
+
+<div class="rec"><strong>Effort does not change the false-positive rate.</strong>
+<p>Precision stayed at 0.94–0.99 at every level of both models: higher effort finds more real bugs, not cleaner ones.
+Codex reports most issues as high and Opus rates them lower; after triage both land mostly on medium (see the severity table).</p></div>
+
+<div class="rec"><strong>A second run beats a bigger one.</strong>
+<p>No single run found more than 41% of the confirmed issues. Codex <code>high</code> + <code>xhigh</code> together reach 0.49 for $11.77,
+more than any single run at any price. Codex <code>xhigh</code> + Opus <code>max</code> reach 0.66, and all six Codex runs together reach 0.76 for $35.
+For critical code, run <code>xhigh</code> plus one different configuration rather than going to <code>max</code>/<code>ultra</code>.</p></div>
+
+<p class="note">One repository, one run per level, and a Codex judge (which may favour Codex findings), so treat differences under ~0.05 as noise.</p>
+</section>
+<section id="study">
+<h2>The study</h2>
+<div id="effort-body"></div>
+</section>
+
+<footer>code-scan · MIT · data snapshot <span class="generated">…</span> · <a href="data.json">data.json</a> ·
+  <a href="https://github.com/dk-code-factory/code-scan">GitHub</a> · <a href="https://github.com/dk-code-factory/code-scan#readme">README</a></footer>
+</main>
+<div class="tip" id="tip"></div>
+<script src="app.js"></script>
+</body>
+</html>
